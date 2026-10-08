@@ -6,7 +6,7 @@ import {
   StreamError, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
   playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, runtimeCheckQuery,
   saveProgress, sourceOf, titleProgress, writePlayerPrefs,
-  type Availability, type PlayRequest, type QualityCap, type ResolveParams, type StreamMeta, type StreamSource, restrictToSafeAudio,
+  type Availability, type PlayRequest, type QualityCap, type ResolveParams, type ResolvedSource, type StreamMeta, type StreamSource, restrictToSafeAudio,
 } from '../lib/stream';
 import {
   LATE_SUBTITLE_POLL_MS, LIVE_CUES_POLL_MS, SUBALT_RETRY_MAX, bestSubtitleOf, fetchCueFile, fetchSubtitles,
@@ -14,14 +14,17 @@ import {
   type AudioTrackInfo, type Cue, type SubtitleItem,
 } from '../lib/subtitles';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from './bufferHealth';
-import { holdDone, needsStartHold, type HoldKind } from './startBuffer';
-import { MseStream, mseAvailable, type MseFailure } from './mseStream';
+import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuffer';
+import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
 // The stream is a live fragmented MP4 requested at `t` that really starts at `offset`
 // (/seekpoint), so positions are offset + video.currentTime. Seeks outside the buffer
-// restart the stream. Quality switches (4K upgrade, sidegrade, step down) restart it too.
-// The stream reaches the element through MSE (mseStream.ts); webOS decodes no frame of it as `src`.
+// restart the stream. The stream reaches the element through MSE (mseStream.ts); webOS decodes
+// no frame of it as `src`. Audio the TV takes only on its own (E-AC-3 / Atmos) plays in split mode:
+// a video and an audio stream on the file's timeline (offset 0, no seekpoint needed).
+// Upgrades, sidegrades and audio track changes are spliced into the playing MediaSource without a
+// restart; a source switch with a restart (loading screen) only follows a real stall.
 
 type Origin = 'given' | 'saved' | 'cached' | 'fresh';
 type Timer = ReturnType<typeof setTimeout>;
@@ -71,6 +74,8 @@ export interface PlayerState {
   audioTracks: AudioTrackInfo[];
   audio: number;
   quality: { label: string; hdr: boolean; dv: boolean } | null;
+  /** The source plays from TorBox (debrid) */
+  debrid: boolean;
   /** "Atmos" / "7.1" / "5.1" for the selected track as it reaches the TV */
   audioBadge: string;
   subs: SubtitleItem[] | null;
@@ -88,7 +93,8 @@ const FIRST_START_MS = 30000;
 const MAX_RECOVERIES = 3;
 const LONG_STALL_MS = 8000;
 const STALL_WINDOW_MS = 60000;
-const MIN_STALL_MS = 1500;
+// A stall counts once playback waited this long (waiting, so under 1 s buffered); shorter ones are hiccups
+const MIN_STALL_MS = 3000;
 const MAX_DOWNGRADES = 2;
 const UPGRADE_POLL_MS = 15000;
 const UPGRADE_FOR_MS = 5 * 60 * 1000;
@@ -108,6 +114,25 @@ const RECOVERED_MS = 15000;
 const TOAST_MS = 4000;
 // Slower subtitle providers finish after the first answer: ask again (see loadSubtitles)
 const SUBTITLE_RETRY_MS = [8000, 20000];
+// Source switches without a stall are spliced into the playing MediaSource (mseStream.ts) about
+// SPLICE_LEAD_S ahead; a restart (loading screen) only follows a real stall. A sidegrade offer must
+// measure at least BETTER_RATIO (rate / bitrate) and more than the playing source.
+const SPLICE_LEAD_S = 10;
+const SPLICE_MIN_LEAD_S = 6;
+const AUDIO_SPLICE_LEAD_S = 3;
+const BETTER_RATIO = 1.3;
+const SPLIT_KEY = 'nfx-tv:split';
+
+type TrackInfo = AudioTrackInfo & { split_direct?: boolean };
+
+/** Debug override (localStorage nfx-tv:split = "always" | "never"); "" = by codec */
+function splitOverride(): string {
+  try {
+    return localStorage.getItem(SPLIT_KEY) || '';
+  } catch {
+    return '';
+  }
+}
 
 const releaseHeight = (q?: string) => (q === '2160p' ? 2160 : q === '1080p' ? 1080 : q === '720p' ? 720 : 0);
 const videoQuality = (w: number, h: number) =>
@@ -180,10 +205,22 @@ export class PlayerEngine {
   private mse: MseStream | null = null;
   // Set when a stream's codecs fit no SourceBuffer type: plain `src` from then on
   private noMse = !mseAvailable();
+  // Split mode: the server takes ?track= (probe `split`), and the TV refused no split stream yet
+  private serverSplit = false;
+  private splitBroken = false;
+  // Position asked for, shown until a split stream's data is in (its media time is the file's)
+  private startPos = 0;
+  private splitMode = false;
+  private splicing = false;
+  // Why the last splice did not happen; an upgrade of another codec family waits for the next seek
+  private spliceFail = '';
+  private deferredUpgrade: { src: StreamSource; toast: MessageKey } | null = null;
+  private realStallTimer?: Timer;
   private hasPlayed = false;
   private everPlayed = false;
   private recoveries = 0;
   private stallTimer?: Timer;
+  private stallArmed = false;
   private stallResetTimer?: Timer;
   private stall: { start: number; seek: boolean } | null = null;
   private stallTimes: number[] = [];
@@ -235,6 +272,7 @@ export class PlayerEngine {
       audio: 0,
       quality: null,
       audioBadge: '',
+      debrid: false,
       subs: null,
       subId: null,
       cues: [],
@@ -246,6 +284,8 @@ export class PlayerEngine {
     this.saveTimer = setInterval(() => { if (this.state.playing) this.persist(); }, 10000);
     this.healthTimer = setInterval(() => this.sampleHealth(), 1000);
     document.addEventListener('visibilitychange', this.onVisibility);
+    // Debug handle for DevTools (state, positions, the [restart] / [splice] logs)
+    (window as any).__nxPlayer = this;
     this.loadSeasons();
     this.startItem({});
   }
@@ -271,7 +311,13 @@ export class PlayerEngine {
 
   /** Exact playback position in the file (seconds). */
   positionNow(): number {
+    if (this.splitMode && this.video.buffered.length === 0) return this.startPos;
     return this.offset + (this.video.currentTime || 0);
+  }
+
+  /** The file the stream plays (trick play thumbnails). */
+  currentFile(): { hash: string; index: number } | null {
+    return this.hash ? { hash: this.hash, index: this.index } : null;
   }
 
   /** File time the subtitle overlay shows. */
@@ -355,7 +401,8 @@ export class PlayerEngine {
 
   // ---- source: probe, then stream ----
 
-  private async openSource(src: StreamSource, startAt: number, origin: Origin) {
+  private async openSource(src: StreamSource, startAt: number, origin: Origin, reason = 'open') {
+    const prev = this.source && this.source.hash.toLowerCase() !== src.hash.toLowerCase() ? { src: this.source, origin: this.origin, duration: this.state.duration } : null;
     this.stopStream();
     const session = ++this.session;
     this.source = src;
@@ -377,7 +424,7 @@ export class PlayerEngine {
     this.set({
       phase: 'ready', error: null, unreleased: null, fatal: null, ended: false, buffering: true, reconnecting: false,
       status: 'player.connecting', duration: 0, position: startAt, audioTracks: [], audio: 0,
-      quality: qualityOf(null, src), audioBadge: '', subs: null, subId: null, cues: [],
+      quality: qualityOf(null, src), audioBadge: '', subs: null, subId: null, cues: [], debrid: !!src.debrid,
     });
 
     // TorrServer may have dropped a saved torrent since
@@ -408,7 +455,17 @@ export class PlayerEngine {
       return;
     }
     const duration = Number(probe?.duration) || 0;
-    const tracks: AudioTrackInfo[] = Array.isArray(probe?.audio_tracks) ? probe.audio_tracks : [];
+    const tracks: TrackInfo[] = Array.isArray(probe?.audio_tracks) ? probe.audio_tracks : [];
+    this.serverSplit = probe?.split === true;
+    // A switch never starts over: a file that does not reach the position (a pack's wrong file, another
+    // cut) sends the player back to the source it came from (its torrent is kept 60 s after its stream)
+    if (reason !== 'open' && reason !== 'revert' && prev && startAt > 30 && duration > 0 &&
+        (startAt >= duration - 10 || (prev.duration > 0 && Math.abs(duration - prev.duration) > 60))) {
+      console.info(`[restart] guard: ${h.slice(0, 8)}:${src.index} lasts ${duration.toFixed(0)} s (was ${prev.duration.toFixed(0)}), position ${startAt.toFixed(0)}: back to ${prev.src.hash.slice(0, 8)}`);
+      releaseTorrents([h]);
+      this.openSource(prev.src, startAt, prev.origin, 'revert');
+      return;
+    }
     // Resumes (Continue Watching) carry no original language; the default track needs it
     if (!this.meta.original_language && tracks.length > 1) {
       const m = this.meta;
@@ -430,7 +487,7 @@ export class PlayerEngine {
     this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), status: 'player.buffering' });
     this.videoHeight = video ? videoQuality(video.width, video.height) : 0;
     this.loadSubtitles(session);
-    this.restartAt(startAt > 0 && (duration <= 0 || startAt < duration - 10) ? startAt : 0);
+    this.restartAt(startAt > 0 && (duration <= 0 || startAt < duration - 10) ? startAt : 0, reason);
     this.scheduleUpgrade(session);
     if (src.starving) this.scheduleSidegrade(session, startAt);
   }
@@ -438,42 +495,77 @@ export class PlayerEngine {
   private videoHeight = 0;
 
   private playUrl(t: number): string {
-    return `${base()}/api/torrent-stream/play?hash=${this.hash}&index=${this.index}&t=${t.toFixed(3)}&audio=${this.state.audio}${capsQuery()}`;
+    return this.urlOf(this.hash, this.index, t, this.state.audio);
   }
 
-  /** Restarts the stream at `target`; /seekpoint tells where it really starts (copied video starts on a keyframe). */
-  private restartAt(target: number) {
+  private urlOf(hash: string, index: number, t: number, audio: number, track = ''): string {
+    const tr = track ? `&track=${track}` : '';
+    return `${base()}/api/torrent-stream/play?hash=${hash}&index=${index}&t=${t.toFixed(3)}&audio=${audio}${capsQuery()}${tr}`;
+  }
+
+  /** The streams of one source at t: split (video + audio) or muxed */
+  private streamUrls(hash: string, index: number, t: number, audio: number, split: boolean): StreamUrls {
+    return split
+      ? { video: this.urlOf(hash, index, t, audio, 'video'), audio: this.urlOf(hash, index, t, audio, 'audio') }
+      : { muxed: this.urlOf(hash, index, t, audio) };
+  }
+
+  /**
+   * Split mode for audio track n of the probed tracks: the server takes ?track= and the TV plays the
+   * track's codec only on its own (E-AC-3 / AC-3), which the server then copies. `sticky`: a split
+   * stream stays split (any codec works in an audio-only SourceBuffer), so a splice keeps its layout.
+   */
+  private wantsSplit(tracks: TrackInfo[], n: number, sticky = false): boolean {
+    if (!this.serverSplit || this.noMse || this.splitBroken) return false;
+    const o = splitOverride();
+    if (o === 'never') return false;
+    if (o === 'always' || (sticky && this.mse?.split)) return true;
+    const tr = tracks.find(t => t.index === n);
+    return !!tr && !tr.direct && !!tr.split_direct && playbackCaps().splitAudio.indexOf(tr.codec) >= 0;
+  }
+
+  /** Restarts the stream at `target`; /seekpoint tells where a muxed one really starts (copied video starts on a keyframe). */
+  private restartAt(target: number, reason = 'restart') {
     if (!this.hash) return;
     this.health.reset();
     const seq = ++this.seekSeq;
     this.seekCtrl?.abort();
     this.seekCtrl = null;
     this.beginStall(true);
-    clearTimeout(this.stallTimer);
+    this.disarmStall();
+    clearTimeout(this.realStallTimer);
     const v = this.video;
     this.detach();
-    this.offset = target;
-    this.exact = target <= 0;
+    const split = this.wantsSplit(this.state.audioTracks, this.state.audio);
+    console.info(`[restart] ${reason} t=${target.toFixed(1)} ${this.hash.slice(0, 8)}:${this.index} ${split ? 'split' : this.noMse ? 'src' : 'muxed'}`);
+    // Split streams carry the file's timestamps: position = currentTime
+    this.splitMode = split;
+    this.offset = split ? 0 : target;
+    this.startPos = target;
+    this.exact = split || target <= 0;
     this.hasPlayed = false;
     this.set({ buffering: true, ended: false, position: target });
-    const url = this.playUrl(target);
     if (this.noMse) {
-      v.src = url;
+      v.src = this.playUrl(target);
     } else {
-      this.mse = new MseStream(v, url, {
+      this.mse = new MseStream(v, this.streamUrls(this.hash, this.index, target, this.state.audio, split), {
         onFail: e => this.onStreamFail(seq, e),
         onUnsupported: mimes => {
           if (seq !== this.seekSeq || this.destroyed) return;
-          // The plain src path shows no picture on webOS: ask for converted audio instead
-          if (restrictToSafeAudio()) {
+          if (split) {
+            // The TV refused a split SourceBuffer: muxed streams with converted audio from now on
+            console.warn('[player] no SourceBuffer type for', mimes.join(' | '), '- leaving split mode');
+            this.splitBroken = true;
+          } else if (restrictToSafeAudio()) {
+            // The plain src path shows no picture on webOS: ask for converted audio instead
             console.warn('[player] no SourceBuffer type for', mimes.join(' | '), '- retrying with AAC / Opus audio');
           } else {
             console.warn('[player] no SourceBuffer type for', mimes.join(' | '), '- playing the stream as src');
             this.noMse = true;
           }
-          this.restartAt(target);
+          this.restartAt(target, 'codec');
         },
-      });
+      }, split ? target : 0);
     }
     // A borderline or unmeasured swarm starts only with a larger buffer
     this.clearHold();
@@ -484,7 +576,7 @@ export class PlayerEngine {
     }
     else v.play().catch(e => { if (e?.name !== 'AbortError') this.set({ playing: false }); });
     this.armStall();
-    if (target <= 0) return;
+    if (target <= 0 || split) return;
 
     const ctrl = new AbortController();
     this.seekCtrl = ctrl;
@@ -503,7 +595,7 @@ export class PlayerEngine {
 
   private stopStream() {
     this.clearHold();
-    clearTimeout(this.stallTimer);
+    this.disarmStall();
     clearTimeout(this.stallResetTimer);
     clearTimeout(this.longStallTimer);
     this.pollTimers.forEach(t => clearTimeout(t));
@@ -551,7 +643,7 @@ export class PlayerEngine {
       this.recover();
       return;
     }
-    clearTimeout(this.stallTimer);
+    this.disarmStall();
     if (!this.sourceFailed(this.positionNow(), true)) this.set({ fatal: { key: 'player.playbackFailed' } });
   }
 
@@ -566,20 +658,27 @@ export class PlayerEngine {
       this.persist();
     });
     v.addEventListener('waiting', () => {
-      // Stalling with a faster source in hand: switch now instead of waiting the stall out
-      if (this.pendingSide && this.hasPlayed && !v.paused) {
-        this.usePending();
-        return;
+      // A real stall (still waiting with under 1 s buffered after MIN_STALL_MS) with a faster source
+      // in hand: switch to it instead of waiting the stall out
+      clearTimeout(this.realStallTimer);
+      if (this.hasPlayed && !v.seeking) {
+        this.realStallTimer = setTimeout(() => {
+          const end = bufferedEnd(v.buffered, v.currentTime);
+          const ahead = end >= 0 ? end - v.currentTime : 0;
+          if (this.state.buffering && ahead < 1 && this.hold?.kind !== 'start' && this.pendingSide) this.usePending('stall');
+        }, MIN_STALL_MS);
       }
       this.set({ buffering: true });
-      this.armStall();
+      // Not re-armed by every waiting: a stall hold ends (pause, play, waiting) every few seconds, which
+      // kept the watchdog from ever restarting a stream that delivers nothing
+      if (!this.stallArmed) this.armStall();
       if (this.hasPlayed) this.beginStall(false);
       // Resume only with a few seconds buffered, not at the first frame
       if (this.hasPlayed && !v.seeking && !this.hold) this.startHold('stall');
     });
     v.addEventListener('playing', () => {
       this.set({ buffering: false, reconnecting: false });
-      clearTimeout(this.stallTimer);
+      this.disarmStall();
       this.endStall();
       this.hasPlayed = true;
       this.everPlayed = true;
@@ -609,7 +708,7 @@ export class PlayerEngine {
       this.recover();
       return;
     }
-    clearTimeout(this.stallTimer);
+    this.disarmStall();
     this.set({ playing: false, ended: true });
     this.persist({ finished: true });
     if (this.state.next && readPlayerPrefs(this.pid).autoplayNext !== false) this.startCountdown();
@@ -621,14 +720,21 @@ export class PlayerEngine {
       this.recover();
       return;
     }
-    clearTimeout(this.stallTimer);
+    this.disarmStall();
     if (!this.sourceFailed(this.positionNow(), true)) this.set({ fatal: { key: 'player.playbackFailed' } });
+  }
+
+  private disarmStall() {
+    clearTimeout(this.stallTimer);
+    this.stallArmed = false;
   }
 
   private armStall() {
     clearTimeout(this.stallTimer);
+    this.stallArmed = true;
     const ms = (this.hasPlayed ? STALL_MS : FIRST_START_MS) * (1 + this.recoveries);
     this.stallTimer = setTimeout(() => {
+      this.stallArmed = false;
       // A paused player is not stalled (a buffer hold is)
       if (!this.video.paused || this.hold) this.recover();
     }, ms);
@@ -680,14 +786,14 @@ export class PlayerEngine {
   }
 
   private recover() {
-    clearTimeout(this.stallTimer);
+    this.disarmStall();
     if (this.recoveries >= MAX_RECOVERIES) {
       this.set({ reconnecting: false, fatal: { key: 'player.connectionLost' } });
       return;
     }
     this.recoveries++;
     this.set({ reconnecting: true });
-    this.restartAt(this.positionNow());
+    this.restartAt(this.positionNow(), 'stall');
   }
 
   // ---- adaptive quality (sidegrade first, then a lower cap) ----
@@ -712,43 +818,69 @@ export class PlayerEngine {
     if (this.stallTimes.length >= 2) this.struggling();
   }
 
+  /** Real stalls (two within a minute, or one over LONG_STALL_MS): a faster source, else a lower resolution */
   private struggling() {
     this.stallTimes = [];
     if (this.pendingSide) {
-      this.usePending();
+      this.usePending('stall');
       return;
     }
     const quality = this.videoHeight;
-    this.trySidegrade(quality).then(switched => { if (!switched) this.stepDown(quality); });
+    this.trySidegrade(quality, 'restart').then(switched => { if (!switched) this.stepDown(quality); });
   }
 
-  /** Another source at the current position (restarts the stream). */
-  private switchTo(src: StreamSource, toast: MessageKey) {
+  /** Another source at the current position (restarts the stream: only after a real stall). */
+  private switchTo(src: StreamSource, toast: MessageKey, reason: string) {
     this.lastSwitch = Date.now();
-    this.openSource(src, this.positionNow(), 'fresh');
+    // The shown position when the element has none (between streams)
+    const pos = this.positionNow() || this.state.position;
+    this.openSource(src, pos, 'fresh', reason);
     this.toast(toast);
   }
 
-  private async trySidegrade(quality: number): Promise<boolean> {
+  /** A sidegrade offer measured clearly faster than the playing source */
+  private betterOffer(up: ResolvedSource): boolean {
+    const r = healthRatio(up.health);
+    if (r === undefined || r < BETTER_RATIO) return false;
+    const cur = this.source?.ratio;
+    return cur === undefined || r > cur;
+  }
+
+  /** Asks for a faster source: `restart` switches at once (stalled or not started yet), `splice` seamlessly. */
+  private async trySidegrade(quality: number, mode: 'restart' | 'splice'): Promise<boolean> {
     const src = this.source;
-    if (!src || this.busy || Date.now() - this.lastSidegrade < SIDEGRADE_EVERY_MS) return false;
+    if (!src || this.busy || this.splicing || Date.now() - this.lastSidegrade < SIDEGRADE_EVERY_MS) return false;
     const session = this.session;
     this.busy = true;
+    let offer: StreamSource | null = null;
     try {
       const up = await checkSidegrade(paramsOf(this.meta, this.cap), src.hash, quality || releaseHeight(src.quality), undefined,
         { state: 'critical', avoid: Array.from(this.slow) });
       if (!up || up.hash.toLowerCase() === src.hash.toLowerCase() || this.stale(session)) return false;
       this.lastSidegrade = Date.now();
-      if (this.slow.has(up.hash.toLowerCase())) {
+      if (this.slow.has(up.hash.toLowerCase()) || !this.betterOffer(up)) {
+        console.info(`[sidegrade] offer ${up.hash.slice(0, 8)} not better (ratio ${healthRatio(up.health)?.toFixed(2)})`);
         releaseTorrents([up.hash.toLowerCase()]);
         return false;
       }
-      this.slow.add(this.current);
-      this.switchTo(sourceOf(up), 'player.switchedFaster');
-      return true;
+      offer = sourceOf(up);
+      if (mode === 'restart') {
+        this.slow.add(this.current);
+        this.switchTo(offer, 'player.switchedFaster', 'sidegrade');
+        return true;
+      }
     } finally {
       this.busy = false;
     }
+    const from = this.current;
+    if (await this.spliceTo(offer, 'sidegrade', 'player.switchedFaster')) {
+      this.slow.add(from);
+      return true;
+    }
+    // Held for a real stall
+    if (!this.stale(session) && !this.pendingSide) this.pendingSide = offer;
+    else releaseTorrents([offer.hash.toLowerCase()]);
+    return false;
   }
 
   // ---- buffer health: proactive sidegrade ----
@@ -765,18 +897,20 @@ export class PlayerEngine {
       at: Date.now(), pos, end: fileEnd,
       fetching: this.fetching(),
       atEnd: s.duration > 0 && fileEnd >= s.duration - 1,
+      cap: this.mse ? this.mse.aheadCap() : undefined,
     }));
   }
 
   private onHealth(h: BufferVerdict) {
     const pending = this.pendingSide;
     if (pending) {
-      if (h.state === 'critical') {
-        this.usePending();
-      } else if (h.healthyMs >= RECOVERED_MS) {
+      if (h.healthyMs >= RECOVERED_MS) {
         // Recovered: the held source is not needed
         this.pendingSide = null;
         releaseTorrents([pending.hash.toLowerCase()]);
+      } else if (h.state !== 'healthy') {
+        // Seamless while the buffer lasts; a restart only follows a real stall
+        this.splicePending();
       }
       return;
     }
@@ -790,10 +924,11 @@ export class PlayerEngine {
     if (now < poll.next) return;
     poll.next = now + poll.delay;
     poll.delay = Math.min(PROACTIVE_POLL_MAX_MS, poll.delay * 1.5);
+    console.info(`[health] ${h.state} ahead=${h.ahead.toFixed(1)} growth=${h.growth === null ? '-' : h.growth.toFixed(2)}`);
     this.askSidegrade(h.state === 'critical' ? 'critical' : 'draining');
   }
 
-  /** The buffer drains: ask for a faster source and hold it for the moment it is needed. */
+  /** The buffer drains: ask for a faster source; only a clearly faster one is held (and spliced in). */
   private async askSidegrade(state: 'draining' | 'critical') {
     const src = this.source;
     const now = Date.now();
@@ -808,7 +943,8 @@ export class PlayerEngine {
       const h = up.hash.toLowerCase();
       if (h === src.hash.toLowerCase()) return;
       this.lastSidegrade = Date.now();
-      if (this.stale(session) || this.slow.has(h)) {
+      if (this.stale(session) || this.slow.has(h) || !this.betterOffer(up)) {
+        console.info(`[sidegrade] offer ${h.slice(0, 8)} not better (ratio ${healthRatio(up.health)?.toFixed(2)})`);
         releaseTorrents([h]);
         return;
       }
@@ -818,12 +954,24 @@ export class PlayerEngine {
     }
   }
 
-  private usePending() {
+  private splicePending() {
     const next = this.pendingSide;
-    if (!next) return;
+    if (!next || this.splicing) return;
+    const from = this.current;
+    this.spliceTo(next, 'sidegrade', 'player.switchedFaster').then(ok => {
+      if (!ok) return;
+      if (this.pendingSide === next) this.pendingSide = null;
+      this.slow.add(from);
+    });
+  }
+
+  /** Switches to the held faster source with a restart (after a real stall). */
+  private usePending(reason: string) {
+    const next = this.pendingSide;
+    if (!next || this.splicing) return;
     this.pendingSide = null;
     this.slow.add(this.current);
-    this.switchTo(next, 'player.switchedFaster');
+    this.switchTo(next, 'player.switchedFaster', reason);
   }
 
   private stepDown(quality: number) {
@@ -841,24 +989,27 @@ export class PlayerEngine {
         if (r.health && !r.health.keeps_up) return;
         if (r.hash.toLowerCase() === src.hash.toLowerCase() && r.index === src.index) return;
         this.downgrades++;
-        this.switchTo(sourceOf(r), 'player.switchedHd');
+        this.switchTo(sourceOf(r), 'player.switchedHd', 'stepdown');
       })
       .catch(() => {})
       .then(() => { this.busy = false; });
   }
 
-  /** A source the resolve measured as starving: look for a faster one early (also before the first frame when starting at 0). */
+  /**
+   * A source the resolve measured as starving: look for a faster one early (also before the first frame
+   * when starting at 0). Before the first frame it restarts on it; once playing it is spliced in.
+   */
   private scheduleSidegrade(session: number, startAt: number) {
     const started = Date.now();
     const poll = async () => {
       if (this.stale(session) || Date.now() - started > SIDEGRADE_FOR_MS) return;
-      if ((this.positionNow() > 0 || !startAt) && await this.trySidegrade(this.videoHeight)) return;
+      if ((this.positionNow() > 0 || !startAt) && await this.trySidegrade(this.videoHeight, this.everPlayed ? 'splice' : 'restart')) return;
       if (!this.stale(session)) this.pollTimers.push(setTimeout(poll, SIDEGRADE_POLL_MS));
     };
     this.pollTimers.push(setTimeout(poll, SIDEGRADE_FIRST_MS));
   }
 
-  /** Start low, switch up: below 4K on an HEVC TV, ask for the warmed 4K source; switch at the current position. */
+  /** Start low, switch up: below 4K on an HEVC TV, ask for the warmed 4K source and splice it in. */
   private scheduleUpgrade(session: number) {
     const src = this.source;
     const steppedDown = () => this.downgrades > 0 || !!this.cap || this.triedCaps.length > 0;
@@ -872,14 +1023,201 @@ export class PlayerEngine {
         const up = await checkUpgrade(paramsOf(this.meta), src.hash, quality);
         if (this.stale(session)) return;
         if (up && releaseHeight(up.quality) > quality && !this.upgraded && !steppedDown()) {
-          this.upgraded = true;
-          this.switchTo(sourceOf(up), up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher');
-          return;
+          // Seamless or not at all: a restart would show the loading screen while playback is fine
+          if (await this.spliceTo(sourceOf(up), 'upgrade', up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher')) {
+            this.upgraded = true;
+            return;
+          }
+          if (this.spliceFail === 'unsupported' && !this.stale(session)) {
+            // Another codec family cannot be spliced on this TV: taken at the next seek (a restart anyway)
+            console.info(`[upgrade] ${up.hash.slice(0, 8)} waits for the next seek (codec change)`);
+            this.upgraded = true;
+            this.deferredUpgrade = { src: sourceOf(up), toast: up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher' };
+            return;
+          }
+          if (this.stale(session)) return;
         }
       }
       this.pollTimers.push(setTimeout(poll, UPGRADE_POLL_MS));
     };
     this.pollTimers.push(setTimeout(poll, UPGRADE_POLL_MS));
+  }
+
+  // ---- seamless switch (splice into the playing MediaSource) ----
+
+  /** The track of `tracks` closest to the playing one (same language, same channels first) */
+  private matchingTrack(tracks: TrackInfo[]): number {
+    const cur = this.state.audioTracks.find(t => t.index === this.state.audio);
+    const lang = normLang(cur?.language);
+    const same = lang ? tracks.filter(t => normLang(t.language) === lang) : [];
+    const pick = same.find(t => t.channels === cur?.channels) || same[0];
+    if (pick) return pick.index;
+    return pickAudioTrack(tracks, { profileLang: this.locale, originalLang: this.meta.original_language, prefLang: readPlayerPrefs(this.pid).audioLang });
+  }
+
+  /** Where a stream of this file asked for at t starts (the keyframe before t for copied video); NaN when unknown */
+  private async seekPointOf(hash: string, index: number, t: number, audio: number, split: boolean): Promise<number> {
+    const q = `hash=${hash}&index=${index}&t=${t.toFixed(3)}&audio=${audio}${capsQuery()}${split ? '&track=video' : ''}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const d = await getJson(`/api/torrent-stream/seekpoint?${q}`, { signal: ctrl.signal });
+      // Without exact: the stream may start elsewhere, and a muxed splice needs its start exactly
+      return typeof d?.t === 'number' && d.t >= 0 && d.t <= t + 1 && (d.exact !== false) ? d.t : NaN;
+    } catch {
+      return NaN;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Splices the streams of hash:index (audio track n) into the playing MediaSource about `lead` s
+   * ahead, inside what is buffered. The layout stays (split stays split, muxed stays muxed);
+   * `audioOnly` replaces only the audio of a split stream. Returns the media time it took over at.
+   */
+  private async spliceStreams(mse: MseStream, hash: string, index: number, n: number, lead: number, minLead: number,
+    readyS: number, audioOnly: boolean, reason: string): Promise<number | null> {
+    this.spliceFail = '';
+    const v = this.video;
+    const now = this.positionNow();
+    const end = bufferedEnd(v.buffered, v.currentTime);
+    const latest = (end >= 0 ? this.offset + end : now) - 1;
+    if (latest < now + minLead) {
+      console.info(`[splice] ${reason}: only ${(latest + 1 - now).toFixed(1)} s buffered`);
+      return null;
+    }
+    const split = mse.split;
+    let target = Math.min(now + lead, latest);
+    let t0 = target;
+    for (let i = 0; i < 3; i++) {
+      t0 = await this.seekPointOf(hash, index, target, n, split);
+      if (this.mse !== mse) return null;
+      if (isNaN(t0)) {
+        console.info(`[splice] ${reason}: no seek point for ${hash.slice(0, 8)}`);
+        return null;
+      }
+      if (t0 >= this.positionNow() + minLead || target >= latest) break;
+      target = Math.min(latest, target + Math.max(4, this.positionNow() + minLead - t0 + 1));
+    }
+    if (t0 < this.positionNow() + minLead) {
+      console.info(`[splice] ${reason}: no keyframe in reach (${t0.toFixed(2)})`);
+      return null;
+    }
+    const urls: StreamUrls = audioOnly ? { audio: this.urlOf(hash, index, target, n, 'audio') } : this.streamUrls(hash, index, target, n, split);
+    const tsOffset = split ? 0 : t0 - this.offset;
+    console.info(`[splice] ${reason} prepare ${hash.slice(0, 8)}:${index} audio=${n} at ${t0.toFixed(2)} (now ${this.positionNow().toFixed(2)}, ${split ? 'split' : 'muxed'})`);
+    const res = await mse.splice(urls, tsOffset, t0 - this.offset, readyS);
+    if (!res.ok) {
+      console.info(`[splice] ${reason} dropped: ${res.reason}`);
+      this.spliceFail = res.reason;
+      return null;
+    }
+    console.info(`[splice] ${reason} committed at ${(res.cut + this.offset).toFixed(2)} (now ${this.positionNow().toFixed(2)}) ${mse.mime}`);
+    return res.cut;
+  }
+
+  /** Switches to src without a restart; false when it could not (nothing changed then). */
+  private async spliceTo(src: StreamSource, reason: string, toast: MessageKey): Promise<boolean> {
+    const mse = this.mse;
+    this.spliceFail = '';
+    if (!mse || this.splicing || mse.splicing || this.state.phase !== 'ready' || !this.hasPlayed || !this.exact) return false;
+    this.splicing = true;
+    const session = this.session;
+    const h = src.hash.toLowerCase();
+    const live = () => !this.stale(session) && this.mse === mse;
+    try {
+      if (src.magnet) {
+        try {
+          await request(`/api/torrent-stream/files?magnet=${encodeURIComponent(src.magnet)}`);
+        } catch {
+          /* the probe reports real failures */
+        }
+        if (!live()) return false;
+      }
+      let probe: any;
+      try {
+        probe = await getJson(`/api/torrent-stream/probe?hash=${h}&index=${src.index}${capsQuery()}${runtimeCheckQuery(this.meta)}`);
+      } catch {
+        return false;
+      }
+      if (!live()) return false;
+      const duration = Number(probe?.duration) || 0;
+      if (probe?.duration_mismatch || duration <= 0 || (this.state.duration > 0 && Math.abs(duration - this.state.duration) > 3)) {
+        console.info(`[splice] ${reason}: ${h.slice(0, 8)} has another length (${duration.toFixed(0)} s)`);
+        return false;
+      }
+      const tracks: TrackInfo[] = Array.isArray(probe?.audio_tracks) ? probe.audio_tracks : [];
+      if (mse.split && probe?.split !== true) return false;
+      const audio = this.matchingTrack(tracks);
+      const cut = await this.spliceStreams(mse, h, src.index, audio, SPLICE_LEAD_S, SPLICE_MIN_LEAD_S, 4, false, reason);
+      if (cut === null || !live()) return false;
+      // The new source plays from `cut` on
+      const old = this.current;
+      const next = ++this.session;
+      this.source = src;
+      this.origin = 'fresh';
+      this.hash = h;
+      this.index = src.index;
+      this.current = h;
+      this.played.add(h);
+      this.lastSwitch = Date.now();
+      this.serverSplit = probe?.split === true;
+      const video: VideoInfo | null = probe?.width > 0
+        ? { codec: probe.video_codec || '', width: probe.width, height: probe.height || 0, hdr: !!probe.hdr, dolbyVision: Number(probe.dolby_vision) || 0, direct: !!probe.direct }
+        : null;
+      this.videoHeight = video ? videoQuality(video.width, video.height) : 0;
+      this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid });
+      this.health.reset();
+      this.loadSubtitles(next);
+      this.scheduleUpgrade(next);
+      this.watchSplice(cut, old, toast, reason);
+      return true;
+    } finally {
+      this.splicing = false;
+    }
+  }
+
+  /** The audio track changes without a restart; false when it could not. */
+  private async spliceAudio(n: number): Promise<boolean> {
+    const mse = this.mse;
+    if (!mse || this.splicing || mse.splicing || this.state.phase !== 'ready' || !this.hasPlayed || !this.exact) return false;
+    // A muxed stream stays muxed: a track the TV only plays on its own needs a restart in split mode
+    if (!mse.split && this.wantsSplit(this.state.audioTracks, n)) return false;
+    this.splicing = true;
+    try {
+      const cut = mse.split
+        ? await this.spliceStreams(mse, this.hash, this.index, n, AUDIO_SPLICE_LEAD_S, 2, 2, true, 'audio')
+        : await this.spliceStreams(mse, this.hash, this.index, n, 5, 3, 2, false, 'audio');
+      if (cut === null || this.mse !== mse || this.state.audio !== n) return false;
+      this.watchSplice(cut, '', '', 'audio');
+      return true;
+    } finally {
+      this.splicing = false;
+    }
+  }
+
+  /** Done once playback passed the cut with frames advancing: the old torrent can go. */
+  private watchSplice(cut: number, old: string, toast: MessageKey | '', reason: string) {
+    const v = this.video;
+    const frames = () => (v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : 0);
+    const frames0 = frames();
+    const started = Date.now();
+    const session = this.session;
+    const check = () => {
+      const passed = v.currentTime >= cut + 0.5 && frames() > frames0;
+      if (!passed && !this.stale(session) && Date.now() - started < 60000) {
+        this.pollTimers.push(setTimeout(check, 250));
+        return;
+      }
+      console.info(`[splice] ${reason} ${passed ? 'done' : 'not reached'} at ${this.positionNow().toFixed(2)} ${v.videoWidth}x${v.videoHeight} frames=${frames() - frames0}`);
+      if (old && old !== this.current) {
+        releaseTorrents([old]);
+        this.played.delete(old);
+      }
+      if (toast && passed && !this.stale(session)) this.toast(toast);
+    };
+    check();
   }
 
   // ---- controls ----
@@ -925,22 +1263,34 @@ export class PlayerEngine {
         return;
       }
     }
-    this.restartAt(target);
+    const up = this.deferredUpgrade;
+    if (up) {
+      this.deferredUpgrade = null;
+      this.lastSwitch = Date.now();
+      this.openSource(up.src, target, 'fresh', 'upgrade');
+      this.toast(up.toast);
+      return;
+    }
+    this.restartAt(target, 'seek');
   }
 
-  // Atmos only when the track is copied (the server re-encodes AC-3 / E-AC-3 to 5.1 for now)
-  private audioBadge(tracks: AudioTrackInfo[], index: number): string {
+  // Atmos only when the track is copied (muxed, or on its own in split mode); converted audio is 5.1 at most
+  private audioBadge(tracks: TrackInfo[], index: number): string {
     const track = tracks.find(t => t.index === index);
     if (!track) return '';
-    if (track.direct && this.source?.format?.atmos && /e-?ac-?3|truehd/i.test(track.codec)) return 'Atmos';
-    if (track.channels >= 8) return track.direct ? '7.1' : '5.1';
+    const direct = track.direct || (!!track.split_direct && this.wantsSplit(tracks, index, true));
+    if (direct && this.source?.format?.atmos && /e-?ac-?3|truehd/i.test(track.codec)) return 'Atmos';
+    if (track.channels >= 8) return direct ? '7.1' : '5.1';
     return track.channels >= 6 ? '5.1' : '';
   }
 
   setAudio(n: number) {
     if (n === this.state.audio) return;
     this.set({ audio: n, audioBadge: this.audioBadge(this.state.audioTracks, n) });
-    this.restartAt(this.positionNow());
+    // Spliced in a few seconds ahead; a restart when that cannot work
+    this.spliceAudio(n).then(ok => {
+      if (!ok && this.state.audio === n && !this.destroyed) this.restartAt(this.positionNow(), 'audio');
+    });
     const lang = normLang(this.state.audioTracks.find(a => a.index === n)?.language);
     const keepOriginal = readPlayerPrefs(this.pid).audioLang === 'original' && lang === normLang(this.meta.original_language);
     if (lang && !keepOriginal) writePlayerPrefs(this.pid, { audioLang: lang });
@@ -962,10 +1312,32 @@ export class PlayerEngine {
     // A live embedded track (big file) is read from the playing position on: ask again while it grows
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
       if (this.stale(session) || this.state.subId !== id) return;
+      if (f.cues.length === 0 && !f.partial) {
+        // Nothing came (an OpenSubtitles quota answers 429): the next one of the language, another provider first
+        const alt = this.subtitleFallback(id);
+        console.info(`[subtitles] ${id.slice(0, 16)} gave no cues${alt ? `, trying ${alt.slice(0, 16)}` : ''}`);
+        if (alt) this.applySubtitle(alt);
+        return;
+      }
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
       if (f.partial) this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
     });
     load();
+  }
+
+  private subFailed = new Set<string>();
+
+  /** Another subtitle of the failed one's language (not one that failed, another provider first) */
+  private subtitleFallback(failed: string): string | null {
+    this.subFailed.add(failed);
+    const items = this.state.subs || [];
+    const bad = items.find(x => x.id === failed);
+    if (!bad) return null;
+    const lang = normLang(bad.language);
+    const pool = items.filter(x => normLang(x.language) === lang && !this.subFailed.has(x.id) && x.forced === bad.forced);
+    const rank = (x: SubtitleItem) => (x.source !== bad.source ? 0 : 2) + (x.synced ? 0 : 1);
+    pool.sort((a, b) => rank(a) - rank(b));
+    return pool[0]?.id ?? null;
   }
 
   /** The viewer chose the release that carries the profile language's subtitle: restart on it at the same position. */
@@ -975,7 +1347,9 @@ export class PlayerEngine {
     this.subAltSource = null;
     this.wantSubLang = this.locale === 'tr' ? 'tr' : 'en';
     this.set({ subAlt: null });
-    this.switchTo(src, 'player.switchedSubtitles');
+    this.spliceTo(src, 'subalt', 'player.switchedSubtitles').then(ok => {
+      if (!ok && !this.destroyed) this.switchTo(src, 'player.switchedSubtitles', 'subalt');
+    });
   }
 
   retry() {
@@ -985,7 +1359,7 @@ export class PlayerEngine {
     }
     this.set({ fatal: null });
     this.recoveries = 0;
-    if (!this.sourceFailed(this.positionNow(), false)) this.restartAt(this.positionNow());
+    if (!this.sourceFailed(this.positionNow(), false)) this.restartAt(this.positionNow(), 'retry');
   }
 
   // ---- subtitles ----
@@ -1146,6 +1520,10 @@ export class PlayerEngine {
     const next = this.state.next;
     if (!next) return;
     this.stopCountdown();
+    if (this.deferredUpgrade) {
+      releaseTorrents([this.deferredUpgrade.src.hash.toLowerCase()]);
+      this.deferredUpgrade = null;
+    }
     // The finished episode is done; the next one was warmed for this moment
     releaseTitle(paramsOf(this.meta));
     this.nextWarm = null;
@@ -1228,8 +1606,10 @@ export class PlayerEngine {
     document.removeEventListener('visibilitychange', this.onVisibility);
     releaseTitle(paramsOf(this.meta));
     if (this.nextWarm) releaseTitle(this.nextWarm);
+    if (this.deferredUpgrade) this.played.add(this.deferredUpgrade.src.hash.toLowerCase());
     releaseTorrents(Array.from(this.played));
     this.listeners.clear();
+    if ((window as any).__nxPlayer === this) delete (window as any).__nxPlayer;
   }
 }
 

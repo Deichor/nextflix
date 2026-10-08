@@ -21,8 +21,10 @@ export interface PlaybackCaps {
   dv: boolean;
   /** Atmos (E-AC-3 JOC) to the speakers; sent only together with eac3 */
   atmos: boolean;
-  /** Audio codecs the TV plays in MP4 (server / ffprobe names); /play copies these, ac3 / eac3 included */
+  /** Audio codecs the TV plays muxed with video in MP4 (server / ffprobe names); /play copies these */
   audio: string[];
+  /** Audio codecs the TV plays only in an audio-only SourceBuffer (split mode: /play?track=audio) */
+  splitAudio: string[];
 }
 
 export type HdrMode = 'auto' | 'on' | 'off';
@@ -77,6 +79,10 @@ export async function initCaps(): Promise<void> {
   caps = null;
 }
 
+function mseSupported(): boolean {
+  return typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function';
+}
+
 function supported(type: string): boolean {
   try {
     if (typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(type)) return true;
@@ -103,34 +109,49 @@ export function playbackCaps(): PlaybackCaps {
   if (device.hdr10 === undefined && isWebOS() && device.uhd) hdrDisplay = true;
   const mode = getHdrMode();
   const hdr = hevc && (mode === 'on' || (mode === 'auto' && hdrDisplay));
-  // Audio is checked muxed with video, as /play delivers it: an LG TV (Chrome 120) accepts
-  // 'audio/mp4; codecs="ec-3"' alone but refuses "avc1/hvc1 + ec-3" in one SourceBuffer
-  const audio = AUDIO_TYPES.filter(([, type]) => supported(type) && supported(withVideo(type)))
-    .map(([name]) => name)
-    .filter(name => !safeAudio || SAFE_AUDIO.indexOf(name) >= 0);
+  // Audio is checked muxed with video, as a muxed /play stream delivers it: an LG TV (Chrome 120)
+  // accepts 'audio/mp4; codecs="ec-3"' alone but refuses "avc1/hvc1 + ec-3" in one SourceBuffer.
+  // Such codecs are split-only: the server sends them as a separate audio stream (?track=audio).
+  // The streams go through MSE: canPlayType answers for the TV's own player, which takes muxed E-AC-3
+  const allowed = ([name]: [string, string]) => !safeAudio || SAFE_AUDIO.indexOf(name) >= 0;
+  const muxed = (type: string) => (mseSupported() ? MediaSource.isTypeSupported(withVideo(type)) : supported(withVideo(type)));
+  const audio = AUDIO_TYPES.filter(allowed).filter(([, type]) => supported(type) && muxed(type)).map(([name]) => name);
   if (audio.indexOf('aac') < 0) audio.unshift('aac');
+  const splitAudio = mseSupported()
+    ? AUDIO_TYPES.filter(allowed).filter(([name, type]) => audio.indexOf(name) < 0 && MediaSource.isTypeSupported(type)).map(([name]) => name)
+    : [];
   // Dolby Vision only when the TV reports it (config) or its decoder accepts a DV codec string
   const dv = hdr && (device.dolbyVision === true || (device.dolbyVision === undefined && DV_TYPES.some(supported)));
-  // Atmos only with a decodable E-AC-3 and a TV that says it handles Atmos
-  const atmos = audio.indexOf('eac3') >= 0 && device.dolbyAtmos === true;
-  caps = { hevc, hdr, dv, atmos, audio };
+  // Atmos only with a decodable E-AC-3 (muxed or split) and a TV that says it handles Atmos
+  const atmos = (audio.indexOf('eac3') >= 0 || splitAudio.indexOf('eac3') >= 0) && device.dolbyAtmos === true;
+  caps = { hevc, hdr, dv, atmos, audio, splitAudio };
   return caps;
 }
 
-function capsEntries(): [string, string][] {
+/**
+ * Resolve-family calls (ranking, cache key) declare every codec the TV plays, split-only ones
+ * included, so Atmos releases rank first. probe / seekpoint / play declare the muxed ones in
+ * acodecs and the split-only ones in split_acodecs: a muxed stream never copies those.
+ */
+function capsEntries(stream = false): [string, string][] {
   const c = playbackCaps();
   const out: [string, string][] = [];
   if (c.hevc) out.push(['hevc', '1']);
   if (c.hevc && c.hdr) out.push(['hdr', '1']);
   if (c.hevc && c.dv) out.push(['dv', '1']);
   if (c.atmos) out.push(['atmos', '1']);
+  if (!stream) {
+    out.push(['acodecs', c.audio.concat(c.splitAudio).join(',')]);
+    return out;
+  }
   out.push(['acodecs', c.audio.join(',')]);
+  if (c.splitAudio.length > 0) out.push(['split_acodecs', c.splitAudio.join(',')]);
   return out;
 }
 
-/** "&hevc=1&hdr=1&dv=1&atmos=1&acodecs=..." for probe, seekpoint and play. */
+/** "&hevc=1&hdr=1&dv=1&atmos=1&acodecs=...&split_acodecs=..." for probe, seekpoint and play. */
 export function capsQuery(): string {
-  return capsEntries().map(([k, v]) => `&${k}=${v}`).join('');
+  return capsEntries(true).map(([k, v]) => `&${k}=${v}`).join('');
 }
 
 function addCaps(q: URLSearchParams): URLSearchParams {
@@ -161,6 +182,9 @@ export interface ResolvedSource {
   duration_verified?: boolean;
   cached?: boolean;
   format?: SourceFormat;
+  /** Plays from a debrid service (TorBox) instead of the swarm */
+  debrid?: boolean;
+  source?: string;
 }
 
 /** What resolve knows about the release (docs/API.md "Playback capabilities") */
@@ -190,6 +214,7 @@ export interface StreamSource {
   format?: SourceFormat;
   /** Swarm rate / needed bitrate measured by the resolve (undefined: not measured) */
   ratio?: number;
+  debrid?: boolean;
 }
 
 export const sourceOf = (r: ResolvedSource): StreamSource => ({
@@ -203,6 +228,7 @@ export const sourceOf = (r: ResolvedSource): StreamSource => ({
   starving: r.health?.keeps_up === false,
   format: r.format,
   ratio: healthRatio(r.health),
+  debrid: r.debrid === true || r.source === 'torbox',
 });
 
 export interface StreamMeta {

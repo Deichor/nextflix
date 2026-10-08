@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.4_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.5_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 
@@ -106,7 +106,7 @@ sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach 
 |---|---|
 | Everywhere | arrows move, OK selects, Back goes back (on Home: side menu, then "Exit?") |
 | Rows | Left from the first card opens the side menu; focus comes back to the same card after Back |
-| Player | OK play / pause, Left / Right seek 10 s (held: 30 s, then 60 s steps, applied when released), Up shows the buttons (play, ±10 s, next episode, Audio & Subtitles), Back closes |
+| Player | OK play / pause, Left / Right seek 10 s; a second press (or holding the key: 30 s, then 60 s steps) opens scrub mode with a strip of preview frames, where OK seeks to the shown time, Back cancels and Up / Down close (15 s without a key: closed, no seek; playback goes on underneath). Up shows the buttons (play, ±10 s, next episode, Audio & Subtitles), Back closes |
 | Media keys | Play, Pause, Play/Pause, Stop (closes), Rewind / Fast forward (seek) |
 | Magic Remote | pointing focuses, click selects, clicking the progress bar seeks |
 
@@ -126,23 +126,39 @@ animation.
 
 - Capabilities are detected once: HEVC and Dolby Vision via `MediaSource.isTypeSupported` / `canPlayType`, HDR10,
   Dolby Vision and Atmos via the TV's config (Luna `com.webos.service.config/getConfigs`, the keys webOSTV.js reads),
-  audio codecs (`aac, opus, mp3, ac3, eac3, truehd, dts`; not FLAC, whose silent frames stall the TV's MSE) via MSE.
-  They are sent as `hevc=1`, `hdr=1`, `dv=1`, `atmos=1` and `acodecs=` on every streaming call of a title (resolve,
-  prefetch, release, sidegrade, upgrade, probe, seekpoint, play), so video and audio are copied instead of converted.
+  audio codecs via MSE (not FLAC, whose silent frames stall the TV's MSE): the ones it plays muxed with video
+  (`aac, opus`) and the ones it plays only on their own (`ac3, eac3`: an LG TV refuses `avc1/hvc1 + ec-3` in one
+  SourceBuffer). Resolve-family calls (resolve, prefetch, release, sidegrade, upgrade, subalt) send all of them in
+  `acodecs=` plus `hevc=1`, `hdr=1`, `dv=1`, `atmos=1`, so Atmos releases rank first; probe, seekpoint and play send the
+  muxed ones in `acodecs=` and the others in `split_acodecs=`, so a muxed stream never copies them.
   Settings shows what was detected and can force HDR on or off.
 - The `/play` stream reaches the `<video>` through Media Source Extensions (`player/mseStream.ts`): webOS reads the
   metadata of a live fragmented MP4 given as `src` but decodes no frame of it (sound only, black picture). The
   codecs come from the init segment (`player/mp4Codecs.ts`: avc1 / hvc1 / hev1 / dvh1, mp4a / opus / flac / ac-3 /
-  ec-3); a type the TV refuses falls back to `src`. Every seek or switch is a new request into a new MediaSource.
-  The download pauses with 2 min buffered (below 1.5 min it resumes) and data a minute behind the position is
-  removed, so the TV's buffer quota is not reached (a quota error lowers the target and retries).
+  ec-3); a type the TV refuses falls back to `src`. Every seek is a new request into a new MediaSource. Each
+  SourceBuffer keeps to its byte budget (75 MB video, 15 MB audio; the TV refuses ~79 / ~18 MB, and past its limit
+  it also drops data ahead of the playhead): up to 2 min ahead (resumes below 1.5 min), up to a minute behind.
+- Split mode (the server's probe says `split: true` and the track is E-AC-3 / AC-3): `play?track=video` and
+  `track=audio` go into two SourceBuffers on the file's timeline, so E-AC-3 and its Atmos reach the TV untouched.
+  An older server gets the muxed request with converted audio. `localStorage nfx-tv:split` = `always` / `never`
+  overrides the choice for tests.
+- Upgrades, faster sources and audio track changes are spliced into the playing MediaSource (no loading screen) when
+  the codec family stays; an upgrade to another family (H.264 to HEVC) waits for the next seek. A restart onto another
+  source only follows a real stall and never starts at 0 from a position past 30 s. The console logs `[restart] …`,
+  `[splice] …` and `[health] …` lines; `window.__nxPlayer` is the engine in DevTools.
 - Like the web player: saved torrents are reused, the probe's duration check finds a complete version, stalls restart
   the stream, a starving source is swapped for a faster one (sidegrade) or a lower resolution, and below 4K the
-  player asks `upgrade` every 15 s for 5 minutes and switches at the current position. A draining buffer
-  (`player/bufferHealth.ts`, shared logic with the web) asks `sidegrade` early; with a single `<video>` the offer is
-  held and used (restart at the same position) once the buffer is nearly empty or playback stalls.
+  player asks `upgrade` every 15 s for 5 minutes and splices it in at the current position. A draining buffer
+  (`player/bufferHealth.ts`, shared logic with the web, sized to the byte budget on the TV) asks `sidegrade` early;
+  only a clearly faster offer (rate / bitrate ≥ 1.3 and above the playing source) is kept and spliced in.
 - Subtitles are fetched as WebVTT and drawn over the video at `stream offset + video time`. Without a subtitle in the
-  profile's language the list is fetched again after 8 s and 20 s (slower providers finish later).
+  profile's language the list is fetched again after 8 s and 20 s (slower providers finish later). A subtitle file
+  that brings no cues (e.g. an OpenSubtitles quota answer) is replaced by the next one of the language, another
+  provider first. A TorBox (debrid) source shows a "⚡ TorBox" badge.
+- Trick play (`player/TrickPlay.tsx`): while Left / Right scrub, the frame at the target time shows large in the
+  middle with the frames one and two steps away at the sides (server `GET /thumb`, see
+  `docs/ARCHITECTURE.md#trick-play-thumbnails`); frames not loaded yet show their time and seeking never waits for
+  them. While playing, the frames 30 s around the position are prefetched every 20 s.
 - Progress is saved every 10 s, on pause, when the player closes and when the TV's Home button hides the app.
   Closing releases the title and every torrent the player used. The next episode is warmed near the end and starts
   after a 5 s countdown (turn off in Settings).

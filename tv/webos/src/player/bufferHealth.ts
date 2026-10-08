@@ -16,6 +16,9 @@ export interface BufferSample {
   fetching: boolean;
   /** The buffer reaches the end of the file: nothing left to download */
   atEnd?: boolean;
+  /** TV only: seconds ahead the player can hold at all (MSE byte budget, ~30 s of a 4K stream). The
+   *  draining and critical levels shrink to fit it, and a buffer near it is full, not draining */
+  cap?: number;
 }
 
 export interface BufferVerdict {
@@ -96,9 +99,13 @@ export class BufferMonitor {
     } else if (this.idleAt && s.at - this.idleAt < H.IDLE_GRACE_MS) {
       known = true;
       if (ahead < H.IDLE_MIN_AHEAD_S) state = 'critical';
+    } else if (s.cap && ahead >= s.cap * 0.8) {
+      known = true;
     } else if (growth !== null) {
-      if (growth < 1 && ahead < H.CRITICAL_AHEAD_S) state = 'critical';
-      else if (growth < H.DRAIN_GROWTH || (growth < 1 && ahead < H.DRAIN_AHEAD_S)) state = 'draining';
+      const critical = s.cap ? Math.min(H.CRITICAL_AHEAD_S, Math.max(2, s.cap * 0.25)) : H.CRITICAL_AHEAD_S;
+      const drain = s.cap ? Math.min(H.DRAIN_AHEAD_S, s.cap * 0.6) : H.DRAIN_AHEAD_S;
+      if (growth < 1 && ahead < critical) state = 'critical';
+      else if (growth < H.DRAIN_GROWTH || (growth < 1 && ahead < drain)) state = 'draining';
     }
 
     // A window that is still filling neither starts nor ends a healthy stretch

@@ -216,6 +216,10 @@ export class KeyframeScanner {
   private box: Uint8Array | null = null;
   private fill = 0;
   private track: ScanTrack | null = null;
+  /** Presentation time (s) of the first sample of the first fragment; -1 until one arrived */
+  firstTime = -1;
+  /** Decode time (s) of the latest fragment; -1 until one arrived */
+  lastTime = -1;
 
   push(c: Uint8Array): number[] {
     const out: number[] = [];
@@ -296,8 +300,18 @@ export class KeyframeScanner {
         if (rf & 0x200) s += 4;
         flags = u32(b, s);
       }
-      if (flags & NON_SYNC) continue;
       const time = b[tfdt.body] === 1 ? u32(b, tfdt.body + 4) * 0x100000000 + u32(b, tfdt.body + 8) : u32(b, tfdt.body + 4);
+      this.lastTime = time / tr.timescale;
+      if (this.firstTime < 0) {
+        // First sample: its composition offset follows the optional duration, size and flags (signed in version 1)
+        let s = r + (rf & 0x4 ? 4 : 0);
+        if (rf & 0x100) s += 4;
+        if (rf & 0x200) s += 4;
+        if (rf & 0x400) s += 4;
+        const cto = rf & 0x800 ? (b[trun.body] === 1 ? u32(b, s) | 0 : u32(b, s)) : 0;
+        this.firstTime = (time + cto) / tr.timescale;
+      }
+      if (flags & NON_SYNC) continue;
       out.push(time / tr.timescale);
     }
   }

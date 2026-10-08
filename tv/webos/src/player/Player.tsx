@@ -9,9 +9,13 @@ import { focusById, focusDefault, move, pushKeyHandler } from '../nav/spatial';
 import { PlayerEngine, type PlayerState } from './engine';
 import AudioSubtitlePanel from './AudioSubtitlePanel';
 import SubtitleOverlay from './SubtitleOverlay';
+import TrickPlay, { useTrickPlayPrefetch } from './TrickPlay';
 
 const HIDE_MS = 4500;
 const COMMIT_MS = 800;
+// Scrub mode (a second Left / Right press, or one held): no auto-commit; OK seeks, Back cancels, and it
+// closes by itself after this long without a key. Playback goes on underneath.
+const SCRUB_IDLE_MS = 15000;
 
 function formatTime(s: number): string {
   if (!isFinite(s) || s < 0) s = 0;
@@ -37,6 +41,9 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   const previewRef = useRef<number | null>(null);
   const repeatRef = useRef(0);
   const commitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [scrubMode, setScrubMode] = useState(false);
+  const scrubModeRef = useRef(false);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const stateRef = useRef<PlayerState | null>(null);
   stateRef.current = s;
@@ -64,14 +71,14 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => {
       const st = stateRef.current;
-      if (panelRef.current || !st || !st.playing) return;
+      if (panelRef.current || scrubModeRef.current || !st || !st.playing) return;
       setVisible(false);
       // Hidden controls: OK plays/pauses again
       if (zoneRef.current === 'buttons') focusById('pl-timeline');
     }, HIDE_MS);
   }, []);
 
-  useEffect(() => { reveal(); return () => { clearTimeout(hideTimer.current); clearTimeout(commitTimer.current); }; }, [reveal]);
+  useEffect(() => { reveal(); return () => { clearTimeout(hideTimer.current); clearTimeout(commitTimer.current); clearTimeout(idleTimer.current); }; }, [reveal]);
   // Playback (re)started: the controls fade out after a while
   useEffect(() => { if (s?.playing) reveal(); }, [s?.playing, reveal]);
 
@@ -96,13 +103,26 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     return () => cancelAnimationFrame(raf);
   }, [overlay, panel, playable]);
 
-  const commit = useCallback(() => {
+  const endScrub = useCallback(() => {
     clearTimeout(commitTimer.current);
-    const p = previewRef.current;
+    clearTimeout(idleTimer.current);
+    scrubModeRef.current = false;
+    setScrubMode(false);
     previewRef.current = null;
     setPreview(null);
-    if (p !== null) engineRef.current?.seekTo(p);
   }, []);
+
+  const commit = useCallback(() => {
+    const p = previewRef.current;
+    endScrub();
+    if (p !== null) engineRef.current?.seekTo(p);
+  }, [endScrub]);
+
+  // Back, Up / Down or no key for SCRUB_IDLE_MS: playback goes on where it is
+  const cancelScrub = useCallback(() => {
+    endScrub();
+    reveal();
+  }, [endScrub, reveal]);
 
   const scrub = useCallback((sign: 1 | -1, repeat: boolean) => {
     const engine = engineRef.current;
@@ -113,11 +133,18 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     const step = n < 5 ? 10 : n < 15 ? 30 : 60;
     const from = previewRef.current ?? engine.positionNow();
     const next = Math.max(0, Math.min(st.duration - 1, from + sign * step));
+    // A single press seeks after COMMIT_MS; a second press within it, or a held key, starts scrub mode
+    if (!scrubModeRef.current && (repeat || previewRef.current !== null)) {
+      scrubModeRef.current = true;
+      setScrubMode(true);
+    }
     previewRef.current = next;
     setPreview(next);
     clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(commit, COMMIT_MS);
-  }, [commit]);
+    clearTimeout(idleTimer.current);
+    if (scrubModeRef.current) idleTimer.current = setTimeout(cancelScrub, SCRUB_IDLE_MS);
+    else commitTimer.current = setTimeout(commit, COMMIT_MS);
+  }, [commit, cancelScrub]);
 
   const closePanel = useCallback(() => {
     setPanel(false);
@@ -140,6 +167,12 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     if (code === KEY.FAST_FORWARD || code === KEY.REWIND) {
       if (canPlay) scrub(code === KEY.FAST_FORWARD ? 1 : -1, e.repeat);
       return true;
+    }
+    if (scrubModeRef.current) {
+      if (isBack(e)) { cancelScrub(); return true; }
+      if (code === KEY.ENTER) { commit(); return true; }
+      const d = direction(e);
+      if (d === 'up' || d === 'down') { cancelScrub(); return true; }
     }
     if (isBack(e)) {
       if (panelRef.current) closePanel();
@@ -167,7 +200,15 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
       return true;
     }
     return true;
-  }), [onClose, reveal, scrub, commit, closePanel]);
+  }), [onClose, reveal, scrub, commit, cancelScrub, closePanel]);
+
+  useTrickPlayPrefetch(
+    () => engineRef.current?.currentFile() ?? null,
+    () => videoRef.current,
+    () => engineRef.current?.positionNow() ?? 0,
+    s?.duration ?? 0,
+    !!s && s.phase === 'ready' && s.playing,
+  );
 
   const engine = engineRef.current;
   const subtitleTime = useCallback(() => engineRef.current?.subtitleTime() ?? 0, []);
@@ -184,6 +225,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   const shown = preview ?? s.position;
   const pct = s.duration > 0 ? Math.min(100, (shown / s.duration) * 100) : 0;
   const controls = playable && (visible || !s.playing || panel || preview !== null);
+  const thumbFile = preview !== null ? engine?.currentFile() ?? null : null;
   const nextLabel = s.next ? episodeLabel(locale, s.next.season, s.next.episode) : '';
   const errorText = (e: { key?: Parameters<typeof t>[0]; text?: string } | null) => (e ? (e.key ? t(e.key) : e.text || '') : '');
   const releaseDate = s.unreleased
@@ -191,7 +233,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     : null;
 
   return (
-    <div className={`player ${controls ? 'show-controls' : ''}`} ref={rootRef} data-nav-layer="player" onMouseMove={reveal}>
+    <div className={`player ${controls ? 'show-controls' : ''} ${preview !== null && thumbFile ? 'is-scrubbing' : ''}`} ref={rootRef} data-nav-layer="player" onMouseMove={reveal}>
       <video ref={videoRef} className="player-video" playsInline onClick={() => engine?.togglePlay()} />
 
       {playable && s.subId && s.cues.length > 0 && <SubtitleOverlay cues={s.cues} time={subtitleTime} raised={!!controls} />}
@@ -284,12 +326,23 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
             <span className="badge">{s.quality.label}</span>
             {s.quality.dv ? <span className="badge">Dolby Vision</span> : s.quality.hdr ? <span className="badge">HDR</span> : null}
             {!!s.audioBadge && <span className="badge">{s.audioBadge}</span>}
+            {s.debrid && <span className="badge">⚡ TorBox</span>}
           </div>
         )}
       </div>
 
       {playable && (
         <div className={`player-bottom ${controls ? 'is-visible' : ''}`}>
+          {preview !== null && thumbFile && (
+            <TrickPlay
+              hash={thumbFile.hash}
+              index={thumbFile.index}
+              target={preview}
+              duration={s.duration}
+              aspect={videoRef.current && videoRef.current.videoHeight ? videoRef.current.videoWidth / videoRef.current.videoHeight : 16 / 9}
+            />
+          )}
+          {preview !== null && scrubMode && <div className="trickplay-hint">{t('player.scrubHint')}</div>}
           <div className="player-buttons" data-nav-group="pl-buttons">
             <button type="button" className="pbtn" data-nav data-nav-id="pl-playpause" data-nav-default onFocus={() => setZone('buttons')} onClick={() => engine?.togglePlay()}>
               {s.playing ? <Pause className="pbtn-icon" /> : <Play className="pbtn-icon btn-icon-fill" />}

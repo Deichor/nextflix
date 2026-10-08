@@ -1991,3 +1991,111 @@ p {
     transform: scale(1);
   }
 }
+
+/* ---- Trick play (player/TrickPlay.tsx): frames shown while scrubbing with Left / Right ---- */
+
+.player.is-scrubbing .player-buttons {
+  visibility: hidden;
+}
+
+/* a taller gradient darkens the video behind the frames */
+.player.is-scrubbing .player-bottom {
+  padding-top: 34rem;
+}
+
+.player.is-scrubbing .timeline-preview {
+  display: none;
+}
+
+.trickplay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 10rem;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
+.trickplay-slot {
+  margin: 0 0.8rem;
+}
+
+.trickplay-slot.is-empty {
+  visibility: hidden;
+}
+
+.trickplay-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.6rem;
+  background: #262626;
+}
+
+.trickplay-slot.is-center .trickplay-frame {
+  height: 18rem;
+  border: 0.3rem solid var(--focus);
+  box-shadow: 0 0.8rem 2.4rem rgba(0, 0, 0, 0.7);
+}
+
+.trickplay-slot.is-near {
+  margin-top: 3.4rem;
+  opacity: 0.7;
+}
+
+.trickplay-slot.is-near .trickplay-frame {
+  height: 11.8rem;
+}
+
+.trickplay-slot.is-far {
+  margin-top: 4.8rem;
+  opacity: 0.4;
+}
+
+.trickplay-slot.is-far .trickplay-frame {
+  height: 9rem;
+}
+
+.trickplay-placeholder {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  margin-top: -1rem;
+  line-height: 2rem;
+  text-align: center;
+  font-size: 1.6rem;
+  color: #8c8c8c;
+}
+
+.trickplay-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000000;
+}
+
+.trickplay-time {
+  margin-top: 1rem;
+  text-align: center;
+  font-size: 2.6rem;
+  font-weight: 700;
+  text-shadow: 0 0.2rem 0.8rem rgba(0, 0, 0, 0.9);
+}
+
+/* Scrub mode (a second Left / Right press, or held): OK seeks, Back cancels */
+.trickplay-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* centred between the elapsed and remaining time under the bar */
+  bottom: 4.7rem;
+  text-align: center;
+  font-size: 1.6rem;
+  color: rgba(255, 255, 255, 0.8);
+  pointer-events: none;
+}
