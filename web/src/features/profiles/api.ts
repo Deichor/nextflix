@@ -4,7 +4,7 @@ import type { Profile } from '@/shared/lib/profile';
 export const MAX_PROFILES = 5;
 export const MAX_PROFILE_NAME = 20;
 
-export type ProfileInput = Pick<Profile, 'name' | 'avatar' | 'color'>;
+export type ProfileInput = Pick<Profile, 'name' | 'avatar' | 'color'> & Pick<Partial<Profile>, 'language'>;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${getApiUrl()}${path}`, {

@@ -3,7 +3,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
 import { useNavigate } from '@/shared/navigation/useNavigate';
-import { useMyList } from '@/features/my-list/store';
 import { useActiveProfile } from '@/shared/lib/profile';
 import {
   PlayRequest,
@@ -21,18 +20,15 @@ interface TitleActions {
   play: (t: TitleItem) => void;
   openInfo: (t: TitleItem) => void;
   progressFor: (t: TitleItem) => StreamProgress | undefined;
-  inMyList: (t: TitleItem) => boolean;
-  toggleMyList: (t: TitleItem) => void;
 }
 
 const Ctx = createContext<TitleActions | null>(null);
 
-// Shared Play / More Info / My List actions for the billboard and every row.
+// Shared Play / More Info actions for the billboard and every row (ratings live in features/favorites).
 // Owns the one torrent player instance of the page.
 export function TitleActionsProvider({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const profile = useActiveProfile();
-  const myList = useMyList();
   const [progress, setProgress] = useState<StreamProgress[]>([]);
   const [request, setRequest] = useState<PlayRequest | null>(null);
 
@@ -52,7 +48,8 @@ export function TitleActionsProvider({ children }: { children: React.ReactNode }
   const play = useCallback(async (t: TitleItem) => {
     const saved = progressFor(t);
     if (saved) {
-      setRequest(progressToRequest(saved));
+      const req = progressToRequest(saved);
+      setRequest({ ...req, meta: { ...req.meta, original_language: t.original_language } });
       return;
     }
     // TV whose newest episode is finished continues with the next one, otherwise S1E1
@@ -76,16 +73,12 @@ export function TitleActionsProvider({ children }: { children: React.ReactNode }
         year: t.media_type === 'movie' ? yearOf(t) : undefined,
         season: t.media_type === 'tv' ? season : undefined,
         episode: t.media_type === 'tv' ? episode : undefined,
+        original_language: t.original_language,
       },
     });
   }, [progressFor, profileId]);
 
   const openInfo = useCallback((t: TitleItem) => navigate.push(detailHref(t)), [navigate]);
-
-  // entries changes identity on every add/remove, so cards re-render with the new state
-  const { has, toggle, entries } = myList;
-  const inMyList = useCallback((t: TitleItem) => has(t), [has, entries]); // eslint-disable-line react-hooks/exhaustive-deps
-  const toggleMyList = useCallback((t: TitleItem) => { toggle({ id: t.id, mediaType: t.media_type }); }, [toggle]);
 
   const closePlayer = useCallback(() => {
     setRequest(null);
@@ -94,8 +87,8 @@ export function TitleActionsProvider({ children }: { children: React.ReactNode }
   }, [loadProgress]);
 
   const value = useMemo(
-    () => ({ play, openInfo, progressFor, inMyList, toggleMyList }),
-    [play, openInfo, progressFor, inMyList, toggleMyList],
+    () => ({ play, openInfo, progressFor }),
+    [play, openInfo, progressFor],
   );
 
   return (

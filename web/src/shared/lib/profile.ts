@@ -7,8 +7,12 @@ export interface Profile {
   name: string;
   avatar: string;
   color: string;
+  /** UI language of the profile (server default 'en') */
+  language?: ProfileLanguage;
   created_at?: string;
 }
+
+export type ProfileLanguage = 'en' | 'tr';
 
 const KEY = 'hfx-profile';
 export const PROFILE_EVENT = 'hfx-profile-change';

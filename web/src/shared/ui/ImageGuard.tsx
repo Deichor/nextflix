@@ -15,13 +15,15 @@ export default function ImageGuard() {
     const proxify = (el: Element) => {
       const src = el.getAttribute("src");
       if (src?.startsWith(TMDB)) el.setAttribute("src", PROXY + src.slice(TMDB.length));
+      const srcset = el.getAttribute("srcset");
+      if (srcset?.includes(TMDB)) el.setAttribute("srcset", srcset.split(TMDB).join(PROXY));
       const style = el.getAttribute("style");
       if (style?.includes(TMDB)) el.setAttribute("style", style.split(TMDB).join(PROXY));
     };
 
     const scan = (root: Element) => {
       proxify(root);
-      root.querySelectorAll("[src], [style]").forEach(proxify);
+      root.querySelectorAll("[src], [srcset], [style]").forEach(proxify);
     };
 
     const onError = (e: Event) => {
@@ -33,6 +35,7 @@ export default function ImageGuard() {
       if (count > MAX_FAILS) {
         // Runs in the capture phase, so the component's own onError never fires
         e.stopImmediatePropagation();
+        img.removeAttribute("srcset");
         img.removeAttribute("src");
       }
     };
@@ -44,7 +47,7 @@ export default function ImageGuard() {
         m.addedNodes.forEach(n => { if (n instanceof Element) scan(n); });
       }
     });
-    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "style"] });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset", "style"] });
     window.addEventListener("error", onError, true);
 
     return () => {

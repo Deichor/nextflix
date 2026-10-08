@@ -6,11 +6,13 @@ import { ChevronDown, Pencil, Settings, Users, User } from 'lucide-react';
 import ProfileAvatar from '@/features/profiles/components/ProfileAvatar';
 import { setActiveProfile, useActiveProfile, type Profile } from '@/shared/lib/profile';
 import { listProfiles } from '@/features/profiles/api';
+import { useT } from '@/shared/i18n';
 
 const CLOSE_DELAY_MS = 250;
 
 /** Navbar profile dropdown: active avatar + caret, profile switcher and account links. */
 export default function ProfileMenu({ className = '' }: { className?: string }) {
+  const t = useT();
   const active = useActiveProfile();
   const [open, setOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -98,7 +100,7 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
         onClick={() => (open ? setOpen(false) : openNow())}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={active ? `Profile menu for ${active.name}` : 'Profile menu'}
+        aria-label={active ? t('profiles.menuFor', { name: active.name }) : t('profiles.menu')}
         className="flex items-center gap-2 outline-none focus-visible:ring-2 focus-visible:ring-white rounded"
       >
         {active ? (
@@ -139,11 +141,11 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
 
           <Link href="/profiles?manage=1" role="menuitem" onClick={() => setOpen(false)} className={itemClass}>
             <Pencil className="h-5 w-5 text-[#b3b3b3]" />
-            Manage Profiles
+            {t('profiles.manageProfiles')}
           </Link>
           <Link href="/settings" role="menuitem" onClick={() => setOpen(false)} className={itemClass}>
             <Settings className="h-5 w-5 text-[#b3b3b3]" />
-            Settings
+            {t('settings.title')}
           </Link>
 
           <div className="mt-2 border-t border-[#333] pt-2">
@@ -154,7 +156,7 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
               className="flex w-full items-center justify-center gap-2 px-3 py-2 text-sm text-white hover:underline"
             >
               <Users className="h-4 w-4 text-[#b3b3b3]" />
-              Switch Profile
+              {t('profiles.switchProfile')}
             </Link>
           </div>
         </div>

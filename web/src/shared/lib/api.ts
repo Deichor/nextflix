@@ -1,3 +1,5 @@
+import { detectLocale, type Locale } from '@/shared/i18n/core';
+
 // API configuration for network access
 export const getApiUrl = () => {
   // Check if we're in Docker environment
@@ -11,7 +13,7 @@ export const getApiUrl = () => {
   const hostname = window.location.hostname;
 
   // Local network access: connect directly to backend port
-  const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' ||
+  const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.local') ||
     /^192\.168\./.test(hostname) || /^10\./.test(hostname) ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(hostname);
 
@@ -24,6 +26,35 @@ export const getApiUrl = () => {
   return window.location.origin;
 };
 
+/** Content language of backend answers (TMDB titles, overviews): the active profile's language. */
+export const contentLang = (): Locale => detectLocale();
+
+const LANG_HEADER = 'X-Lang';
+
+const isBackendUrl = (url: string) => url.startsWith('/api/') || url.startsWith(`${getApiUrl()}/api/`);
+
+const requestUrl = (input: RequestInfo | URL) =>
+  typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+
+// Adds X-Lang (the active profile's language) to every backend request made with fetch, so TMDB
+// titles and overviews come back in that language without touching each call site. Installed
+// once, client side, by the i18n provider; requests that already carry X-Lang are left alone.
+export function installLangFetch() {
+  if (typeof window === 'undefined') return;
+  const w = window as Window & { __nfLangFetch?: boolean };
+  if (w.__nfLangFetch) return;
+  w.__nfLangFetch = true;
+  const original = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    // keepalive requests (page unload) skip it: a custom header would need a CORS preflight
+    if (init?.keepalive || !isBackendUrl(requestUrl(input))) return original(input, init);
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    if (headers.has(LANG_HEADER)) return original(input, init);
+    headers.set(LANG_HEADER, contentLang());
+    return original(input, { ...init, headers });
+  };
+}
+
 export const getApiHost = () => {
   if (typeof window === 'undefined') {
     return 'localhost';
@@ -33,10 +64,10 @@ export const getApiHost = () => {
 
 export const API_ENDPOINTS = {
   profiles: '/api/profiles',
-  myList: '/api/mylist',
+  ratings: '/api/ratings',
+  favorites: '/api/favorites',
   streamProgress: '/api/stream-progress',
   notifications: '/api/notifications',
-  providers: '/api/providers',
   indexerSettings: '/api/settings/indexer',
 };
 
@@ -144,7 +175,8 @@ export const apiCall = async (endpoint: string, options?: RequestInit, useCache 
   const baseUrl = getApiUrl();
   const url = `${baseUrl}${endpoint}`;
   const isGet = !options || !options.method || options.method === 'GET';
-  const cacheKey = `${url}-${JSON.stringify(options)}`;
+  // Answers depend on the content language (X-Lang), so it is part of the key
+  const cacheKey = `${contentLang()}|${url}-${JSON.stringify(options)}`;
 
   if (useCache && isGet) {
     const cached = readEntry(cacheKey);

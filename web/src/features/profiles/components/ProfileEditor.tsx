@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
 import ProfileAvatar, { AVATAR_PRESETS, PROFILE_COLORS } from '@/features/profiles/components/ProfileAvatar';
-import { getActiveProfileId, setActiveProfile, type Profile } from '@/shared/lib/profile';
+import { getActiveProfileId, setActiveProfile, type Profile, type ProfileLanguage } from '@/shared/lib/profile';
+import { LOCALES, useLocale, useT } from '@/shared/i18n';
 import { createProfile, deleteProfile, updateProfile, MAX_PROFILE_NAME } from '@/features/profiles/api';
 
 interface ProfileEditorProps {
@@ -18,10 +19,13 @@ interface ProfileEditorProps {
 
 /** Netflix-style full-screen "Edit Profile" / "Add Profile" screen. */
 export default function ProfileEditor({ profile, profileCount, onClose, onChanged }: ProfileEditorProps) {
+  const t = useT();
+  const currentLocale = useLocale();
   const isNew = !profile;
   const [name, setName] = useState(profile?.name ?? '');
   const [avatar, setAvatar] = useState(profile?.avatar ?? AVATAR_PRESETS[profileCount % AVATAR_PRESETS.length].key);
   const [color, setColor] = useState(profile?.color ?? PROFILE_COLORS[profileCount % PROFILE_COLORS.length]);
+  const [language, setLanguage] = useState<ProfileLanguage>(profile?.language ?? (isNew ? currentLocale : 'en'));
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,13 +45,13 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
 
   const save = async () => {
     if (!trimmed) {
-      setError('Please enter a name.');
+      setError(t('profiles.nameRequired'));
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      const input = { name: trimmed.slice(0, MAX_PROFILE_NAME), avatar, color };
+      const input = { name: trimmed.slice(0, MAX_PROFILE_NAME), avatar, color, language };
       if (isNew) {
         await createProfile(input);
       } else {
@@ -57,7 +61,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
       onChanged();
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save profile.');
+      setError(e instanceof Error ? e.message : t('profiles.couldNotSave'));
     } finally {
       setSaving(false);
     }
@@ -73,7 +77,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
       onChanged();
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not delete profile.');
+      setError(e instanceof Error ? e.message : t('profiles.couldNotDelete'));
       setConfirmDelete(false);
     } finally {
       setSaving(false);
@@ -86,9 +90,9 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
   return (
     <div className="fixed inset-0 z-[100] overflow-y-auto bg-[#141414] text-white" role="dialog" aria-modal="true">
       <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-4 py-12 md:px-8">
-        <h1 className="text-4xl font-medium md:text-6xl">{isNew ? 'Add Profile' : 'Edit Profile'}</h1>
+        <h1 className="text-4xl font-medium md:text-6xl">{isNew ? t('profiles.addProfile') : t('profiles.editProfile')}</h1>
         {isNew && (
-          <p className="mt-2 text-base text-[#808080] md:text-lg">Add a profile for another person watching Nextflix.</p>
+          <p className="mt-2 text-base text-[#808080] md:text-lg">{t('profiles.addProfileHint')}</p>
         )}
 
         <div className="mt-6 flex flex-col gap-6 border-y border-[#333] py-6 sm:flex-row">
@@ -104,8 +108,8 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                   if (e.key === 'Enter') save();
                 }}
                 maxLength={MAX_PROFILE_NAME}
-                placeholder="Name"
-                aria-label="Profile name"
+                placeholder={t('profiles.name')}
+                aria-label={t('profiles.nameLabel')}
                 className="w-full bg-[#666] px-3 py-2 text-lg text-white placeholder:text-[#ccc] outline-none focus:ring-2 focus:ring-white"
               />
               <div className="mt-1 flex justify-between text-xs text-[#808080]">
@@ -117,7 +121,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
             </div>
 
             <section>
-              <h2 className="mb-3 text-sm uppercase tracking-widest text-[#b3b3b3]">Avatar</h2>
+              <h2 className="mb-3 text-sm uppercase tracking-widest text-[#b3b3b3]">{t('profiles.avatar')}</h2>
               <div className="grid grid-cols-5 gap-2 sm:grid-cols-10">
                 {AVATAR_PRESETS.map((preset) => {
                   const selected = preset.key === avatar;
@@ -126,8 +130,8 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                       key={preset.key}
                       type="button"
                       onClick={() => setAvatar(preset.key)}
-                      title={preset.label}
-                      aria-label={preset.label}
+                      title={t(preset.label)}
+                      aria-label={t(preset.label)}
                       aria-pressed={selected}
                       className={`rounded-[8%] outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white ${
                         selected ? 'ring-2 ring-white ring-offset-2 ring-offset-[#141414]' : 'opacity-80 hover:opacity-100'
@@ -141,7 +145,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
             </section>
 
             <section>
-              <h2 className="mb-3 text-sm uppercase tracking-widest text-[#b3b3b3]">Color</h2>
+              <h2 className="mb-3 text-sm uppercase tracking-widest text-[#b3b3b3]">{t('profiles.color')}</h2>
               <div className="flex flex-wrap gap-3">
                 {PROFILE_COLORS.map((c) => {
                   const selected = c.toLowerCase() === color.toLowerCase();
@@ -150,7 +154,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                       key={c}
                       type="button"
                       onClick={() => setColor(c)}
-                      aria-label={`Color ${c}`}
+                      aria-label={t('profiles.colorLabel', { color: c })}
                       aria-pressed={selected}
                       className={`flex h-9 w-9 items-center justify-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white ${
                         selected ? 'ring-2 ring-white ring-offset-2 ring-offset-[#141414]' : ''
@@ -163,13 +167,37 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                 })}
               </div>
             </section>
+
+            <section>
+              <h2 className="mb-3 text-sm uppercase tracking-widest text-[#b3b3b3]">
+                <label htmlFor="profile-language">{t('profiles.language')}</label>
+              </h2>
+              <select
+                id="profile-language"
+                value={language}
+                onChange={(e) => setLanguage(e.target.value as ProfileLanguage)}
+                className="min-w-[180px] cursor-pointer border border-white/70 bg-black px-3 py-2 text-sm text-white outline-none hover:border-white focus-visible:ring-2 focus-visible:ring-white"
+              >
+                {LOCALES.map((l) => (
+                  <option key={l} value={l} lang={l}>
+                    {t(`language.${l}`)}
+                  </option>
+                ))}
+              </select>
+            </section>
           </div>
         </div>
 
         {confirmDelete ? (
           <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-center">
             <p className="flex-1 text-[#b3b3b3]">
-              Delete <span className="font-semibold text-white">{profile?.name}</span>? Its watch history will be gone forever.
+              {t.rich('profiles.deleteConfirm', {
+                name: (
+                  <span key="name" className="font-semibold text-white">
+                    {profile?.name}
+                  </span>
+                ),
+              })}
             </p>
             <div className="flex gap-3">
               <button
@@ -178,7 +206,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                 disabled={saving}
                 className={`${buttonBase} bg-[#E50914] text-white hover:bg-[#f40612]`}
               >
-                Delete
+                {t('common.delete')}
               </button>
               <button
                 type="button"
@@ -186,7 +214,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                 disabled={saving}
                 className={`${buttonBase} border border-[#808080] text-[#808080] hover:border-white hover:text-white`}
               >
-                Keep
+                {t('profiles.keep')}
               </button>
             </div>
           </div>
@@ -198,7 +226,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
               disabled={saving || !trimmed}
               className={`${buttonBase} bg-white text-black hover:bg-[#E50914] hover:text-white`}
             >
-              {saving ? 'Saving...' : 'Save'}
+              {saving ? t('common.saving') : t('common.save')}
             </button>
             <button
               type="button"
@@ -206,17 +234,17 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
               disabled={saving}
               className={`${buttonBase} border border-[#808080] text-[#808080] hover:border-white hover:text-white`}
             >
-              Cancel
+              {t('common.cancel')}
             </button>
             {!isNew && (
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
                 disabled={saving || !canDelete}
-                title={canDelete ? undefined : 'You need at least one profile'}
+                title={canDelete ? undefined : t('profiles.needOneProfile')}
                 className={`${buttonBase} border border-[#808080] text-[#808080] hover:border-white hover:text-white`}
               >
-                Delete Profile
+                {t('profiles.deleteProfile')}
               </button>
             )}
           </div>

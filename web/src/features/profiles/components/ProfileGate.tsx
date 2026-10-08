@@ -53,7 +53,12 @@ export default function ProfileGate({ children }: { children: ReactNode }) {
         const profiles = await listProfiles(controller.signal);
         const fresh = stored ? profiles.find((p) => p.id === stored.id) : undefined;
         if (fresh) {
-          if (fresh.name !== stored!.name || fresh.avatar !== stored!.avatar || fresh.color !== stored!.color) {
+          if (
+            fresh.name !== stored!.name ||
+            fresh.avatar !== stored!.avatar ||
+            fresh.color !== stored!.color ||
+            fresh.language !== stored!.language
+          ) {
             setActiveProfile(fresh);
           }
           ok = true;

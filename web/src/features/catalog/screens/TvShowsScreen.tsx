@@ -8,29 +8,32 @@ import Billboard from '@/features/catalog/components/Billboard';
 import BrowseHeader from '@/features/catalog/components/BrowseHeader';
 import TitleRow from '@/features/catalog/components/TitleRow';
 import TitleGrid from '@/features/catalog/components/TitleGrid';
+import { useT, type MessageKey } from '@/shared/i18n';
 import {
   NfTitle,
   TV_GENRES,
   TvLists,
   fetchProviderTv,
   fetchTvLists,
+  localGenre,
   pickBillboard,
   uniqueTitles,
 } from '@/features/catalog/titles';
 
-const PROVIDERS = [
-  { id: 8, title: 'Popular on Netflix' },
-  { id: 337, title: 'Disney+ Favorites' },
-  { id: 1899, title: 'Max Originals & More' },
-  { id: 9, title: 'Prime Video Picks' },
-  { id: 350, title: 'Apple TV+ Series' },
+const PROVIDERS: { id: number; title: MessageKey }[] = [
+  { id: 8, title: 'catalog.providerNetflix' },
+  { id: 337, title: 'catalog.providerDisney' },
+  { id: 1899, title: 'catalog.providerMax' },
+  { id: 9, title: 'catalog.providerPrime' },
+  { id: 350, title: 'catalog.providerApple' },
 ];
 
 // Genre rows built from the merged TV pool on the default page
 const GENRE_ROWS = [10759, 35, 80, 10765, 18, 16, 99];
 
 function TVShowsContent() {
-  usePageTitle('TV Shows');
+  const t = useT();
+  usePageTitle(t('nav.tvShows'));
   const router = useRouter();
   const searchParams = useSearchParams();
   const genreParam = searchParams?.get('genre') || '';
@@ -84,9 +87,9 @@ function TVShowsContent() {
 
   const genreRows = useMemo(() => GENRE_ROWS.map(id => ({
     id,
-    title: `${TV_GENRES.find(g => g.id === id)?.name} TV Shows`,
+    title: t('catalog.genreTv', { genre: localGenre(t, id) ?? '' }),
     items: pool.filter(t => t.genreIds?.includes(id)),
-  })).filter(r => r.items.length >= 6), [pool]);
+  })).filter(r => r.items.length >= 6), [pool, t]);
 
   const setGenre = (value: string) => {
     router.push(value ? `/tv-shows?genre=${value}` : '/tv-shows');
@@ -97,13 +100,13 @@ function TVShowsContent() {
       <div className="relative">
         <BrowseHeader
           overlay
-          title="TV Shows"
-          selectedLabel={genre?.name}
-          options={TV_GENRES.map(g => ({ value: String(g.id), label: g.name }))}
+          title={t('nav.tvShows')}
+          selectedLabel={genre ? localGenre(t, genre.id) : undefined}
+          options={TV_GENRES.map(g => ({ value: String(g.id), label: localGenre(t, g.id) ?? g.name }))}
           value={genre ? String(genre.id) : ''}
           onChange={setGenre}
         />
-        <Billboard item={billboard} loading={loading} kicker="SERIES" />
+        <Billboard item={billboard} loading={loading} kicker={t('catalog.kickerSeries')} />
       </div>
 
       {genre ? (
@@ -111,23 +114,23 @@ function TVShowsContent() {
           {genreItems.length > 0 ? (
             <TitleGrid items={genreItems} loading={loading} />
           ) : !loading ? (
-            <EmptyState title={`No ${genre.name} shows yet`} text="Try another genre." />
+            <EmptyState title={t('catalog.emptyGenre', { genre: localGenre(t, genre.id) ?? genre.name })} text={t('catalog.tryAnotherGenre')} />
           ) : (
             <TitleGrid items={[]} loading />
           )}
         </div>
       ) : (
-        <div className="relative z-10 -mt-[8vw] space-y-1 md:space-y-3">
-          <TitleRow title="Top 10 TV Shows Today" items={lists?.trendingDaily || []} ranked loading={loading} />
-          <TitleRow title="Trending Now" items={lists?.trendingWeekly || []} variant="backdrop" loading={loading} />
-          <TitleRow title={PROVIDERS[0].title} items={providers[PROVIDERS[0].id] || []} />
-          <TitleRow title="New Episodes" items={lists?.airingToday || []} variant="backdrop" loading={loading} />
+        <div className="relative z-10 -mt-6 space-y-1 sm:-mt-[7vw] md:space-y-3">
+          <TitleRow title={t('home.top10Tv')} items={lists?.trendingDaily || []} ranked loading={loading} />
+          <TitleRow title={t('home.trendingNow')} items={lists?.trendingWeekly || []} variant="backdrop" loading={loading} />
+          <TitleRow title={t(PROVIDERS[0].title)} items={providers[PROVIDERS[0].id] || []} />
+          <TitleRow title={t('home.newEpisodes')} items={lists?.airingToday || []} variant="backdrop" loading={loading} />
           {genreRows.slice(0, 2).map(r => <TitleRow key={r.id} title={r.title} items={r.items} />)}
-          <TitleRow title="Currently Airing" items={lists?.onTheAir || []} />
+          <TitleRow title={t('home.currentlyAiring')} items={lists?.onTheAir || []} />
           {PROVIDERS.slice(1).map(p => (
-            <TitleRow key={p.id} title={p.title} items={providers[p.id] || []} variant={p.id === 337 ? 'backdrop' : 'poster'} />
+            <TitleRow key={p.id} title={t(p.title)} items={providers[p.id] || []} variant={p.id === 337 ? 'backdrop' : 'poster'} />
           ))}
-          <TitleRow title="Critically Acclaimed TV" items={topRated} variant="backdrop" />
+          <TitleRow title={t('catalog.acclaimedTv')} items={topRated} variant="backdrop" />
           {genreRows.slice(2).map(r => <TitleRow key={r.id} title={r.title} items={r.items} />)}
         </div>
       )}

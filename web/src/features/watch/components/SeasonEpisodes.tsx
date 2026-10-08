@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, Play } from 'lucide-react';
+import { CalendarClock, ChevronDown, Play } from 'lucide-react';
+import { useFormat, useT } from '@/shared/i18n';
 import { getActiveProfileId } from '@/shared/lib/profile';
 import {
   EpisodeInfo,
@@ -10,6 +11,8 @@ import {
   getSeasonEpisodes,
   getTitleProgress,
   progressPercent,
+  isFutureDate,
+  isPlaceholderEpisodeName,
 } from '@/features/watch/api';
 
 interface SeasonEpisodesProps {
@@ -26,6 +29,8 @@ interface SeasonEpisodesProps {
 
 // Netflix-style season selector + episode list with per-episode progress
 export default function SeasonEpisodes({ tmdbId, seasons, initialSeason, fallbackImage, refreshKey = 0, onPlay }: SeasonEpisodesProps) {
+  const t = useT();
+  const f = useFormat();
   const [season, setSeason] = useState<number>(initialSeason || seasons[0]?.season_number || 1);
   const [episodes, setEpisodes] = useState<EpisodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,7 +74,7 @@ export default function SeasonEpisodes({ tmdbId, seasons, initialSeason, fallbac
   return (
     <section className="mt-2">
       <div className="flex items-center justify-between gap-4 mb-4">
-        <h2 className="text-white text-xl md:text-2xl font-bold">Episodes</h2>
+        <h2 className="text-white text-xl md:text-2xl font-bold">{t('detail.episodes')}</h2>
         {seasons.length > 1 ? (
           <div className="relative">
             <select
@@ -79,43 +84,50 @@ export default function SeasonEpisodes({ tmdbId, seasons, initialSeason, fallbac
             >
               {seasons.map(s => (
                 <option key={s.season_number} value={s.season_number} className="bg-[#242424]">
-                  {s.name && !/^Season \d+$/i.test(s.name) ? `${s.name}` : `Season ${s.season_number}`} ({s.episode_count} Episodes)
+                  {s.name && !/^Season \d+$/i.test(s.name) ? s.name : t('detail.season', { n: s.season_number })} ({t('detail.episodeCount', { count: s.episode_count })})
                 </option>
               ))}
             </select>
             <ChevronDown className="w-4 h-4 text-white absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           </div>
         ) : (
-          <span className="text-[#b3b3b3] text-sm md:text-base">Season {season}</span>
+          <span className="text-[#b3b3b3] text-sm md:text-base">{t('detail.season', { n: season })}</span>
         )}
       </div>
 
       <div className="divide-y divide-[#404040] border-y border-[#404040]">
         {loading && episodes.length === 0 && (
-          <div className="py-10 text-center text-[#b3b3b3] text-sm">Loading episodes...</div>
+          <div className="py-10 text-center text-[#b3b3b3] text-sm">{t('detail.loadingEpisodes')}</div>
         )}
         {episodes.map(ep => {
           const p = progress[ep.episode_number] || null;
           const pct = p ? progressPercent(p) : 0;
           const img = ep.still_path ? `/tmdb-img/t/p/w300${ep.still_path}` : fallbackImage;
+          // Not aired yet: dimmed, with its air date, and not playable
+          const upcoming = isFutureDate(ep.air_date);
+          const name = isPlaceholderEpisodeName(ep) ? t('detail.episode', { n: ep.episode_number }) : ep.name;
           return (
             <button
               key={`${ep.season_number}-${ep.episode_number}`}
-              onClick={() => onPlay(season, ep, p)}
-              className="group w-full flex items-center gap-3 md:gap-5 px-2 md:px-4 py-4 text-left hover:bg-[#333] focus:bg-[#333] focus:outline-none rounded transition-colors"
+              onClick={() => { if (!upcoming) onPlay(season, ep, p); }}
+              disabled={upcoming}
+              aria-disabled={upcoming}
+              className={`group w-full flex items-center gap-3 md:gap-5 px-2 md:px-4 py-4 text-left rounded transition-colors focus:outline-none ${upcoming ? 'cursor-default opacity-50' : 'hover:bg-[#333] focus:bg-[#333]'}`}
             >
               <span className="hidden sm:block w-6 shrink-0 text-center text-[#d2d2d2] text-xl md:text-2xl">{ep.episode_number}</span>
               <div className="relative shrink-0 w-32 md:w-40 aspect-video rounded overflow-hidden bg-[#2f2f2f]">
                 {img ? (
-                  <img src={img} alt={ep.name} loading="lazy" className="w-full h-full object-cover" />
+                  <img src={img} alt={name} loading="lazy" className="w-full h-full object-cover" />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-[#b3b3b3] text-xs">E{ep.episode_number}</div>
+                  <div className="w-full h-full flex items-center justify-center text-[#b3b3b3] text-xs">{ep.episode_number}</div>
                 )}
-                <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/40 transition-colors">
-                  <span className="w-9 h-9 rounded-full border-2 border-white bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Play className="w-4 h-4 text-white fill-current translate-x-px" />
-                  </span>
-                </div>
+                {!upcoming && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/40 transition-colors">
+                    <span className="w-9 h-9 rounded-full border-2 border-white bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Play className="w-4 h-4 text-white fill-current translate-x-px" />
+                    </span>
+                  </div>
+                )}
                 {pct > 0 && (
                   <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[#5a5a5a]/80">
                     <div className="h-full bg-[#E50914]" style={{ width: `${pct}%` }} />
@@ -125,9 +137,16 @@ export default function SeasonEpisodes({ tmdbId, seasons, initialSeason, fallbac
               <div className="flex-1 min-w-0">
                 <div className="flex items-baseline justify-between gap-3">
                   <p className="text-white font-semibold text-sm md:text-base truncate">
-                    <span className="sm:hidden">{ep.episode_number}. </span>{ep.name}
+                    <span className="sm:hidden">{ep.episode_number}. </span>{name}
                   </p>
-                  {ep.runtime > 0 && <span className="text-[#d2d2d2] text-sm shrink-0">{ep.runtime}m</span>}
+                  {upcoming ? (
+                    <span className="flex items-center gap-1 text-[#d2d2d2] text-xs md:text-sm shrink-0">
+                      <CalendarClock className="w-4 h-4" />
+                      {t('availability.airsOn', { date: f.date(ep.air_date) })}
+                    </span>
+                  ) : (
+                    ep.runtime > 0 && <span className="text-[#d2d2d2] text-sm shrink-0">{f.duration(ep.runtime)}</span>
+                  )}
                 </div>
                 {!!ep.overview && (
                   <p className="text-[#b3b3b3] text-xs md:text-sm mt-1 line-clamp-2 md:line-clamp-3">{ep.overview}</p>

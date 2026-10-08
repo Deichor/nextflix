@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
+import { useT } from '@/shared/i18n';
 
 export interface HeaderOption {
   value: string;
@@ -24,8 +25,9 @@ interface BrowseHeaderProps {
 
 // Netflix sub-header: big page title + "Genres" dropdown
 export default function BrowseHeader({
-  title, selectedLabel, options, value, onChange, overlay, right, dropdownLabel = 'Genres',
+  title, selectedLabel, options, value, onChange, overlay, right, dropdownLabel,
 }: BrowseHeaderProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -64,7 +66,7 @@ export default function BrowseHeader({
             aria-expanded={open}
             className="flex items-center gap-6 border border-white/80 bg-black px-2.5 py-1 text-sm font-semibold text-white transition-colors hover:bg-white/10"
           >
-            {dropdownLabel}
+            {dropdownLabel || t('catalog.genres')}
             <ChevronDown className={`h-4 w-4 transition-transform ${open ? 'rotate-180' : ''}`} />
           </button>
           {open && (
@@ -74,7 +76,7 @@ export default function BrowseHeader({
                   onClick={() => { onChange?.(''); setOpen(false); }}
                   className="col-span-full mb-1 text-left text-sm font-semibold text-white hover:underline"
                 >
-                  All {title}
+                  {t('catalog.allOf', { title })}
                 </button>
               )}
               {options.map(o => (

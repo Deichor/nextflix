@@ -8,7 +8,8 @@ import NotificationDropdown from "@/features/notifications/components/Notificati
 import ProfileMenu from "@/features/profiles/components/ProfileMenu";
 import { useNavigate } from "@/shared/navigation/useNavigate";
 import { getApiUrl } from "@/shared/lib/api";
-import { Notification, NotificationResponse, NotificationCountResponse } from "@/features/notifications/types";
+import { useNotifications } from "@/features/notifications/store";
+import { useT, type MessageKey } from "@/shared/i18n";
 
 interface NavbarProps {
   onSearch?: (query: string) => void;
@@ -26,21 +27,16 @@ interface TMDBSearchResult {
 }
 
 interface NavItem {
-  name: string;
+  label: MessageKey;
   href: string;
 }
 
 const MAIN_LINKS: NavItem[] = [
-  { name: "Home", href: "/" },
-  { name: "TV Shows", href: "/tv-shows" },
-  { name: "Movies", href: "/movies" },
-  { name: "New & Popular", href: "/new-popular" },
-  { name: "My List", href: "/my-list" },
-];
-
-const EXTRA_LINKS: NavItem[] = [
-  { name: "Trailers", href: "/trailers" },
-  { name: "Providers", href: "/providers" },
+  { label: "nav.home", href: "/" },
+  { label: "nav.tvShows", href: "/tv-shows" },
+  { label: "nav.movies", href: "/movies" },
+  { label: "nav.newPopular", href: "/new-popular" },
+  { label: "nav.favorites", href: "/favorites" },
 ];
 
 const SCROLL_SOLID_AT = 60;
@@ -66,14 +62,13 @@ function useOutsideClose(ref: React.RefObject<HTMLElement | null>, open: boolean
 }
 
 const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
+  const t = useT();
   const navigate = useNavigate();
   const pathname = usePathname();
   const [isScrolled, setIsScrolled] = useState(false);
 
   const [isBrowseOpen, setIsBrowseOpen] = useState(false);
-  const [isMoreOpen, setIsMoreOpen] = useState(false);
   const browseRef = useRef<HTMLDivElement>(null);
-  const moreRef = useRef<HTMLLIElement>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -82,8 +77,7 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
   const searchRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [notificationCount, setNotificationCount] = useState(0);
+  const { unseen: notificationCount } = useNotifications();
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const notificationRef = useRef<HTMLDivElement>(null);
 
@@ -94,39 +88,12 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Notifications: on mount and every 2 minutes
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const apiUrl = getApiUrl();
-        const [listRes, countRes] = await Promise.all([
-          fetch(`${apiUrl}/api/notifications?limit=50`),
-          fetch(`${apiUrl}/api/notifications/count`),
-        ]);
-        if (listRes.ok) {
-          const data: NotificationResponse = await listRes.json();
-          setNotifications(data.notifications || []);
-        }
-        if (countRes.ok) {
-          const data: NotificationCountResponse = await countRes.json();
-          setNotificationCount(data.count || 0);
-        }
-      } catch {
-        /* notifications are optional */
-      }
-    };
-    load();
-    const id = setInterval(load, 2 * 60 * 1000);
-    return () => clearInterval(id);
-  }, []);
-
   useEffect(() => {
     setIsBrowseOpen(false);
-    setIsMoreOpen(false);
+    setIsNotificationOpen(false);
   }, [pathname]);
 
   const closeBrowse = useCallback(() => setIsBrowseOpen(false), []);
-  const closeMore = useCallback(() => setIsMoreOpen(false), []);
   const closeNotifications = useCallback(() => setIsNotificationOpen(false), []);
   const closeSearch = useCallback(() => {
     setIsSearchOpen(false);
@@ -139,7 +106,6 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
   }, [searchQuery, closeSearch]);
 
   useOutsideClose(browseRef, isBrowseOpen, closeBrowse);
-  useOutsideClose(moreRef, isMoreOpen, closeMore);
   useOutsideClose(notificationRef, isNotificationOpen, closeNotifications);
   useOutsideClose(searchRef, isSearchOpen, closeSearchIfEmpty);
 
@@ -209,7 +175,7 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
       onClick={linkClick(item.href, onClick)}
       className={`block w-full px-4 py-2.5 text-center text-sm transition-colors hover:bg-white/10 ${isActive(pathname, item.href) ? "text-white font-bold" : "text-[#b3b3b3] hover:text-white"}`}
     >
-      {item.name}
+      {t(item.label)}
     </NavigationLink>
   );
 
@@ -236,25 +202,10 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
           {MAIN_LINKS.map(item => (
             <li key={item.href}>
               <NavigationLink href={item.href} onClick={linkClick(item.href)} className={linkClass(item.href)}>
-                {item.name}
+                {t(item.label)}
               </NavigationLink>
             </li>
           ))}
-          <li className="relative" ref={moreRef}>
-            <button
-              onClick={() => setIsMoreOpen(o => !o)}
-              className="flex items-center gap-1 text-sm text-[#e5e5e5] hover:text-[#b3b3b3] transition-colors"
-              aria-expanded={isMoreOpen}
-            >
-              More
-              <ChevronDown className={`w-4 h-4 transition-transform ${isMoreOpen ? "rotate-180" : ""}`} />
-            </button>
-            {isMoreOpen && (
-              <div className="absolute left-1/2 -translate-x-1/2 top-full mt-4 w-48 bg-black/90 border border-[#333] border-t-2 border-t-white/80 py-1 z-[60]">
-                {EXTRA_LINKS.map(item => menuLink(item, closeMore))}
-              </div>
-            )}
-          </li>
         </ul>
 
         {/* Mobile "Browse" menu */}
@@ -264,14 +215,12 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
             className="flex items-center gap-1 text-sm font-semibold text-white"
             aria-expanded={isBrowseOpen}
           >
-            Browse
+            {t("nav.browse")}
             <ChevronDown className={`w-4 h-4 transition-transform ${isBrowseOpen ? "rotate-180" : ""}`} />
           </button>
           {isBrowseOpen && (
             <div className="absolute left-1/2 -translate-x-1/2 top-full mt-4 w-60 max-h-[75vh] overflow-y-auto bg-black/90 border border-[#333] border-t-2 border-t-white/80 py-1 z-[60]">
               {MAIN_LINKS.map(item => menuLink(item, closeBrowse))}
-              <div className="my-1 border-t border-[#333]" />
-              {EXTRA_LINKS.map(item => menuLink(item, closeBrowse))}
             </div>
           )}
         </div>
@@ -292,16 +241,16 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   onKeyDown={e => { if (e.key === "Escape") closeSearch(); }}
-                  placeholder="Titles, people, genres"
+                  placeholder={t("nav.searchPlaceholder")}
                   className="w-[36vw] sm:w-[200px] lg:w-[240px] bg-transparent text-white text-sm outline-none placeholder:text-[#8c8c8c]"
-                  aria-label="Search"
+                  aria-label={t("nav.search")}
                 />
-                <button type="button" onClick={closeSearch} className="text-white/70 hover:text-white" aria-label="Close search">
+                <button type="button" onClick={closeSearch} className="text-white/70 hover:text-white" aria-label={t("nav.closeSearch")}>
                   <X className="w-4 h-4" />
                 </button>
               </form>
             ) : (
-              <button onClick={openSearch} className="flex items-center text-white hover:text-[#b3b3b3] transition-colors" aria-label="Search">
+              <button onClick={openSearch} className="flex items-center text-white hover:text-[#b3b3b3] transition-colors" aria-label={t("nav.search")}>
                 <Search className="w-5 h-5 md:w-6 md:h-6" />
               </button>
             )}
@@ -311,7 +260,7 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
                 {isLoadingSuggestions && suggestions.length === 0 ? (
                   <div className="flex items-center justify-center gap-2 p-4 text-sm text-[#b3b3b3]">
                     <span className="w-4 h-4 border-2 border-[#E50914] border-t-transparent rounded-full animate-spin" />
-                    Searching...
+                    {t("nav.searching")}
                   </div>
                 ) : suggestions.length > 0 ? (
                   <div className="py-1">
@@ -333,7 +282,7 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
                         <div className="min-w-0 flex-1">
                           <p className="text-white text-sm font-semibold truncate">{s.title}</p>
                           <p className="text-xs text-[#b3b3b3]">
-                            {s.media_type === "tv" ? "TV Show" : "Movie"}
+                            {s.media_type === "tv" ? t("common.tvShow") : t("common.movie")}
                             {!!yearOf(s.release_date) && ` · ${yearOf(s.release_date)}`}
                             {s.vote_average > 0 && ` · ★ ${s.vote_average.toFixed(1)}`}
                           </p>
@@ -347,11 +296,11 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
                       }}
                       className="w-full px-3 py-2.5 text-left text-sm text-white/80 hover:text-white hover:bg-white/10 border-t border-[#333]"
                     >
-                      See all results for &quot;{searchQuery.trim()}&quot;
+                      {t("nav.seeAllResults", { query: searchQuery.trim() })}
                     </button>
                   </div>
                 ) : !isLoadingSuggestions ? (
-                  <div className="p-4 text-center text-sm text-[#b3b3b3]">No results for &quot;{searchQuery.trim()}&quot;</div>
+                  <div className="p-4 text-center text-sm text-[#b3b3b3]">{t("nav.noResults", { query: searchQuery.trim() })}</div>
                 ) : null}
               </div>
             )}
@@ -362,21 +311,17 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
             <button
               onClick={() => setIsNotificationOpen(o => !o)}
               className="relative flex items-center text-white hover:text-[#b3b3b3] transition-colors"
-              aria-label="Notifications"
+              aria-label={notificationCount > 0 ? t("nav.notificationsNew", { count: notificationCount }) : t("nav.notifications")}
+              aria-expanded={isNotificationOpen}
             >
               <Bell className="w-5 h-5 md:w-6 md:h-6" />
               {notificationCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-[#E50914] text-[10px] font-bold leading-4 text-center">
+                <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-[#E50914] text-[10px] font-bold leading-4 text-center text-white">
                   {notificationCount > 9 ? "9+" : notificationCount}
                 </span>
               )}
             </button>
-            <NotificationDropdown
-              isOpen={isNotificationOpen}
-              onClose={closeNotifications}
-              notifications={notifications}
-              onNotificationClick={() => setIsNotificationOpen(false)}
-            />
+            <NotificationDropdown isOpen={isNotificationOpen} onClose={closeNotifications} />
           </div>
 
           <ProfileMenu />

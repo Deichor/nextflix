@@ -10,6 +10,9 @@ const REMOVED_ROUTES = [
   '/dialog-demo',
   '/music',
   '/music/:path*',
+  '/trailers',
+  '/providers',
+  '/providers/:path*',
 ];
 
 /** @type {import('next').NextConfig} */
@@ -116,21 +119,31 @@ const nextConfig = {
   },
 
   async redirects() {
-    return REMOVED_ROUTES.map((source) => ({ source, destination: '/', permanent: false }));
+    return [
+      // My List became Favorites
+      { source: '/my-list', destination: '/favorites', permanent: false },
+      ...REMOVED_ROUTES.map((source) => ({ source, destination: '/', permanent: false })),
+    ];
   },
 
   async rewrites() {
-    return [
-      // Proxy TMDB images through the server so browsers never resolve image.tmdb.org themselves
-      {
-        source: '/tmdb-img/:path*',
-        destination: 'https://image.tmdb.org/:path*',
-      },
-      {
-        source: '/api/:path*',
-        destination: `${process.env.BACKEND_INTERNAL_URL || 'http://localhost:8252'}/api/:path*`,
-      },
-    ];
+    const backend = process.env.BACKEND_INTERNAL_URL || 'http://localhost:8252';
+    const tvApp = process.env.TV_APP_INTERNAL_URL || 'http://tvapp';
+    return {
+      // The TV app for the TV's own browser: http://tv.nextflix.local (or nextflix-tv.local)
+      beforeFiles: [
+        {
+          source: '/:path*',
+          has: [{ type: 'host', value: '(?:tv\\.nextflix|nextflix-tv)\\.local' }],
+          destination: `${tvApp}/:path*`,
+        },
+      ],
+      afterFiles: [
+        // TMDB images go through the Go server's disk cache (browsers never resolve image.tmdb.org themselves)
+        { source: '/tmdb-img/:path*', destination: `${backend}/tmdb-img/:path*` },
+        { source: '/api/:path*', destination: `${backend}/api/:path*` },
+      ],
+    };
   },
 
   env: {

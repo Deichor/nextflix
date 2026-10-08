@@ -16,17 +16,13 @@ import {
   getJson,
   uniqueTitles,
 } from '@/features/catalog/titles';
+import { useT } from '@/shared/i18n';
 
 type TypeFilter = 'all' | 'movie' | 'tv';
 
-const TYPE_OPTIONS = [
-  { value: 'all', label: 'All' },
-  { value: 'movie', label: 'Movies' },
-  { value: 'tv', label: 'TV Shows' },
-];
-
 function SearchContent() {
-  usePageTitle('Search');
+  const t = useT();
+  usePageTitle(t('search.title'));
   const router = useRouter();
   const searchParams = useSearchParams();
   const urlQuery = searchParams?.get('q') || '';
@@ -99,14 +95,15 @@ function SearchContent() {
             ref={inputRef}
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Titles, people, genres"
+            placeholder={t('nav.searchPlaceholder')}
+            aria-label={t('nav.search')}
             className="w-full border border-white/30 bg-black/60 py-3.5 pl-14 pr-12 text-lg text-white placeholder-[#8c8c8c] focus:border-white focus:outline-none md:text-xl"
           />
           {!!query && (
             <button
               onClick={() => { setQuery(''); inputRef.current?.focus(); syncedQuery.current = ''; router.replace('/search', { scroll: false }); }}
               className="absolute right-4 top-1/2 -translate-y-1/2 text-[#b3b3b3] hover:text-white"
-              aria-label="Clear search"
+              aria-label={t('search.clear')}
             >
               <X className="h-6 w-6" />
             </button>
@@ -117,7 +114,7 @@ function SearchContent() {
           <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2">
             {related.length > 0 && (
               <p className="text-sm text-[#808080]">
-                Explore titles related to:{' '}
+                {t('search.relatedTo')}{' '}
                 {related.map((g, i) => (
                   <span key={g} className="text-white">
                     {g}{i < related.length - 1 && <span className="mx-2 text-[#808080]">|</span>}
@@ -126,7 +123,16 @@ function SearchContent() {
               </p>
             )}
             <div className="ml-auto">
-              <NfSelect label="Type" value={typeFilter} onChange={v => setTypeFilter(v as TypeFilter)} options={TYPE_OPTIONS} />
+              <NfSelect
+                label={t('search.type')}
+                value={typeFilter}
+                onChange={v => setTypeFilter(v as TypeFilter)}
+                options={[
+                  { value: 'all', label: t('common.all') },
+                  { value: 'movie', label: t('common.movies') },
+                  { value: 'tv', label: t('common.tvShows') },
+                ]}
+              />
             </div>
           </div>
         )}
@@ -134,7 +140,7 @@ function SearchContent() {
 
       <div className="mt-6">
         {!query.trim() ? (
-          <TitleRow title="Popular Searches" items={suggestions} variant="backdrop" loading={suggestions.length === 0} />
+          <TitleRow title={t('search.popular')} items={suggestions} variant="backdrop" loading={suggestions.length === 0} />
         ) : loading && !searched ? (
           <div className="px-4 md:px-12"><TitleGrid items={[]} loading /></div>
         ) : filtered.length > 0 ? (
@@ -143,8 +149,8 @@ function SearchContent() {
           </div>
         ) : searched ? (
           <EmptyState
-            title={`Your search for "${query.trim()}" did not have any matches.`}
-            text="Try different keywords, or search for a movie or TV show title."
+            title={t('search.noMatches', { query: query.trim() })}
+            text={t('search.noMatchesHint')}
           />
         ) : null}
       </div>

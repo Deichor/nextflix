@@ -2,28 +2,36 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
+import { useActiveProfile } from '@/shared/lib/profile';
+import { useT, type MessageKey } from '@/shared/i18n';
 import Navbar from "@/features/shell/Navbar";
 import ErrorBoundary from "@/shared/ui/ErrorBoundary";
 import ContinueWatchingRow from '@/features/watch/components/ContinueWatchingRow';
 import Billboard from '@/features/home/components/HomeBillboard';
 import Row, { LazyRow } from '@/features/home/components/HomeRow';
 import { TitleActionsProvider } from '@/features/home/components/TitleActions';
+import { recommendationTitle, useRecommendations } from '@/features/home/useRecommendations';
 import {
   HomeFeeds,
   TitleItem,
   discoverMovies,
   fetchHomeFeeds,
   fetchPopularMovies,
+  fetchTop10,
   interleave,
 } from '@/features/home/feeds';
 
-const GENRE_ROWS: { title: string; params: Record<string, string> }[] = [
-  { title: 'Action & Adventure Movies', params: { with_genres: '28|12', 'vote_count.gte': '300' } },
-  { title: 'Comedies', params: { with_genres: '35', 'vote_count.gte': '300' } },
-  { title: 'Sci-Fi & Fantasy', params: { with_genres: '878|14', 'vote_count.gte': '300' } },
-  { title: 'Horror Movies', params: { with_genres: '27', 'vote_count.gte': '200' } },
-  { title: 'Critically Acclaimed Movies', params: { sort_by: 'vote_average.desc', 'vote_count.gte': '5000' } },
+// Keep the params in sync with homeGenreRows in server/internal/modules/images/warmer.go
+const GENRE_ROWS: { title: MessageKey; params: Record<string, string> }[] = [
+  { title: 'home.genreActionAdventure', params: { with_genres: '28|12', 'vote_count.gte': '300' } },
+  { title: 'home.genreComedies', params: { with_genres: '35', 'vote_count.gte': '300' } },
+  { title: 'home.genreSciFiFantasy', params: { with_genres: '878|14', 'vote_count.gte': '300' } },
+  { title: 'home.genreHorror', params: { with_genres: '27', 'vote_count.gte': '200' } },
+  { title: 'home.genreAcclaimedMovies', params: { sort_by: 'vote_average.desc', 'vote_count.gte': '5000' } },
 ];
+
+const loadTop10Movies = (signal: AbortSignal) => fetchTop10('TR', 'movie', signal);
+const loadTop10Tv = (signal: AbortSignal) => fetchTop10('TR', 'tv', signal);
 
 // Billboard candidate: a well-known title with artwork and a synopsis
 function pickFeatured(feeds: HomeFeeds): TitleItem | null {
@@ -35,8 +43,11 @@ function pickFeatured(feeds: HomeFeeds): TitleItem | null {
 }
 
 export default function Home() {
-  usePageTitle('Home');
+  const t = useT();
+  usePageTitle(t('nav.home'));
+  const profile = useActiveProfile();
   const [feeds, setFeeds] = useState<HomeFeeds | null>(null);
+  const recommendations = useRecommendations(profile?.id ?? null);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -63,6 +74,8 @@ export default function Home() {
     return future.length >= 5 ? future : list;
   }, [feeds]);
   const loading = !feeds;
+  // A profile without signals gets the server's "Trending Now" row; then the local one would repeat it
+  const serverTrending = !!recommendations?.some(r => r.id === 'trending' || r.reason === 'popular');
 
   return (
     <TitleActionsProvider>
@@ -78,14 +91,26 @@ export default function Home() {
             <ContinueWatchingRow />
           </ErrorBoundary>
 
-          <Row title="Trending Now" items={trending} loading={loading} />
-          <LazyRow title="Popular Movies" load={fetchPopularMovies} />
-          <Row title="Popular TV Shows" items={feeds?.popularTv ?? []} loading={loading} />
-          <Row title="Coming Soon" items={comingSoon} loading={loading} variant="poster" playable={false} />
-          <Row title="New Episodes" items={feeds?.onTheAirTv ?? []} />
+          <ErrorBoundary>
+            {recommendations === null && !!profile ? (
+              <Row title="" items={[]} loading />
+            ) : (
+              (recommendations || []).map(r => (
+                <Row key={r.id} title={recommendationTitle(t, r)} items={r.items} />
+              ))
+            )}
+          </ErrorBoundary>
+
+          {!serverTrending && <Row title={t('home.trendingNow')} items={trending} loading={loading} />}
+          <LazyRow title={t('home.top10TrMovies')} load={loadTop10Movies} ranked />
+          <LazyRow title={t('home.popularMovies')} load={fetchPopularMovies} />
+          <LazyRow title={t('home.top10TrTv')} load={loadTop10Tv} ranked />
+          <Row title={t('home.popularTv')} items={feeds?.popularTv ?? []} loading={loading} />
+          <Row title={t('home.comingSoon')} items={comingSoon} loading={loading} variant="poster" playable={false} />
+          <Row title={t('home.newEpisodes')} items={feeds?.onTheAirTv ?? []} />
 
           {GENRE_ROWS.map(g => (
-            <LazyRow key={g.title} title={g.title} load={signal => discoverMovies(g.params, signal)} />
+            <LazyRow key={g.title} title={t(g.title)} load={signal => discoverMovies(g.params, signal)} />
           ))}
         </main>
       </div>

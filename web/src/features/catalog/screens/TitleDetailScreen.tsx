@@ -7,7 +7,7 @@ import { ExternalLink, Volume2, VolumeX } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import RedLoader from '@/shared/ui/RedLoader';
 import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
-import WatchButton, { formatRemaining } from '@/features/watch/components/WatchButton';
+import WatchButton, { formatRemaining, useAvailability } from '@/features/watch/components/WatchButton';
 import SeasonEpisodes from '@/features/watch/components/SeasonEpisodes';
 import { useActiveProfile } from '@/shared/lib/profile';
 import {
@@ -19,20 +19,28 @@ import {
   isFinished,
   nextEpisodeOf,
   normalizeSeasons,
+  prefetchResolve,
+  releaseTitle,
+  type ResolveParams,
+  type AvailabilityTarget,
   progressPercent,
   progressToRequest,
   episodeLabel,
+  isPlaceholderEpisodeName,
 } from '@/features/watch/api';
 import NetflixPage from '@/features/shell/PageShell';
+import { useSourceQuality } from '@/features/watch/useSourceQuality';
 import {
   InfoLine,
   MetaLine,
   MoreLikeThis,
-  MyListButton,
   RoundButton,
-  formatRuntime,
 } from '@/features/catalog/components/DetailParts';
 import { NfTitle, fetchLogo, fetchRelated, imageUrl } from '@/features/catalog/titles';
+import RatingButtons from '@/features/favorites/components/RatingButtons';
+import { useFormat, useLocale, useT, intlLocale, type Locale } from '@/shared/i18n';
+import TmdbImage from '@/shared/ui/TmdbImage';
+import { BILLBOARD_SIZES } from '@/shared/lib/image';
 
 interface Person {
   id: number;
@@ -78,6 +86,7 @@ interface UnifiedMediaDetails {
   genres: Array<{ id: number; name: string }>;
   production_countries?: Array<{ iso_3166_1: string; name: string }>;
   spoken_languages?: Array<{ iso_639_1: string; name: string; english_name?: string }>;
+  original_language?: string;
   tagline?: string;
   status?: string;
   adult?: boolean;
@@ -124,18 +133,18 @@ function findBestTrailer(videos: VideoItem[]) {
   );
 }
 
-function formatDate(dateString?: string) {
-  if (!dateString) return '';
-  const d = new Date(dateString);
-  return isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+function formatCurrency(locale: Locale, amount?: number) {
+  if (!amount) return '';
+  return new Intl.NumberFormat(intlLocale(locale), { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(amount);
 }
 
-function formatCurrency(amount?: number) {
-  if (!amount) return '';
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(amount);
-}
+// Seconds a warmed source survives the viewer leaving the detail page
+const LEAVE_GRACE_S = 60;
 
 const TMDBMoviePage: React.FC = () => {
+  const t = useT();
+  const f = useFormat();
+  const locale = useLocale();
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -145,6 +154,7 @@ const TMDBMoviePage: React.FC = () => {
 
   const [mediaDetails, setMediaDetails] = useState<UnifiedMediaDetails | null>(null);
   const [loading, setLoading] = useState(true);
+  const [qualitySource, setQualitySource] = useState<ResolveParams | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [trailerKey, setTrailerKey] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -163,7 +173,7 @@ const TMDBMoviePage: React.FC = () => {
 
   const movieId = params?.id as string;
   const typeParam = searchParams?.get('type') || '';
-  usePageTitle(mediaDetails?.title || 'Details');
+  usePageTitle(mediaDetails?.title || t('detail.moreInfo'));
 
   useEffect(() => {
     if (!movieId) return;
@@ -222,8 +232,25 @@ const TMDBMoviePage: React.FC = () => {
       poster_path: mediaDetails?.poster_path || '',
       backdrop_path: mediaDetails?.backdrop_path || '',
       year: Number.isFinite(year) ? year : undefined,
+      runtime: mediaDetails?.media_type === 'tv' ? undefined : mediaDetails?.runtime || undefined,
+      original_language: mediaDetails?.original_language || undefined,
     };
   }, [mediaDetails, movieId]);
+
+  // Leaving the page (or the tab) without playing releases the warmed source after a grace,
+  // in case the viewer comes back; a new prefetch or Play cancels it on the server.
+  const warmedRef = useRef<ResolveParams | null>(null);
+  useEffect(() => {
+    const leave = () => {
+      if (warmedRef.current) releaseTitle(warmedRef.current, LEAVE_GRACE_S);
+    };
+    window.addEventListener('pagehide', leave);
+    return () => {
+      window.removeEventListener('pagehide', leave);
+      leave();
+      warmedRef.current = null;
+    };
+  }, [movieId]);
 
   // Saved progress: the movie itself, or the TV episode the profile is in the middle of
   useEffect(() => {
@@ -231,28 +258,67 @@ const TMDBMoviePage: React.FC = () => {
     if (!mediaDetails || !pid) { setSavedProgress(null); return; }
     let cancelled = false;
     (async () => {
+      const entries = await getTitleProgress(pid, mediaDetails.media_type, mediaDetails.id);
+      if (cancelled) return;
       let p: StreamProgress | null = null;
       let next: { season: number; episode: number } | null = null;
       if (mediaDetails.media_type === 'movie') {
-        p = findProgress(await getTitleProgress(pid, 'movie', mediaDetails.id));
+        p = findProgress(entries);
       } else {
         // Newest entry decides: resume it, or continue with the episode after a finished one
-        const latest = (await getTitleProgress(pid, 'tv', mediaDetails.id))[0] || null;
+        const latest = entries[0] || null;
         if (latest && isFinished(latest)) next = nextEpisodeOf(tvSeasons, latest.season, latest.episode);
         else p = latest;
       }
-      if (cancelled) return;
       setSavedProgress(p && !isFinished(p) ? p : null);
       setNextUp(next);
+
+      // Opening the detail page is the intent to watch: warm up the source Play will use,
+      // unless it already has a saved torrent. Leaving the page releases it (see below).
+      const year = mediaDetails.release_date ? new Date(mediaDetails.release_date).getFullYear() : NaN;
+      let target: ResolveParams | null = null;
+      let saved = false;
+      if (mediaDetails.media_type === 'movie') {
+        target = { type: 'movie', title: mediaDetails.title, tmdb_id: mediaDetails.id, year: Number.isFinite(year) ? year : undefined, runtime: mediaDetails.runtime || undefined };
+        saved = !!findProgress(entries)?.hash;
+      } else if (tvSeasons.length > 0) {
+        const ep = p && !isFinished(p)
+          ? { season: p.season, episode: p.episode }
+          : next || { season: tvSeasons[0].season_number, episode: 1 };
+        target = { type: 'tv', title: mediaDetails.title, tmdb_id: mediaDetails.id, season: ep.season, episode: ep.episode };
+        saved = !!findProgress(entries, ep.season, ep.episode)?.hash;
+      }
+      if (target) {
+        if (!saved) {
+          const prev = warmedRef.current;
+          if (prev && JSON.stringify(prev) !== JSON.stringify(target)) releaseTitle(prev, LEAVE_GRACE_S);
+          warmedRef.current = target;
+          prefetchResolve(target);
+        }
+        setQualitySource(target);
+      }
     })();
     return () => { cancelled = true; };
   }, [mediaDetails, tvSeasons, activeProfile?.id, progressRefresh]);
 
+  const qualityBadgeList = useSourceQuality(qualitySource);
+
+  // Is what Play would start out yet? (the movie, or the episode it resumes / continues with)
+  const playTarget = useMemo<AvailabilityTarget | null>(() => {
+    if (!mediaDetails) return null;
+    if (mediaDetails.media_type === 'movie') return { media_type: 'movie', tmdb_id: mediaDetails.id };
+    const ep = savedProgress
+      ? { season: savedProgress.season, episode: savedProgress.episode }
+      : nextUp || (tvSeasons[0] ? { season: tvSeasons[0].season_number, episode: 1 } : null);
+    return ep ? { media_type: 'tv', tmdb_id: mediaDetails.id, ...ep } : null;
+  }, [mediaDetails, savedProgress, nextUp, tvSeasons]);
+  const availability = useAvailability(playTarget);
+
   const resumeInfo = savedProgress && savedProgress.position > 0
     ? {
-        label: savedProgress.media_type === 'tv' ? episodeLabel(savedProgress.season, savedProgress.episode) : '',
+        label: savedProgress.media_type === 'tv' ? episodeLabel(savedProgress.season, savedProgress.episode, locale) : '',
         percent: progressPercent(savedProgress),
-        remaining: formatRemaining(savedProgress.position, savedProgress.duration),
+        remaining: formatRemaining(savedProgress.position, savedProgress.duration, locale),
       }
     : null;
 
@@ -335,10 +401,10 @@ const TMDBMoviePage: React.FC = () => {
     return (
       <NetflixPage>
         <div className="flex min-h-screen flex-col items-center justify-center px-6 text-center">
-          <h1 className="mb-3 text-2xl font-bold">Title not found</h1>
-          <p className="mb-6 text-[#b3b3b3]">{error || 'The requested movie or TV show could not be found.'}</p>
+          <h1 className="mb-3 text-2xl font-bold">{t('detail.notFound')}</h1>
+          <p className="mb-6 text-[#b3b3b3]">{error ? t('detail.loadFailed') : t('detail.notFoundText')}</p>
           <button onClick={() => router.back()} className="rounded bg-white px-6 py-2 font-bold text-black hover:bg-white/80">
-            Go Back
+            {t('detail.goBack')}
           </button>
         </div>
       </NetflixPage>
@@ -354,12 +420,17 @@ const TMDBMoviePage: React.FC = () => {
   const creators = (mediaDetails.created_by || []).map(c => c.name);
   const genres = (mediaDetails.genres || []).map(g => g.name);
   const extra = isTv
-    ? (mediaDetails.number_of_seasons
-      ? `${mediaDetails.number_of_seasons} Season${mediaDetails.number_of_seasons > 1 ? 's' : ''}`
-      : '')
-    : formatRuntime(mediaDetails.runtime);
-  const backdrop = imageUrl(mediaDetails.backdrop_path, 'original');
-  const listItem = { id: mediaDetails.id, mediaType: mediaDetails.media_type };
+    ? (mediaDetails.number_of_seasons ? t('detail.seasons', { count: mediaDetails.number_of_seasons }) : '')
+    : (mediaDetails.runtime || 0) > 0 ? f.duration(mediaDetails.runtime!) : '';
+  const backdrop = mediaDetails.backdrop_path;
+  const rateItem = {
+    id: mediaDetails.id,
+    mediaType: mediaDetails.media_type,
+    title: mediaDetails.title,
+    posterPath: mediaDetails.poster_path || undefined,
+    backdropPath: mediaDetails.backdrop_path || undefined,
+  };
+  const releaseDate = mediaDetails.release_date ? f.date(mediaDetails.release_date) : '';
   const showTrailer = !!trailerKey && isPlaying;
 
   return (
@@ -367,10 +438,14 @@ const TMDBMoviePage: React.FC = () => {
       {/* Hero */}
       <div ref={heroRef} className="relative h-[75vw] max-h-[85vh] min-h-[460px] w-full overflow-hidden sm:h-[56.25vw]">
         {backdrop ? (
-          <img
+          <TmdbImage
+            key={backdrop}
             src={backdrop}
-            alt=""
-            className={`absolute inset-0 h-full w-full object-cover object-top transition-opacity duration-1000 ${showTrailer && isVideoLoaded ? 'opacity-0' : 'opacity-100'}`}
+            kind="billboard"
+            sizes={BILLBOARD_SIZES}
+            priority="high"
+            className="object-top"
+            wrapperClassName={`transition-opacity duration-1000 ${showTrailer && isVideoLoaded ? 'opacity-0' : 'opacity-100'}`}
           />
         ) : (
           <div className="absolute inset-0 bg-gradient-to-br from-[#2a2a2a] to-[#141414]" />
@@ -380,7 +455,7 @@ const TMDBMoviePage: React.FC = () => {
           <div className={`pointer-events-none absolute inset-0 overflow-hidden transition-opacity duration-1000 ${isVideoLoaded ? 'opacity-100' : 'opacity-0'}`}>
             <iframe
               ref={videoRef}
-              title="Trailer"
+              title={t('detail.trailer')}
               src={`https://www.youtube.com/embed/${trailerKey}?autoplay=1&mute=1&controls=0&rel=0&iv_load_policy=3&modestbranding=1&enablejsapi=1&loop=1&playlist=${trailerKey}&disablekb=1&fs=0&cc_load_policy=0&playsinline=1&origin=${typeof window !== 'undefined' ? window.location.origin : ''}`}
               allow="autoplay; encrypted-media"
               referrerPolicy="strict-origin-when-cross-origin"
@@ -408,14 +483,15 @@ const TMDBMoviePage: React.FC = () => {
           )}
 
           <div className="flex items-center gap-2 md:gap-3">
-            <WatchButton onClick={handleWatch} resume={!!resumeInfo} detail={resumeInfo?.label || (nextUp ? episodeLabel(nextUp.season, nextUp.episode) : undefined)} />
-            <MyListButton item={listItem} />
+            <WatchButton onClick={handleWatch} availability={availability} resume={!!resumeInfo} detail={resumeInfo?.label || (nextUp ? episodeLabel(nextUp.season, nextUp.episode, locale) : undefined)} />
+            <RatingButtons item={rateItem} size="md" />
             {!!mediaDetails.homepage && (
               <a
                 href={mediaDetails.homepage}
                 target="_blank"
                 rel="noopener noreferrer"
-                title="Official Site"
+                title={t('detail.officialSite')}
+                aria-label={t('detail.officialSite')}
                 className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-white/50 bg-[#2a2a2a]/60 text-white transition-colors hover:border-white md:h-11 md:w-11"
               >
                 <ExternalLink className="h-4 w-4" />
@@ -437,7 +513,7 @@ const TMDBMoviePage: React.FC = () => {
 
         {showTrailer && (
           <div className="absolute bottom-[14%] right-4 z-10 md:right-12">
-            <RoundButton onClick={toggleMute} title={isMuted ? 'Unmute' : 'Mute'}>
+            <RoundButton onClick={toggleMute} title={t(isMuted ? 'detail.unmuteTrailer' : 'detail.muteTrailer')}>
               {isMuted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
             </RoundButton>
           </div>
@@ -448,19 +524,19 @@ const TMDBMoviePage: React.FC = () => {
       <div className="relative z-10 px-4 md:px-12">
         <div className="grid gap-6 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] md:gap-12">
           <div>
-            <MetaLine rating={mediaDetails.vote_average} year={year} extra={extra} adult={mediaDetails.adult} />
+            <MetaLine rating={mediaDetails.vote_average} year={year} extra={extra} adult={mediaDetails.adult} badges={qualityBadgeList} />
             {!!mediaDetails.tagline && (
               <p className="mt-3 text-base font-semibold italic text-white/90">{mediaDetails.tagline}</p>
             )}
             <p className="mt-3 max-w-3xl text-sm leading-relaxed text-white md:text-base">
-              {mediaDetails.overview || 'No description available.'}
+              {mediaDetails.overview || t('detail.noDescription')}
             </p>
           </div>
           <div className="space-y-2">
-            <InfoLine label="Cast" values={cast} />
-            <InfoLine label="Genres" values={genres} />
-            {isTv ? <InfoLine label="Created by" values={creators} /> : <InfoLine label="Director" values={directors} />}
-            {isTv && <InfoLine label="Network" values={(mediaDetails.networks || []).map(n => n.name)} />}
+            <InfoLine label={t('detail.cast')} values={cast} />
+            <InfoLine label={t('detail.genres')} values={genres} />
+            {isTv ? <InfoLine label={t('detail.createdBy')} values={creators} /> : <InfoLine label={t('detail.director')} values={directors} />}
+            {isTv && <InfoLine label={t('detail.network')} values={(mediaDetails.networks || []).map(n => n.name)} />}
           </div>
         </div>
 
@@ -483,7 +559,7 @@ const TMDBMoviePage: React.FC = () => {
                       ...buildMeta(),
                       season,
                       episode: ep.episode_number,
-                      episode_title: ep.name && ep.name !== `Episode ${ep.episode_number}` ? ep.name : undefined,
+                      episode_title: ep.name && !isPlaceholderEpisodeName(ep) ? ep.name : undefined,
                     },
                   });
                 }
@@ -499,22 +575,22 @@ const TMDBMoviePage: React.FC = () => {
         {/* About */}
         <section className="mt-12 max-w-4xl">
           <h2 className="mb-4 text-xl font-bold md:text-2xl">
-            About <span className="font-bold">{mediaDetails.title}</span>
+            {t.rich('detail.about', { title: <span key="t" className="font-bold">{mediaDetails.title}</span> })}
           </h2>
           <div className="space-y-2">
-            {isTv ? <InfoLine label="Creators" values={creators} max={10} /> : <InfoLine label="Director" values={directors} max={10} />}
-            <InfoLine label="Cast" values={cast} max={15} />
-            <InfoLine label="Writer" values={writers} max={8} />
-            <InfoLine label="Genres" values={genres} max={10} />
-            <InfoLine label={isTv ? 'First aired' : 'Release'} values={formatDate(mediaDetails.release_date) ? [formatDate(mediaDetails.release_date)] : []} />
+            {isTv ? <InfoLine label={t('detail.creators')} values={creators} max={10} /> : <InfoLine label={t('detail.director')} values={directors} max={10} />}
+            <InfoLine label={t('detail.cast')} values={cast} max={15} />
+            <InfoLine label={t('detail.writer')} values={writers} max={8} />
+            <InfoLine label={t('detail.genres')} values={genres} max={10} />
+            <InfoLine label={t(isTv ? 'detail.firstAired' : 'detail.release')} values={releaseDate ? [releaseDate] : []} />
             {isTv && (mediaDetails.number_of_episodes || 0) > 0 && (
-              <InfoLine label="Episodes" values={[String(mediaDetails.number_of_episodes)]} />
+              <InfoLine label={t('detail.episodes')} values={[f.number(mediaDetails.number_of_episodes!)]} />
             )}
-            <InfoLine label="Country" values={(mediaDetails.production_countries || []).map(c => c.name)} max={3} />
-            <InfoLine label="Language" values={(mediaDetails.spoken_languages || []).map(l => l.english_name || l.name)} max={3} />
-            {!!mediaDetails.status && <InfoLine label="Status" values={[mediaDetails.status]} />}
-            {!isTv && (mediaDetails.budget || 0) > 0 && <InfoLine label="Budget" values={[formatCurrency(mediaDetails.budget)]} />}
-            {!isTv && (mediaDetails.revenue || 0) > 0 && <InfoLine label="Box office" values={[formatCurrency(mediaDetails.revenue)]} />}
+            <InfoLine label={t('detail.country')} values={(mediaDetails.production_countries || []).map(c => c.name)} max={3} />
+            <InfoLine label={t('detail.language')} values={(mediaDetails.spoken_languages || []).map(l => l.english_name || l.name)} max={3} />
+            {!!mediaDetails.status && <InfoLine label={t('detail.status')} values={[mediaDetails.status]} />}
+            {!isTv && (mediaDetails.budget || 0) > 0 && <InfoLine label={t('detail.budget')} values={[formatCurrency(locale, mediaDetails.budget)]} />}
+            {!isTv && (mediaDetails.revenue || 0) > 0 && <InfoLine label={t('detail.boxOffice')} values={[formatCurrency(locale, mediaDetails.revenue)]} />}
           </div>
         </section>
       </div>

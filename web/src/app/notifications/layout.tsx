@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Live Activity",
-  description: "New releases, trailers and recommendations",
+  title: "Notifications",
+  description: "New arrivals, upcoming releases and new episodes",
 };
 
 export default function NotificationsLayout({

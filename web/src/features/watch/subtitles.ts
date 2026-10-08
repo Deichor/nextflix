@@ -1,0 +1,303 @@
+import { getApiUrl } from '@/shared/lib/api';
+import { intlLocale, type Locale } from '@/shared/i18n/core';
+import { type SubtitleSize } from '@/features/settings/playerPrefs';
+import { normLang } from '@/features/watch/lang';
+
+export { normLang };
+export { pickAudioTrack, type AudioTrackInfo } from '@/features/watch/audioPick';
+
+// ---- Languages ----
+
+const displayNames: Partial<Record<Locale, Intl.DisplayNames | null>> = {};
+
+/** Full language name in the UI language ("İngilizce", "Spanish"), the code when Intl does not know it. */
+export function languageName(locale: Locale, code: string): string {
+  if (!code) return '';
+  if (displayNames[locale] === undefined) {
+    try {
+      displayNames[locale] = new Intl.DisplayNames([intlLocale(locale)], { type: 'language' });
+    } catch {
+      displayNames[locale] = null;
+    }
+  }
+  let name = code;
+  try {
+    name = displayNames[locale]?.of(code) || code;
+  } catch {
+    /* invalid code */
+  }
+  return name.charAt(0).toLocaleUpperCase(intlLocale(locale)) + name.slice(1);
+}
+
+// ---- Per-profile player preferences (localStorage) ----
+
+export interface PlayerPrefs {
+  /** Last audio language the viewer picked (ISO 639-1), or 'original' (Settings) for the title's original language */
+  audioLang?: string;
+  /** Last subtitle choice: off, or a language (plus the exact file when it is offered again) */
+  sub?: 'off' | { lang: string; id?: string };
+  /** Subtitle text size (Settings) */
+  subSize?: SubtitleSize;
+  /** Start the next episode after the countdown (Settings, default on) */
+  autoplayNext?: boolean;
+}
+
+const prefsKey = (profileId: number | null) => `hfx-player:${profileId ?? 0}`;
+
+export function readPlayerPrefs(profileId: number | null): PlayerPrefs {
+  try {
+    const raw = window.localStorage.getItem(prefsKey(profileId));
+    return raw ? (JSON.parse(raw) as PlayerPrefs) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writePlayerPrefs(profileId: number | null, patch: Partial<PlayerPrefs>): void {
+  try {
+    const next = { ...readPlayerPrefs(profileId), ...patch };
+    window.localStorage.setItem(prefsKey(profileId), JSON.stringify(next));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+// ---- Subtitles API ----
+
+export type SubtitleSource = 'torrent' | 'embedded' | 'opensubtitles' | 'subdl' | 'turkcealtyazi' | string;
+
+export interface SubtitleItem {
+  id: string;
+  source: SubtitleSource;
+  language: string;
+  label: string;
+  release: string;
+  hi: boolean;
+  forced: boolean;
+  /** Hash match or from the same torrent: timing fits this file */
+  synced: boolean;
+  score: number;
+  /** Embedded track of a big file: read while it plays, its cues grow (fetch with the position) */
+  live?: boolean;
+}
+
+export interface SubtitleQuery {
+  tmdb_id: number;
+  media_type: 'movie' | 'tv';
+  season?: number;
+  episode?: number;
+  hash: string;
+  index: number;
+  langs: string[];
+  /** Torrent / release name, helps matching */
+  title?: string;
+  year?: number;
+}
+
+const listCache = new Map<string, Promise<SubtitleItem[]>>();
+
+/**
+ * Subtitles for the playing file, best first per language. Cached per file for the session;
+ * fresh skips the cache (slow providers finish after the first answer) and replaces it.
+ */
+export function fetchSubtitles(q: SubtitleQuery, opts: { fresh?: boolean; refresh?: boolean } = {}): Promise<SubtitleItem[]> {
+  const p = new URLSearchParams({
+    tmdb_id: String(q.tmdb_id),
+    media_type: q.media_type,
+    hash: q.hash,
+    index: String(q.index),
+    langs: q.langs.join(','),
+  });
+  if (q.media_type === 'tv') {
+    p.set('season', String(q.season ?? 1));
+    p.set('episode', String(q.episode ?? 1));
+  }
+  if (q.title) p.set('title', q.title);
+  if (q.year) p.set('year', String(q.year));
+  const key = p.toString();
+  const hit = listCache.get(key);
+  if (opts.refresh) opts = { ...opts, fresh: true };
+  if (hit && !opts.fresh) return hit;
+  // refresh=1: the server asks the providers again (late uploads; it limits how often)
+  const req = fetch(`${getApiUrl()}/api/subtitles?${key}${opts.refresh ? '&refresh=1' : ''}`)
+    .then(res => (res.ok ? res.json() : { items: [] }))
+    .then(data => (Array.isArray(data?.items) ? (data.items as SubtitleItem[]).filter(s => s && s.id) : []))
+    .catch(() => [] as SubtitleItem[]);
+  if (opts.fresh) {
+    // A fuller answer joins what the cache holds; an empty one changes nothing
+    req.then(items => {
+      if (items.length === 0) return;
+      const merged = (hit || Promise.resolve([] as SubtitleItem[])).then(prev => mergeSubtitles(prev, items));
+      listCache.set(key, merged);
+    });
+    return req;
+  }
+  listCache.set(key, req);
+  // Empty answers (slow providers, server busy) may be filled in on the next play
+  req.then(items => { if (items.length === 0 && listCache.get(key) === req) listCache.delete(key); });
+  return req;
+}
+
+/** Both lists by id, the newer answer's order first (its entries win) */
+export function mergeSubtitles(prev: SubtitleItem[], next: SubtitleItem[]): SubtitleItem[] {
+  const ids = new Set(next.map(s => s.id));
+  return [...next, ...prev.filter(s => !ids.has(s.id))];
+}
+
+// The server answers within a few seconds with what is ready and keeps asking the slower
+// providers for its next call: refetch then, unless the preferred language is already there
+export const SUBTITLE_RETRY_MS = [8000, 20000];
+
+export const hasSubtitleLang = (items: SubtitleItem[], lang: string) =>
+  items.some(s => normLang(s.language) === normLang(lang));
+
+// Late uploads: while the profile's language is missing the list is asked again this often, bypassing caches
+export const LATE_SUBTITLE_POLL_MS = 10 * 60 * 1000;
+// A live (partial) subtitle file is fetched again this often while it plays
+export const LIVE_CUES_POLL_MS = 15000;
+// After the retries: how often the player asks for a release that carries the profile's subtitle
+export const SUBALT_RETRY_MAX = 4;
+
+/**
+ * A later list brought subtitles in lang that the shown list lacked: the merged list, whether lang is new,
+ * and the subtitle to show by itself (its best one) when the viewer has not chosen one.
+ */
+export function lateSubtitles(
+  shown: SubtitleItem[],
+  fresh: SubtitleItem[],
+  lang: string,
+  viewerChose: boolean,
+): { items: SubtitleItem[]; arrived: boolean; pick: string | null } {
+  const items = mergeSubtitles(shown, fresh);
+  const arrived = !hasSubtitleLang(shown, lang) && hasSubtitleLang(items, lang);
+  if (!arrived || viewerChose) return { items, arrived, pick: null };
+  const l = normLang(lang);
+  const pool = items.filter(s => normLang(s.language) === l && !s.forced);
+  const best = pool.find(s => s.synced) || pool[0];
+  return { items, arrived, pick: best?.id ?? null };
+}
+
+/** Best subtitle of lang in items (not forced, synced first), for a pick the viewer asked for. */
+export function bestSubtitleOf(items: SubtitleItem[], lang: string): string | null {
+  const l = normLang(lang);
+  const of = items.filter(s => normLang(s.language) === l);
+  const pool = of.filter(s => !s.forced).length > 0 ? of.filter(s => !s.forced) : of;
+  return (pool.find(s => s.synced) || pool[0])?.id ?? null;
+}
+
+export interface Cue {
+  start: number;
+  end: number;
+  text: string;
+}
+
+const cueCache = new Map<string, Promise<Cue[]>>();
+
+// The server marks a partial live answer with this note (more cues follow while the file plays)
+export const PARTIAL_NOTE = 'NOTE nextflix-partial';
+
+export function fetchSubtitleCues(id: string): Promise<Cue[]> {
+  return fetchSubtitleFile(id).then(f => f.cues);
+}
+
+/**
+ * Cues of a subtitle. `at` (seconds of the file) is where the viewer is: a live embedded track is read from
+ * there on. A partial answer is not cached; ask again (LIVE_CUES_POLL_MS) for the cues read since.
+ */
+export function fetchSubtitleFile(id: string, at?: number): Promise<{ cues: Cue[]; partial: boolean }> {
+  const hit = cueCache.get(id);
+  if (hit) return hit.then(cues => ({ cues, partial: false }));
+  const t = at !== undefined && at > 0 ? `&t=${Math.floor(at)}` : '';
+  const req = fetch(`${getApiUrl()}/api/subtitles/file?id=${encodeURIComponent(id)}${t}`)
+    .then(res => (res.ok ? res.text() : ''))
+    .then(text => ({ cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE) }))
+    .catch(() => ({ cues: [] as Cue[], partial: false }));
+  req.then(f => {
+    if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve(f.cues));
+  });
+  return req;
+}
+
+const TIME = /(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})/;
+
+function parseTime(s: string): number | null {
+  const m = s.match(TIME);
+  if (!m) return null;
+  const ms = m[4].padEnd(3, '0');
+  return (Number(m[1] || 0) * 3600) + Number(m[2]) * 60 + Number(m[3]) + Number(ms) / 1000;
+}
+
+/** WebVTT (and SRT-like) text -> cues sorted by start. */
+export function parseVtt(text: string): Cue[] {
+  const cues: Cue[] = [];
+  const blocks = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n').split(/\n{2,}/);
+  for (const block of blocks) {
+    const lines = block.split('\n');
+    const at = lines.findIndex(l => l.includes('-->'));
+    if (at < 0) continue;
+    const [a, b] = lines[at].split('-->');
+    const start = parseTime(a);
+    const end = parseTime(b || '');
+    if (start === null || end === null || end <= start) continue;
+    const body = lines.slice(at + 1).join('\n').trim();
+    if (body) cues.push({ start, end, text: body });
+  }
+  return cues.sort((x, y) => x.start - y.start);
+}
+
+/** Cues showing at time t (cues must be sorted by start). */
+export function activeCues(cues: Cue[], t: number): Cue[] {
+  let lo = 0;
+  let hi = cues.length - 1;
+  let last = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (cues[mid].start <= t) { last = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  const out: Cue[] = [];
+  // Overlapping cues are rare and short; looking back a few is enough
+  for (let i = last; i >= 0 && i > last - 12; i--) {
+    if (cues[i].end > t) out.unshift(cues[i]);
+  }
+  return out;
+}
+
+/**
+ * Default subtitle: the viewer's last choice (same file if offered, else the best of that
+ * language, off stays off). Without one a Turkish profile gets the best Turkish subtitle unless
+ * the audio is Turkish already; other profiles start with subtitles off.
+ */
+export function pickSubtitle(
+  items: SubtitleItem[],
+  opts: { profileLang: Locale; pref?: PlayerPrefs['sub']; audioLang?: string },
+): string | null {
+  const best = (lang: string) => {
+    const l = normLang(lang);
+    const of = items.filter(s => normLang(s.language) === l && !s.forced);
+    const pool = of.length > 0 ? of : items.filter(s => normLang(s.language) === l);
+    return (pool.find(s => s.synced) || pool[0])?.id ?? null;
+  };
+  const pref = opts.pref;
+  if (pref === 'off') return null;
+  if (pref) {
+    if (pref.id && items.some(s => s.id === pref.id)) return pref.id;
+    return best(pref.lang);
+  }
+  if (opts.profileLang === 'tr' && normLang(opts.audioLang) !== 'tr') return best('tr');
+  return null;
+}
+
+/** List order: the profile's language first, then the other requested ones, then the rest by name. */
+export function groupSubtitles(items: SubtitleItem[], order: string[], locale: Locale): SubtitleItem[] {
+  const rank = (s: SubtitleItem) => {
+    const i = order.indexOf(normLang(s.language));
+    return i >= 0 ? i : order.length;
+  };
+  return items
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) =>
+      rank(a.s) - rank(b.s) ||
+      languageName(locale, normLang(a.s.language)).localeCompare(languageName(locale, normLang(b.s.language)), intlLocale(locale)) ||
+      a.i - b.i)
+    .map(x => x.s);
+}

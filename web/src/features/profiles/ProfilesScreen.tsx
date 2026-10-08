@@ -7,6 +7,8 @@ import ProfileAvatar from '@/features/profiles/components/ProfileAvatar';
 import ProfileEditor from '@/features/profiles/components/ProfileEditor';
 import { setActiveProfile, type Profile } from '@/shared/lib/profile';
 import { listProfiles, MAX_PROFILES } from '@/features/profiles/api';
+import { useT } from '@/shared/i18n';
+import { usePageTitle } from '@/shared/hooks/usePageTitle';
 
 const AVATAR_SIZE = 'clamp(84px, 10vw, 180px)';
 
@@ -17,6 +19,7 @@ function safeNext(next: string | null): string {
 }
 
 function ProfilesPicker() {
+  const t = useT();
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNext(params.get('next'));
@@ -32,7 +35,7 @@ function ProfilesPicker() {
     try {
       setProfiles(await listProfiles());
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not load profiles.');
+      setError(e instanceof Error ? e.message : '');
     }
   }, []);
 
@@ -58,6 +61,8 @@ function ProfilesPicker() {
     setManage((m) => !m);
   };
 
+  usePageTitle(manage ? t('profiles.manageProfiles') : t('profiles.whoIsWatching'));
+
   const canAdd = !!profiles && profiles.length < MAX_PROFILES;
 
   return (
@@ -68,23 +73,23 @@ function ProfilesPicker() {
 
       <div className="flex min-h-full flex-col items-center justify-center px-4 py-24">
         <h1 className="text-center text-3xl font-medium md:text-[3.5vw] md:leading-tight">
-          {manage ? 'Manage Profiles:' : "Who's watching?"}
+          {manage ? t('profiles.manageTitle') : t('profiles.whoIsWatching')}
         </h1>
 
-        {error && !profiles && (
+        {error !== null && !profiles && (
           <div className="mt-10 flex flex-col items-center gap-4 text-center">
-            <p className="text-[#b3b3b3]">Could not reach the Nextflix server. {error}</p>
+            <p className="text-[#b3b3b3]">{t('profiles.couldNotReach', { error: error || t('profiles.couldNotLoad') })}</p>
             <button
               type="button"
               onClick={load}
               className="inline-flex items-center gap-2 border border-[#808080] px-6 py-2 uppercase tracking-[0.15em] text-[#808080] transition-colors hover:border-white hover:text-white"
             >
-              <RefreshCw className="h-4 w-4" /> Retry
+              <RefreshCw className="h-4 w-4" /> {t('common.retry')}
             </button>
           </div>
         )}
 
-        {!profiles && !error && (
+        {!profiles && error === null && (
           <div className="mt-10 flex gap-6" aria-busy="true">
             {[0, 1, 2].map((i) => (
               <div key={i} className="animate-pulse rounded-[8%] bg-[#2a2a2a]" style={{ width: AVATAR_SIZE, height: AVATAR_SIZE }} />
@@ -140,7 +145,7 @@ function ProfilesPicker() {
                     <PlusCircle className="h-1/2 w-1/2 text-[#808080] group-hover:text-[#141414]" strokeWidth={1.25} />
                   </div>
                   <span className="mt-3 text-sm text-[#808080] transition-colors group-hover:text-white md:text-lg">
-                    Add Profile
+                    {t('profiles.addProfile')}
                   </span>
                 </button>
               </li>
@@ -158,7 +163,7 @@ function ProfilesPicker() {
                 : 'border border-[#808080] text-[#808080] hover:border-white hover:text-white'
             }`}
           >
-            {manage ? 'Done' : 'Manage Profiles'}
+            {manage ? t('common.done') : t('profiles.manageProfiles')}
           </button>
         )}
       </div>

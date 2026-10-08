@@ -7,10 +7,12 @@ import NetflixPage from '@/features/shell/PageShell';
 import Billboard from '@/features/catalog/components/Billboard';
 import BrowseHeader from '@/features/catalog/components/BrowseHeader';
 import TitleRow from '@/features/catalog/components/TitleRow';
+import { useT, type TFunction } from '@/shared/i18n';
 import {
   MOVIE_GENRES,
   NfTitle,
   discoverMovies,
+  localGenre,
   fetchMovieList,
   fetchMovieLists,
   pickBillboard,
@@ -18,7 +20,8 @@ import {
 } from '@/features/catalog/titles';
 
 interface Row {
-  title: string;
+  id: string;
+  title: (t: TFunction) => string;
   items: NfTitle[];
   ranked?: boolean;
   variant?: 'poster' | 'backdrop';
@@ -37,19 +40,20 @@ async function loadDefaultRows(): Promise<Row[]> {
     ...GENRE_ROWS.map(id => discoverMovies({ with_genres: id, sort_by: 'popularity.desc', 'vote_count.gte': 200 })),
   ]);
   const genreRows: Row[] = GENRE_ROWS.map((id, i) => ({
-    title: `${MOVIE_GENRES.find(g => g.id === id)?.name ?? 'More'} Movies`,
+    id: `genre-${id}`,
+    title: t => t('catalog.genreMovies', { genre: localGenre(t, id) ?? '' }),
     items: genreLists[i],
   }));
   return [
-    { title: 'Top 10 Movies Today', items: lists.trendingDaily, ranked: true },
-    { title: 'Trending Now', items: uniqueTitles(lists.trendingWeekly, lists.trendingDaily), variant: 'backdrop' },
-    { title: 'Popular on Nextflix', items: popular },
-    { title: 'New Releases', items: recent, variant: 'backdrop' },
-    { title: 'Now Playing in Theaters', items: lists.nowPlaying },
-    { title: 'Critically Acclaimed Movies', items: topRated },
+    { id: 'top10', title: t => t('home.top10Movies'), items: lists.trendingDaily, ranked: true },
+    { id: 'trending', title: t => t('home.trendingNow'), items: uniqueTitles(lists.trendingWeekly, lists.trendingDaily), variant: 'backdrop' },
+    { id: 'popular', title: t => t('home.popularOnNextflix'), items: popular },
+    { id: 'new', title: t => t('home.newReleases'), items: recent, variant: 'backdrop' },
+    { id: 'theaters', title: t => t('home.nowPlaying'), items: lists.nowPlaying },
+    { id: 'acclaimed', title: t => t('home.genreAcclaimedMovies'), items: topRated },
     genreRows[0],
     genreRows[1],
-    { title: 'Coming Soon', items: lists.upcoming, variant: 'backdrop' },
+    { id: 'coming', title: t => t('home.comingSoon'), items: lists.upcoming, variant: 'backdrop' },
     ...genreRows.slice(2),
   ];
 }
@@ -64,16 +68,17 @@ async function loadGenreRows(genreId: number): Promise<Row[]> {
     discoverMovies({ with_genres: genreId, sort_by: 'popularity.desc', 'vote_count.gte': 100, page: 2 }),
   ]);
   return [
-    { title: 'Popular', items: popular, ranked: true },
-    { title: 'New Releases', items: recent, variant: 'backdrop' },
-    { title: 'Critically Acclaimed', items: topRated },
-    { title: 'More to Explore', items: page2 },
-    { title: 'Timeless Favorites', items: classics, variant: 'backdrop' },
+    { id: 'popular', title: t => t('catalog.sortPopular'), items: popular, ranked: true },
+    { id: 'new', title: t => t('home.newReleases'), items: recent, variant: 'backdrop' },
+    { id: 'acclaimed', title: t => t('home.criticallyAcclaimed'), items: topRated },
+    { id: 'more', title: t => t('home.moreToExplore'), items: page2 },
+    { id: 'classics', title: t => t('catalog.timelessFavorites'), items: classics, variant: 'backdrop' },
   ];
 }
 
 function MoviesContent() {
-  usePageTitle('Movies');
+  const t = useT();
+  usePageTitle(t('nav.movies'));
   const router = useRouter();
   const searchParams = useSearchParams();
   const genreParam = searchParams?.get('genre') || '';
@@ -103,20 +108,20 @@ function MoviesContent() {
       <div className="relative">
         <BrowseHeader
           overlay
-          title="Movies"
-          selectedLabel={genre?.name}
-          options={MOVIE_GENRES.map(g => ({ value: String(g.id), label: g.name }))}
+          title={t('nav.movies')}
+          selectedLabel={genre ? localGenre(t, genre.id) : undefined}
+          options={MOVIE_GENRES.map(g => ({ value: String(g.id), label: localGenre(t, g.id) ?? g.name }))}
           value={genre ? String(genre.id) : ''}
           onChange={setGenre}
         />
-        <Billboard item={billboard} loading={loading} kicker="FILM" />
+        <Billboard item={billboard} loading={loading} kicker={t('catalog.kickerFilm')} />
       </div>
 
-      <div className="relative z-10 -mt-[8vw] space-y-1 md:space-y-3">
+      <div className="relative z-10 -mt-6 space-y-1 sm:-mt-[7vw] md:space-y-3">
         {loading && rows.length === 0
           ? Array.from({ length: 3 }).map((_, i) => <TitleRow key={i} title=" " items={[]} loading />)
           : rows.map(row => (
-              <TitleRow key={row.title} title={row.title} items={row.items} ranked={row.ranked} variant={row.variant} />
+              <TitleRow key={row.id} title={row.title(t)} items={row.items} ranked={row.ranked} variant={row.variant} />
             ))}
       </div>
     </NetflixPage>

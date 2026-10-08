@@ -5,6 +5,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import NetflixPage from '@/features/shell/PageShell';
 import BrowseHeader from '@/features/catalog/components/BrowseHeader';
 import TitleRow from '@/features/catalog/components/TitleRow';
+import { useT, type MessageKey } from '@/shared/i18n';
 import {
   MovieLists,
   NfTitle,
@@ -17,14 +18,15 @@ import {
 
 type Tab = 'all' | 'movies' | 'tv';
 
-const TABS: { value: Tab; label: string }[] = [
-  { value: 'all', label: 'Everything' },
-  { value: 'movies', label: 'Movies' },
-  { value: 'tv', label: 'TV Shows' },
+const TABS: { value: Tab; label: MessageKey }[] = [
+  { value: 'all', label: 'catalog.everything' },
+  { value: 'movies', label: 'common.movies' },
+  { value: 'tv', label: 'common.tvShows' },
 ];
 
 export default function NewPopularPage() {
-  usePageTitle('New & Popular');
+  const t = useT();
+  usePageTitle(t('nav.newPopular'));
   const [tab, setTab] = useState<Tab>('all');
   const [movies, setMovies] = useState<MovieLists | null>(null);
   const [tv, setTv] = useState<TvLists | null>(null);
@@ -56,18 +58,18 @@ export default function NewPopularPage() {
   return (
     <NetflixPage>
       <BrowseHeader
-        title="New & Popular"
+        title={t('nav.newPopular')}
         right={
           <div className="flex gap-2">
-            {TABS.map(t => (
+            {TABS.map(opt => (
               <button
-                key={t.value}
-                onClick={() => setTab(t.value)}
+                key={opt.value}
+                onClick={() => setTab(opt.value)}
                 className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors md:text-sm ${
-                  tab === t.value ? 'bg-white text-black' : 'border border-white/40 text-white hover:border-white'
+                  tab === opt.value ? 'bg-white text-black' : 'border border-white/40 text-white hover:border-white'
                 }`}
               >
-                {t.label}
+                {t(opt.label)}
               </button>
             ))}
           </div>
@@ -76,19 +78,19 @@ export default function NewPopularPage() {
 
       <div className="space-y-1 md:space-y-3">
         <TitleRow
-          title="New on Nextflix"
+          title={t('home.newOnNextflix')}
           items={uniqueTitles(showMovies ? newReleases : [], showTv ? tv?.airingToday || [] : [])}
           variant="backdrop"
           loading={loading}
         />
-        {showMovies && <TitleRow title="Top 10 Movies Today" items={movies?.trendingDaily || []} ranked loading={loading} />}
-        {showTv && <TitleRow title="Top 10 TV Shows Today" items={tv?.trendingDaily || []} ranked loading={loading} />}
-        {showMovies && <TitleRow title="Coming Soon" items={comingSoon} variant="backdrop" loading={loading} />}
-        {showMovies && <TitleRow title="Worth the Wait" items={movies?.nowPlaying || []} loading={loading} />}
-        {showTv && <TitleRow title="New Episodes This Week" items={tv?.onTheAir || []} variant="backdrop" loading={loading} />}
+        {showMovies && <TitleRow title={t('home.top10Movies')} items={movies?.trendingDaily || []} ranked loading={loading} />}
+        {showTv && <TitleRow title={t('home.top10Tv')} items={tv?.trendingDaily || []} ranked loading={loading} />}
+        {showMovies && <TitleRow title={t('home.comingSoon')} items={comingSoon} variant="backdrop" loading={loading} />}
+        {showMovies && <TitleRow title={t('home.worthTheWait')} items={movies?.nowPlaying || []} loading={loading} />}
+        {showTv && <TitleRow title={t('home.newEpisodesThisWeek')} items={tv?.onTheAir || []} variant="backdrop" loading={loading} />}
         {(showMovies || showTv) && (
           <TitleRow
-            title="Everyone's Watching"
+            title={t('catalog.everyonesWatching')}
             items={uniqueTitles(showMovies ? movies?.trendingWeekly || [] : [], showTv ? tv?.trendingWeekly || [] : [])}
             loading={loading}
           />

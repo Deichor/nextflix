@@ -4,6 +4,7 @@ import { NavigationLoaderProvider } from "@/shared/navigation/NavigationLoaderCo
 import NavigationLoader from "@/shared/navigation/NavigationLoader";
 import ImageGuard from "@/shared/ui/ImageGuard";
 import ProfileGate from "@/features/profiles/components/ProfileGate";
+import { I18nProvider } from "@/shared/i18n/I18nProvider";
 import { Suspense } from "react";
 
 export const metadata: Metadata = {
@@ -21,7 +22,6 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       { url: '/favicon.ico', sizes: 'any' },
-      { url: '/favicon.svg', type: 'image/svg+xml' },
       { url: '/favicon-16x16.png', type: 'image/png', sizes: '16x16' },
       { url: '/favicon-32x32.png', type: 'image/png', sizes: '32x32' },
     ],
@@ -43,7 +43,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" suppressHydrationWarning>
       <head>
         {/* Self-hosted Inter font */}
         <link rel="preload" href="/fonts/Inter/InterVariable.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
@@ -59,6 +59,12 @@ export default function RootLayout({
                 try {
                   var theme = localStorage.getItem('theme') || 'dark';
                   document.documentElement.classList.add(theme);
+                } catch (e) {}
+                try {
+                  var p = JSON.parse(localStorage.getItem('hfx-profile') || 'null');
+                  var lang = (p && p.language) || localStorage.getItem('hfx-lang') ||
+                    ((navigator.language || '').toLowerCase().indexOf('tr') === 0 ? 'tr' : 'en');
+                  if (lang === 'en' || lang === 'tr') document.documentElement.lang = lang;
                 } catch (e) {}
               })();
             `,
@@ -100,13 +106,15 @@ export default function RootLayout({
         />
       </head>
       <body className="bg-[#141414] text-white antialiased font-sans" style={{ fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
-        <NavigationLoaderProvider>
-          <Suspense fallback={<div className="min-h-screen bg-[#141414]" />}>
-            <ImageGuard />
-            <NavigationLoader />
-            <ProfileGate>{children}</ProfileGate>
-          </Suspense>
-        </NavigationLoaderProvider>
+        <I18nProvider>
+          <NavigationLoaderProvider>
+            <Suspense fallback={<div className="min-h-screen bg-[#141414]" />}>
+              <ImageGuard />
+              <NavigationLoader />
+              <ProfileGate>{children}</ProfileGate>
+            </Suspense>
+          </NavigationLoaderProvider>
+        </I18nProvider>
       </body>
     </html>
   );

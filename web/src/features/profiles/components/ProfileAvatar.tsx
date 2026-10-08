@@ -7,28 +7,29 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { Profile } from '@/shared/lib/profile';
+import { useT, type MessageKey } from '@/shared/i18n';
 
-export const AVATAR_PRESETS: { key: string; label: string; icon: LucideIcon }[] = [
-  { key: 'smile', label: 'Smile', icon: Smile },
-  { key: 'star', label: 'Star', icon: Star },
-  { key: 'heart', label: 'Heart', icon: Heart },
-  { key: 'rocket', label: 'Rocket', icon: Rocket },
-  { key: 'ghost', label: 'Ghost', icon: Ghost },
-  { key: 'cat', label: 'Cat', icon: Cat },
-  { key: 'dog', label: 'Dog', icon: Dog },
-  { key: 'bird', label: 'Bird', icon: Bird },
-  { key: 'flame', label: 'Flame', icon: Flame },
-  { key: 'crown', label: 'Crown', icon: Crown },
-  { key: 'gamepad', label: 'Gamepad', icon: Gamepad2 },
-  { key: 'zap', label: 'Zap', icon: Zap },
-  { key: 'sun', label: 'Sun', icon: Sun },
-  { key: 'moon', label: 'Moon', icon: Moon },
-  { key: 'leaf', label: 'Leaf', icon: Leaf },
-  { key: 'snowflake', label: 'Snowflake', icon: Snowflake },
-  { key: 'popcorn', label: 'Popcorn', icon: Popcorn },
-  { key: 'pizza', label: 'Pizza', icon: Pizza },
-  { key: 'bot', label: 'Robot', icon: Bot },
-  { key: 'skull', label: 'Skull', icon: Skull },
+export const AVATAR_PRESETS: { key: string; label: MessageKey; icon: LucideIcon }[] = [
+  { key: 'smile', label: 'avatars.smile', icon: Smile },
+  { key: 'star', label: 'avatars.star', icon: Star },
+  { key: 'heart', label: 'avatars.heart', icon: Heart },
+  { key: 'rocket', label: 'avatars.rocket', icon: Rocket },
+  { key: 'ghost', label: 'avatars.ghost', icon: Ghost },
+  { key: 'cat', label: 'avatars.cat', icon: Cat },
+  { key: 'dog', label: 'avatars.dog', icon: Dog },
+  { key: 'bird', label: 'avatars.bird', icon: Bird },
+  { key: 'flame', label: 'avatars.flame', icon: Flame },
+  { key: 'crown', label: 'avatars.crown', icon: Crown },
+  { key: 'gamepad', label: 'avatars.gamepad', icon: Gamepad2 },
+  { key: 'zap', label: 'avatars.zap', icon: Zap },
+  { key: 'sun', label: 'avatars.sun', icon: Sun },
+  { key: 'moon', label: 'avatars.moon', icon: Moon },
+  { key: 'leaf', label: 'avatars.leaf', icon: Leaf },
+  { key: 'snowflake', label: 'avatars.snowflake', icon: Snowflake },
+  { key: 'popcorn', label: 'avatars.popcorn', icon: Popcorn },
+  { key: 'pizza', label: 'avatars.pizza', icon: Pizza },
+  { key: 'bot', label: 'avatars.bot', icon: Bot },
+  { key: 'skull', label: 'avatars.skull', icon: Skull },
 ];
 
 export const PROFILE_COLORS = [
@@ -55,6 +56,7 @@ interface ProfileAvatarProps {
 }
 
 export default function ProfileAvatar({ profile, size = 32, className = '', style }: ProfileAvatarProps) {
+  const t = useT();
   const Icon = ICONS[profile.avatar];
   const dim = typeof size === 'number' ? `${size}px` : size;
   const initial = (profile.name || '?').trim().charAt(0).toUpperCase() || '?';
@@ -71,7 +73,7 @@ export default function ProfileAvatar({ profile, size = 32, className = '', styl
         containerType: 'size',
         ...style,
       }}
-      aria-label={profile.name ? `${profile.name} profile` : 'Profile'}
+      aria-label={profile.name ? t('profiles.avatarOf', { name: profile.name }) : t('profiles.avatarGeneric')}
       role="img"
     >
       {Icon ? (

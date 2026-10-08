@@ -1,5 +1,5 @@
-import { getApiUrl } from '@/shared/lib/api';
-import { tmdbImage } from '@/shared/lib/image';
+import { contentLang, getApiUrl } from '@/shared/lib/api';
+import { pickLogo, tmdbImage } from '@/shared/lib/image';
 
 export type TitleType = 'movie' | 'tv';
 
@@ -14,15 +14,11 @@ export interface TitleItem {
   date: string;
   vote_average: number;
   genre_ids: number[];
+  /** TMDB original_language (ISO 639-1), picks the default audio track */
+  original_language?: string;
+  /** Netflix Top 10 rank (ranked rows only) */
+  rank?: number;
 }
-
-export const GENRE_NAMES: Record<number, string> = {
-  28: 'Action', 12: 'Adventure', 16: 'Animation', 35: 'Comedy', 80: 'Crime', 99: 'Documentary',
-  18: 'Drama', 10751: 'Family', 14: 'Fantasy', 36: 'History', 27: 'Horror', 10402: 'Music',
-  9648: 'Mystery', 10749: 'Romance', 878: 'Sci-Fi', 10770: 'TV Movie', 53: 'Thriller',
-  10752: 'War', 37: 'Western', 10759: 'Action & Adventure', 10762: 'Kids', 10763: 'News',
-  10764: 'Reality', 10765: 'Sci-Fi & Fantasy', 10766: 'Soap', 10767: 'Talk', 10768: 'War & Politics',
-};
 
 export function toTitle(raw: any, fallbackType: TitleType): TitleItem | null {
   if (!raw || typeof raw.id !== 'number') return null;
@@ -39,6 +35,7 @@ export function toTitle(raw: any, fallbackType: TitleType): TitleItem | null {
     date: raw.release_date || raw.first_air_date || '',
     vote_average: Number(raw.vote_average) || 0,
     genre_ids: Array.isArray(raw.genre_ids) ? raw.genre_ids : [],
+    original_language: typeof raw.original_language === 'string' ? raw.original_language : undefined,
   };
 }
 
@@ -80,9 +77,6 @@ export function matchPercent(t: TitleItem): number {
   return Math.round(Math.min(10, Math.max(0, t.vote_average)) * 10);
 }
 
-export function genreLabels(t: TitleItem, max = 3): string[] {
-  return t.genre_ids.map(id => GENRE_NAMES[id]).filter(Boolean).slice(0, max);
-}
 
 async function getJson(path: string, signal?: AbortSignal): Promise<any> {
   const res = await fetch(`${getApiUrl()}${path}`, { signal });
@@ -126,12 +120,12 @@ export async function discoverMovies(params: Record<string, string>, signal?: Ab
   return toTitles(data?.results, 'movie');
 }
 
-// English (or language-less) title logo for a movie, or '' when there is none
+// Movie title logo in the content language (else English or language-less), or '' when there is none
 export async function fetchMovieLogo(id: number, signal?: AbortSignal): Promise<string> {
   try {
     const data = await getJson(`/api/tmdb/movie/${id}/images`, signal);
     const logos: any[] = Array.isArray(data?.logos) ? data.logos : [];
-    const pick = logos.find(l => l.iso_639_1 === 'en') || logos.find(l => !l.iso_639_1);
+    const pick = pickLogo(logos, contentLang());
     return pick?.file_path || '';
   } catch {
     return '';
@@ -140,4 +134,51 @@ export async function fetchMovieLogo(id: number, signal?: AbortSignal): Promise<
 
 export function img(size: string, path: string): string {
   return tmdbImage(path, size) ?? '';
+}
+
+// ---- Personal rows (recommendations) and Netflix Top 10 ----
+
+export type RecommendationReason = 'top_picks' | 'because_loved' | 'because_liked' | 'because_favorite' | 'popular' | string;
+
+export interface RecommendationRow {
+  id: string;
+  /** English title from the server, localised by the screen */
+  title: string;
+  reason: RecommendationReason;
+  items: TitleItem[];
+}
+
+// Rows from the profile's ratings and favorites ([] when the server has none or TMDB is down)
+export async function fetchRecommendations(profileId: number, signal?: AbortSignal, lang = contentLang()): Promise<RecommendationRow[]> {
+  const res = await fetch(`${getApiUrl()}/api/recommendations?profile_id=${profileId}`, {
+    signal,
+    cache: 'no-store',
+    headers: { 'X-User-ID': String(profileId), 'X-Lang': lang },
+  });
+  if (!res.ok) throw new Error(`/api/recommendations -> ${res.status}`);
+  const data = await res.json();
+  const rows: any[] = Array.isArray(data?.rows) ? data.rows : [];
+  return rows
+    .map(r => ({
+      id: String(r?.id ?? ''),
+      title: String(r?.title ?? ''),
+      reason: String(r?.reason ?? ''),
+      items: toTitles(r?.items, 'movie'),
+    }))
+    .filter(r => r.id && r.items.length > 0);
+}
+
+export type Top10Region = 'TR' | 'global';
+
+// Netflix's weekly Top 10 in Netflix's rank order (ranks can have gaps); throws while it is not available (503)
+export async function fetchTop10(region: Top10Region, type: TitleType, signal?: AbortSignal): Promise<TitleItem[]> {
+  const data = await getJson(`/api/top10?region=${region}&type=${type}`, signal);
+  const items: any[] = Array.isArray(data?.items) ? data.items : [];
+  const out: TitleItem[] = [];
+  for (const it of items) {
+    const t = toTitle({ ...it, id: it?.tmdb_id }, type);
+    if (!t || (!t.poster_path && !t.backdrop_path)) continue;
+    out.push({ ...t, rank: typeof it.rank === 'number' ? it.rank : out.length + 1 });
+  }
+  return out;
 }

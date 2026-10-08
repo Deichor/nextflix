@@ -1,7 +1,8 @@
 "use client";
 
-import { getApiUrl } from '@/shared/lib/api';
-import { tmdbImage } from '@/shared/lib/image';
+import { contentLang, getApiUrl } from '@/shared/lib/api';
+import { pickLogo, tmdbImage } from '@/shared/lib/image';
+import { en, type MessageKey, type TFunction } from '@/shared/i18n';
 
 export type NfMediaType = 'movie' | 'tv';
 
@@ -73,6 +74,16 @@ const GENRE_NAMES: Record<number, string> = Object.fromEntries(
 
 export function genreName(id: number): string | undefined {
   return GENRE_NAMES[id];
+}
+
+/** Genre name in the UI language (keys 'genre.<tmdb id>'), English table as fallback. */
+export function localGenre(t: TFunction, id: number): string | undefined {
+  const key = `genre.${id}`;
+  return key in en ? t(key as MessageKey) : GENRE_NAMES[id];
+}
+
+export function localGenres(t: TFunction, ids: number[] | undefined, max = 3): string[] {
+  return (ids || []).map(id => localGenre(t, id)).filter((x): x is string => !!x).slice(0, max);
 }
 
 /** Image URL that always goes through the /tmdb-img proxy. */
@@ -159,24 +170,26 @@ const TTL = 10 * 60 * 1000;
 
 export async function getJson<T = any>(path: string, opts: { cache?: boolean } = {}): Promise<T | null> {
   const useCache = opts.cache !== false;
-  const hit = cache.get(path);
+  // Answers are in the content language (X-Lang), so cache them per language
+  const key = `${contentLang()}|${path}`;
+  const hit = cache.get(key);
   if (useCache && hit && Date.now() - hit.at < TTL) return hit.data as T;
-  const pending = inflight.get(path);
+  const pending = inflight.get(key);
   if (useCache && pending) return pending;
   const p = (async () => {
     try {
       const res = await fetch(`${getApiUrl()}${path}`);
       if (!res.ok) return null;
       const data = await res.json();
-      if (useCache) cache.set(path, { at: Date.now(), data });
+      if (useCache) cache.set(key, { at: Date.now(), data });
       return data as T;
     } catch {
       return null;
     } finally {
-      inflight.delete(path);
+      inflight.delete(key);
     }
   })();
-  if (useCache) inflight.set(path, p);
+  if (useCache) inflight.set(key, p);
   return p;
 }
 
@@ -237,13 +250,13 @@ export async function fetchRelated(id: number, type: NfMediaType, limit = 12, ye
   return fromTmdbList(d?.results, type);
 }
 
-/** English (or first) logo for a TMDB title, proxied. */
+/** Logo for a TMDB title in the content language (else English, language-less, first), proxied. */
 export async function fetchLogo(id: number, type: NfMediaType): Promise<string | null> {
   // The backend only exposes images for movies
   if (type !== 'movie') return null;
   const d = await getJson<any>(`/api/tmdb/movie/${id}/images`);
   const logos: any[] = d?.logos || [];
-  const best = logos.find(l => l.iso_639_1 === 'en') || logos[0];
+  const best = pickLogo(logos, contentLang()) || logos[0];
   return best?.file_path ? imageUrl(best.file_path, 'w500') || null : null;
 }
 
