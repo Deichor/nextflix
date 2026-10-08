@@ -1,0 +1,112 @@
+package subtitles
+
+import (
+	"errors"
+	"strings"
+	"sync"
+
+	"gorm.io/gorm"
+)
+
+const settingsID = 1
+
+// settingsRepo stores the single settings row and keeps a copy in memory.
+type settingsRepo struct {
+	db     *gorm.DB
+	mu     sync.RWMutex
+	cached *Settings
+}
+
+func newSettingsRepo(db *gorm.DB) *settingsRepo { return &settingsRepo{db: db} }
+
+func defaultSettings() Settings {
+	return Settings{ID: settingsID, TurkceAltyaziEnabled: true, DefaultLangs: "tr,en"}
+}
+
+// ensure seeds the row on first start.
+func (r *settingsRepo) ensure() error {
+	if r.db == nil {
+		return nil
+	}
+	var s Settings
+	err := r.db.First(&s, settingsID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		d := defaultSettings()
+		return r.db.Create(&d).Error
+	}
+	return err
+}
+
+func (r *settingsRepo) get() Settings {
+	r.mu.RLock()
+	if r.cached != nil {
+		s := *r.cached
+		r.mu.RUnlock()
+		return s
+	}
+	r.mu.RUnlock()
+
+	s := defaultSettings()
+	if r.db != nil {
+		var row Settings
+		if err := r.db.First(&row, settingsID).Error; err == nil {
+			s = row
+		}
+	}
+	r.mu.Lock()
+	r.cached = &s
+	r.mu.Unlock()
+	return s
+}
+
+func (r *settingsRepo) save(s Settings) error {
+	s.ID = settingsID
+	if r.db != nil {
+		if err := r.db.Save(&s).Error; err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	r.cached = &s
+	r.mu.Unlock()
+	return nil
+}
+
+// apply merges a PUT body into s: missing or empty keeps the value, null clears it.
+func (in SettingsInput) apply(s *Settings) {
+	set := func(dst *string, o optString) {
+		switch {
+		case o.Null:
+			*dst = ""
+		case o.Set && strings.TrimSpace(o.Value) != "":
+			*dst = strings.TrimSpace(o.Value)
+		}
+	}
+	if o := in.OpenSubtitles; o != nil {
+		set(&s.OpenSubtitlesAPIKey, o.APIKey)
+		set(&s.OpenSubtitlesUsername, o.Username)
+		set(&s.OpenSubtitlesPassword, o.Password)
+	}
+	if o := in.SubDL; o != nil {
+		set(&s.SubDLAPIKey, o.APIKey)
+	}
+	if o := in.TurkceAltyazi; o != nil && o.Enabled != nil {
+		s.TurkceAltyaziEnabled = *o.Enabled
+	}
+	if in.DefaultLangs != nil {
+		if l := parseLangs(strings.Join(*in.DefaultLangs, ",")); len(l) > 0 {
+			s.DefaultLangs = strings.Join(l, ",")
+		}
+	}
+}
+
+func (s Settings) view() SettingsView {
+	var v SettingsView
+	v.OpenSubtitles.APIKeySet = s.OpenSubtitlesAPIKey != ""
+	v.OpenSubtitles.Username = s.OpenSubtitlesUsername
+	v.OpenSubtitles.PasswordSet = s.OpenSubtitlesPassword != ""
+	v.SubDL.APIKeySet = s.SubDLAPIKey != ""
+	v.TurkceAltyazi.Enabled = s.TurkceAltyaziEnabled
+	v.DefaultLangs = s.langs()
+	return v
+}

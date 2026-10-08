@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -15,12 +16,28 @@ const indexerTestTimeout = 30 * time.Second
 
 var errIndexerNotConfigured = errors.New("Jackett URL and API key must be configured")
 
-// SettingsInput holds the optional fields of PUT /api/settings/indexer.
+// SettingsInput holds the optional fields of PUT /api/settings/indexer. For the API key a
+// missing field or an empty string keeps the stored key and null clears it.
 type SettingsInput struct {
-	JackettURL       *string `json:"jackett_url"`
-	JackettAPIKey    *string `json:"jackett_api_key"`
-	MinSeeders       *int    `json:"min_seeders"`
-	PreferredQuality *string `json:"preferred_quality"`
+	JackettURL       *string   `json:"jackett_url"`
+	JackettAPIKey    optString `json:"jackett_api_key"`
+	MinSeeders       *int      `json:"min_seeders"`
+	PreferredQuality *string   `json:"preferred_quality"`
+	BitsearchEnabled *bool     `json:"bitsearch_enabled"`
+}
+
+// optString distinguishes a missing field, an explicit null and a value in PUT bodies.
+type optString struct {
+	Null  bool
+	Value string
+}
+
+func (o *optString) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		o.Null = true
+		return nil
+	}
+	return json.Unmarshal(b, &o.Value)
 }
 
 // TestInput optionally overrides the saved values for POST /api/settings/indexer/test.
@@ -34,8 +51,10 @@ type SettingsError struct{ Msg string }
 
 func (e SettingsError) Error() string { return e.Msg }
 
-// EnsureSettings seeds the indexer settings row from the env defaults.
+// EnsureSettings seeds the indexer settings row from the env defaults and starts the
+// background TorrServer tuning.
 func (s *Service) EnsureSettings() error {
+	s.startTorrServerTuning()
 	n, err := countSettings(s.db)
 	if err != nil || n > 0 {
 		return err
@@ -84,12 +103,18 @@ func (s *Service) UpdateSettings(in SettingsInput) (*IndexerSettings, error) {
 		}
 		st.JackettURL = v
 	}
-	if in.JackettAPIKey != nil {
-		v := strings.TrimSpace(*in.JackettAPIKey)
+	switch k := in.JackettAPIKey; {
+	case k.Null:
+		st.JackettAPIKey = ""
+	case strings.TrimSpace(k.Value) != "":
+		v := strings.TrimSpace(k.Value)
 		if len(v) > 200 {
 			return nil, SettingsError{"Invalid API key"}
 		}
 		st.JackettAPIKey = v
+	}
+	if in.BitsearchEnabled != nil {
+		st.BitsearchDisabled = !*in.BitsearchEnabled
 	}
 	if in.MinSeeders != nil {
 		if *in.MinSeeders < 0 || *in.MinSeeders > 100000 {

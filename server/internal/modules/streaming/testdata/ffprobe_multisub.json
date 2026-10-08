@@ -1,0 +1,69 @@
+{
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "h264",
+            "codec_type": "video",
+            "profile": "High",
+            "width": 1920,
+            "height": 1080,
+            "pix_fmt": "yuv420p",
+            "disposition": {"default": 1, "forced": 0},
+            "tags": {"language": "eng", "BPS": "5964283", "DURATION": "00:52:31.023000000"}
+        },
+        {
+            "index": 1,
+            "codec_name": "eac3",
+            "codec_type": "audio",
+            "channels": 6,
+            "disposition": {"default": 1, "forced": 0},
+            "tags": {"language": "eng", "DURATION": "00:52:31.040000000"}
+        },
+        {
+            "index": 2,
+            "codec_name": "subrip",
+            "codec_type": "subtitle",
+            "disposition": {"default": 0, "forced": 0, "hearing_impaired": 0},
+            "tags": {"language": "eng", "title": "English", "DURATION": "00:51:58.950000000"}
+        },
+        {
+            "index": 3,
+            "codec_name": "subrip",
+            "codec_type": "subtitle",
+            "disposition": {"default": 0, "forced": 1},
+            "tags": {"language": "tur", "title": "Turkish (Forced)"}
+        },
+        {
+            "index": 4,
+            "codec_name": "subrip",
+            "codec_type": "subtitle",
+            "disposition": {"default": 0, "forced": 0},
+            "tags": {"LANGUAGE": "tur", "title": "Türkçe"}
+        },
+        {
+            "index": 5,
+            "codec_name": "ass",
+            "codec_type": "subtitle",
+            "disposition": {"default": 0, "forced": 0},
+            "tags": {"language": "ara"}
+        },
+        {
+            "index": 6,
+            "codec_name": "hdmv_pgs_subtitle",
+            "codec_type": "subtitle",
+            "disposition": {"default": 0, "forced": 0},
+            "tags": {"language": "ger"}
+        },
+        {
+            "index": 7,
+            "codec_name": "subrip",
+            "codec_type": "subtitle",
+            "disposition": {"default": 0, "forced": 0},
+            "tags": {"language": "und", "title": "Español (Latinoamérica)"}
+        }
+    ],
+    "format": {
+        "format_name": "matroska,webm",
+        "duration": "3151.040000"
+    }
+}

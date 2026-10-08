@@ -2,36 +2,43 @@ package tmdb
 
 import (
 	"fmt"
-	"net/url"
 )
 
 // GetTVDetails returns TV details with credits and videos.
 func (c *Client) GetTVDetails(tvID int) (*TVDetails, error) {
 	return Cached(c, fmt.Sprintf("tv_details_%d", tvID), func() (*TVDetails, error) {
 		var d TVDetails
-		if err := c.Get(fmt.Sprintf("/tv/%d", tvID), url.Values{"append_to_response": {"credits,videos"}}, &d); err != nil {
+		params := c.withVideoLanguages(c.params("append_to_response", "credits,videos"))
+		if err := c.Get(fmt.Sprintf("/tv/%d", tvID), params, &d); err != nil {
 			return nil, err
 		}
+		c.fillTVDetails(&d)
 		return &d, nil
 	})
 }
 
-// GetTVImages returns posters, backdrops and logos for a TV show.
+// GetTVImages returns posters, backdrops and logos for a TV show (languages as GetMovieImages).
 func (c *Client) GetTVImages(tvID int) (*Images, error) {
 	return Cached(c, fmt.Sprintf("tv_images_%d", tvID), func() (*Images, error) {
 		var images Images
-		if err := c.Get(fmt.Sprintf("/tv/%d/images", tvID), nil, &images); err != nil {
+		if err := c.Get(fmt.Sprintf("/tv/%d/images", tvID), c.imageParams(), &images); err != nil {
 			return nil, err
 		}
 		return &images, nil
 	})
 }
 
-// GetSeasonDetails returns a season with all its episodes. Not cached here; callers cache as needed.
+// GetSeasonDetails returns a season with all its episodes. Not cached here; callers cache as
+// needed. A localized season gets empty overviews and names from the English season.
 func (c *Client) GetSeasonDetails(tvID, seasonNumber int) (*Season, error) {
 	var season Season
-	if err := c.Get(fmt.Sprintf("/tv/%d/season/%d", tvID, seasonNumber), lang(), &season); err != nil {
+	if err := c.Get(fmt.Sprintf("/tv/%d/season/%d", tvID, seasonNumber), c.params(), &season); err != nil {
 		return nil, err
+	}
+	if c.localized() && seasonMissingText(&season) {
+		if en, err := c.english().GetSeasonDetails(tvID, seasonNumber); err == nil {
+			fillSeason(&season, en)
+		}
 	}
 	return &season, nil
 }
@@ -39,8 +46,18 @@ func (c *Client) GetSeasonDetails(tvID, seasonNumber int) (*Season, error) {
 func (c *Client) GetEpisodeDetails(tvID, seasonNumber, episodeNumber int) (*Episode, error) {
 	var episode Episode
 	path := fmt.Sprintf("/tv/%d/season/%d/episode/%d", tvID, seasonNumber, episodeNumber)
-	if err := c.Get(path, lang(), &episode); err != nil {
+	if err := c.Get(path, c.params(), &episode); err != nil {
 		return nil, err
+	}
+	if c.localized() && (episode.Overview == "" || episode.Name == "" || placeholderEpisodeName(episode.Name, episodeNumber)) {
+		if en, err := c.english().GetEpisodeDetails(tvID, seasonNumber, episodeNumber); err == nil {
+			if episode.Overview == "" {
+				episode.Overview = en.Overview
+			}
+			if (episode.Name == "" || placeholderEpisodeName(episode.Name, episodeNumber)) && en.Name != "" && !placeholderEpisodeName(en.Name, episodeNumber) {
+				episode.Name = en.Name
+			}
+		}
 	}
 	return &episode, nil
 }

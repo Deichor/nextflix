@@ -1,0 +1,12 @@
+1
+00:00:01,000 --> 00:00:03,500
+Þimdi Iðdýr'a gidiyoruz.
+Çok güzel, öyle deðil mi?
+
+2
+00:00:04,000 --> 00:00:06,000
+<i>Ýstanbul'da yaðmur yaðýyor.</i>
+
+3
+00:00:06,500 --> 00:01:09,250
+ÇÝÐDEM ÞÜKRÜ'YE ÖÐRETMEN DEDÝ: "Iþýk!"

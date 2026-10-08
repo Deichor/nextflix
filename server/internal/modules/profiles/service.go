@@ -38,9 +38,10 @@ func (e ValidationError) Error() string { return e.Msg }
 
 // Input holds the optional profile fields of a create/update request.
 type Input struct {
-	Name   *string `json:"name"`
-	Avatar *string `json:"avatar"`
-	Color  *string `json:"color"`
+	Name     *string `json:"name"`
+	Avatar   *string `json:"avatar"`
+	Color    *string `json:"color"`
+	Language *string `json:"language"`
 }
 
 // applyTo validates the given fields and copies them onto p
@@ -75,6 +76,16 @@ func (in Input) applyTo(p *Profile) error {
 		}
 		p.Color = color
 	}
+	if in.Language != nil {
+		lang := strings.ToLower(strings.TrimSpace(*in.Language))
+		if lang == "" {
+			lang = defaultLanguage
+		}
+		if !supportedLanguages[lang] {
+			return ValidationError{"Language must be en or tr"}
+		}
+		p.Language = lang
+	}
 	return nil
 }
 
@@ -84,7 +95,7 @@ func (s *Service) EnsureDefault() error {
 	if err != nil || n > 0 {
 		return err
 	}
-	return s.db.Create(&Profile{Name: defaultProfileName, Avatar: defaultProfileAvatar, Color: defaultProfileColor}).Error
+	return s.db.Create(&Profile{Name: defaultProfileName, Avatar: defaultProfileAvatar, Color: defaultProfileColor, Language: defaultLanguage}).Error
 }
 
 func (s *Service) List() ([]Profile, error) {
@@ -103,7 +114,7 @@ func (s *Service) Create(in Input) (*Profile, error) {
 	if in.Name == nil {
 		return nil, ValidationError{"Name is required"}
 	}
-	p := Profile{Avatar: defaultProfileAvatar, Color: defaultProfileColor}
+	p := Profile{Avatar: defaultProfileAvatar, Color: defaultProfileColor, Language: defaultLanguage}
 	if err := in.applyTo(&p); err != nil {
 		return nil, err
 	}

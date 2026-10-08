@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"nextflix/internal/platform/httpserver"
 	"nextflix/internal/platform/tmdb"
 )
 
@@ -17,6 +18,9 @@ func pageParam(c *gin.Context) int {
 	}
 	return 1
 }
+
+// client returns the TMDB client in the request language (X-Lang).
+func (s *Service) client(c *gin.Context) *tmdb.Client { return s.tm.WithLang(httpserver.Lang(c)) }
 
 func fail(c *gin.Context, status int, msg string, err error) {
 	log.Printf("catalog: %s: %v", msg, err)
@@ -34,21 +38,21 @@ func (s *Service) search(c *gin.Context) {
 
 	switch c.DefaultQuery("type", "multi") {
 	case "movie":
-		res, err := s.tm.SearchMoviesOnly(query, page)
+		res, err := s.client(c).SearchMoviesOnly(query, page)
 		if err != nil {
 			fail(c, http.StatusInternalServerError, "Failed to search movies", err)
 			return
 		}
 		c.JSON(http.StatusOK, res)
 	case "tv":
-		res, err := s.tm.SearchTVOnly(query, page)
+		res, err := s.client(c).SearchTVOnly(query, page)
 		if err != nil {
 			fail(c, http.StatusInternalServerError, "Failed to search TV shows", err)
 			return
 		}
 		c.JSON(http.StatusOK, res)
 	default:
-		res, err := s.tm.SearchMulti(query, page)
+		res, err := s.client(c).SearchMulti(query, page)
 		if err != nil {
 			fail(c, http.StatusInternalServerError, "Failed to search TMDB", err)
 			return
@@ -64,7 +68,7 @@ func (s *Service) suggestions(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"results": []any{}, "total_results": 0})
 		return
 	}
-	res, err := s.tm.SearchMulti(query, 1)
+	res, err := s.client(c).SearchMulti(query, 1)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get suggestions", err)
 		return
@@ -100,16 +104,17 @@ func (s *Service) details(c *gin.Context) {
 		return
 	}
 	mediaType := c.Query("type")
+	tm := s.client(c)
 
 	movie := func() error {
-		d, err := s.tm.GetMovieDetailsWithExtras(id)
+		d, err := tm.GetMovieDetailsWithExtras(id)
 		if err == nil {
 			c.JSON(http.StatusOK, gin.H{"media_type": "movie", "data": detailsMap(d, d.Genres)})
 		}
 		return err
 	}
 	tv := func() error {
-		d, err := s.tm.GetTVDetails(id)
+		d, err := tm.GetTVDetails(id)
 		if err == nil {
 			c.JSON(http.StatusOK, gin.H{"media_type": "tv", "data": detailsMap(d, d.Genres)})
 		}
@@ -144,7 +149,7 @@ func (s *Service) details(c *gin.Context) {
 
 // GET /api/upcoming-movies
 func (s *Service) upcomingMovies(c *gin.Context) {
-	res, err := s.tm.GetUpcomingMovies()
+	res, err := s.client(c).GetUpcomingMovies()
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get upcoming movies", err)
 		return
@@ -154,7 +159,7 @@ func (s *Service) upcomingMovies(c *gin.Context) {
 
 // GET /api/upcoming-tv-series
 func (s *Service) upcomingTVSeries(c *gin.Context) {
-	res, err := s.tm.GetUpcomingTVSeries()
+	res, err := s.client(c).GetUpcomingTVSeries()
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get TV series", err)
 		return
@@ -164,7 +169,7 @@ func (s *Service) upcomingTVSeries(c *gin.Context) {
 
 // GET /api/tmdb/movie/latest
 func (s *Service) latestMovie(c *gin.Context) {
-	res, err := s.tm.GetLatestMovie()
+	res, err := s.client(c).GetLatestMovie()
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get latest movie", err)
 		return
@@ -173,10 +178,10 @@ func (s *Service) latestMovie(c *gin.Context) {
 }
 
 // pagedList serves {results, page, total_results} for a paged TMDB movie list.
-func pagedList[T any](fetch func(page int) ([]T, error), errMsg string) gin.HandlerFunc {
+func pagedList[T any](s *Service, fetch func(tm *tmdb.Client, page int) ([]T, error), errMsg string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		page := pageParam(c)
-		movies, err := fetch(page)
+		movies, err := fetch(s.client(c), page)
 		if err != nil {
 			fail(c, http.StatusInternalServerError, errMsg, err)
 			return
@@ -193,7 +198,7 @@ func (s *Service) discoverMovies(c *gin.Context) {
 			params[k] = v[0]
 		}
 	}
-	movies, err := s.tm.DiscoverMovies(params)
+	movies, err := s.client(c).DiscoverMovies(params)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to discover movies", err)
 		return
@@ -208,7 +213,7 @@ func (s *Service) movieImages(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid movie ID"})
 		return
 	}
-	images, err := s.tm.GetMovieImages(id)
+	images, err := s.client(c).GetMovieImages(id)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get movie images", err)
 		return
@@ -241,7 +246,7 @@ func (s *Service) related(c *gin.Context) {
 		year = y
 	}
 
-	results, err := s.tm.GetRelatedMedia(id, mediaType, limit, year)
+	results, err := s.client(c).GetRelatedMedia(id, mediaType, limit, year)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get related media", err)
 		return
@@ -255,14 +260,14 @@ func (s *Service) related(c *gin.Context) {
 }
 
 // relatedList serves a TMDB similar/recommendations page as-is.
-func relatedList[T any](fetch func(id, page int) (T, error), invalidMsg, errMsg string) gin.HandlerFunc {
+func relatedList[T any](s *Service, fetch func(tm *tmdb.Client, id, page int) (T, error), invalidMsg, errMsg string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": invalidMsg})
 			return
 		}
-		res, err := fetch(id, pageParam(c))
+		res, err := fetch(s.client(c), id, pageParam(c))
 		if err != nil {
 			fail(c, http.StatusInternalServerError, errMsg, err)
 			return
@@ -283,7 +288,7 @@ func (s *Service) season(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid season number"})
 		return
 	}
-	season, err := s.Season(tvID, number)
+	season, err := s.Season(httpserver.Lang(c), tvID, number)
 	if err != nil {
 		log.Printf("catalog: TMDB season %d of TV %d failed: %v", number, tvID, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to get season details"})

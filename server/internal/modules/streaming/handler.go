@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +29,7 @@ func (h handler) files(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "a magnet link is required"})
 		return
 	}
+	h.s.touch(tsHashFromMagnet(magnet))
 
 	statURL := h.s.torrServerURL() + "/stream?" + url.Values{"link": {magnet}, "stat": {""}}.Encode()
 	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, statURL, nil)
@@ -65,38 +65,49 @@ func (h handler) files(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"hash": strings.ToLower(stat.Hash), "name": stat.Name, "files": out})
 }
 
-// probe returns duration, video codec and audio tracks of a torrent file
+// probe returns duration, video info (codec, size, HDR, direct play) and audio tracks of a torrent file
 func (h handler) probe(c *gin.Context) {
 	hash, index, ok := fileParams(c)
 	if !ok {
 		return
 	}
+	h.s.touch(hash)
+	// The player reads the header right before it plays: background work of other torrents waits
+	h.s.probeBegin(hash)
 	p, err := h.s.probeFile(c.Request.Context(), hash, index)
+	h.s.probeEnd(hash)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Could not read the video (not enough peers?)."})
 		return
 	}
 
-	duration, _ := strconv.ParseFloat(p.Format.Duration, 64)
-	videoCodec := ""
+	codecs := clientAudioCodecs(c)
 	audio := make([]gin.H, 0)
 	for _, st := range p.Streams {
-		switch st.CodecType {
-		case "video":
-			if videoCodec == "" {
-				videoCodec = st.CodecName
-			}
-		case "audio":
+		if st.CodecType == "audio" {
+			n := len(audio)
 			audio = append(audio, gin.H{
-				"index":    len(audio),
+				"index":    n,
 				"language": st.Tags["language"],
 				"title":    st.Tags["title"],
 				"codec":    st.CodecName,
 				"channels": st.Channels,
+				"default":  st.Disposition["default"] == 1,
+				"direct":   p.audioPlan(n, codecs).copy, // sent untouched to this client (?acodecs=)
 			})
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"duration": duration, "video_codec": videoCodec, "audio_tracks": audio})
+	out := gin.H{"duration": p.duration(), "video_codec": "", "audio_tracks": audio}
+	// With ?type=&tmdb_id= (and season/episode) the player learns whether this is the whole title
+	if rt, mismatch, ok := h.s.probeRuntimeCheck(c, hash, index, p.duration()); ok {
+		out["expected_runtime"], out["duration_mismatch"] = rt, mismatch
+	}
+	if v := p.video(); v != nil {
+		// direct: the play stream sends the original video (for this client's ?hevc=)
+		out["video_codec"], out["width"], out["height"] = v.CodecName, v.Width, v.Height
+		out["hdr"], out["dolby_vision"], out["direct"] = v.hdrTransfer() != "", v.dolbyVision(), p.copiesVideo(clientHEVC(c))
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (h handler) getSettings(c *gin.Context) {
@@ -105,7 +116,7 @@ func (h handler) getSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load indexer settings"})
 		return
 	}
-	c.JSON(http.StatusOK, st)
+	c.JSON(http.StatusOK, st.View())
 }
 
 func (h handler) updateSettings(c *gin.Context) {
@@ -122,7 +133,7 @@ func (h handler) updateSettings(c *gin.Context) {
 	case err != nil:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update indexer settings"})
 	default:
-		c.JSON(http.StatusOK, st)
+		c.JSON(http.StatusOK, st.View())
 	}
 }
 

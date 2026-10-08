@@ -20,15 +20,18 @@ type Service struct {
 
 	seasonMu sync.Mutex
 	seasons  map[string]seasonEntry
+
+	releaseDatesCache releaseDatesCache
 }
 
 func NewService(tm *tmdb.Client) *Service {
 	return &Service{tm: tm, seasons: map[string]seasonEntry{}}
 }
 
-// Season returns a TMDB season with its episodes, cached for 6 hours.
-func (s *Service) Season(tvID, number int) (*tmdb.Season, error) {
-	key := fmt.Sprintf("%d:%d", tvID, number)
+// Season returns a TMDB season with its episodes in lang ("en" or "tr"), cached for 6 hours.
+func (s *Service) Season(lang string, tvID, number int) (*tmdb.Season, error) {
+	tm := s.tm.WithLang(lang)
+	key := fmt.Sprintf("%s:%d:%d", tm.Lang(), tvID, number)
 	now := time.Now()
 
 	s.seasonMu.Lock()
@@ -38,7 +41,7 @@ func (s *Service) Season(tvID, number int) (*tmdb.Season, error) {
 		return entry.season, nil
 	}
 
-	season, err := s.tm.GetSeasonDetails(tvID, number)
+	season, err := tm.GetSeasonDetails(tvID, number)
 	if err != nil {
 		return nil, err
 	}

@@ -20,6 +20,7 @@ type JackettResult struct {
 	Tracker      string `json:"Tracker"`
 	Link         string `json:"Link"` // Jackett download URL (.torrent or redirect to a magnet)
 	InfoHash     string `json:"InfoHash"`
+	IMDbMatch    bool   `json:"-"` // found by an IMDb id search, so it is the title whatever its name
 }
 
 type JackettResponse struct {

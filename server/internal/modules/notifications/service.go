@@ -127,40 +127,110 @@ func (s *Service) loop(ctx context.Context) {
 	}
 }
 
-// Notifications returns up to limit TMDB notifications, newest first.
-func (s *Service) Notifications(ctx context.Context, limit int) ([]Notification, error) {
+// Counts drives the bell badge: Unseen = newer than the profile's "seen up to" mark and not read.
+type Counts struct {
+	Unseen int `json:"unseen"`
+	Unread int `json:"unread"`
+	Total  int `json:"total"`
+}
+
+// feed returns all TMDB notifications (newest first) with Read set for the profile, plus its counts.
+func (s *Service) feed(ctx context.Context, profile uint) ([]Notification, Counts, error) {
 	if !s.enabled() {
-		return []Notification{}, nil
+		return []Notification{}, Counts{}, nil
 	}
-	if limit <= 0 || limit > maxNotifications {
-		limit = maxNotifications
+	owner := stateOwner(profile)
+	all, err := s.repo.latest(ctx, maxNotifications)
+	if err != nil {
+		return nil, Counts{}, fmt.Errorf("failed to fetch notifications from Redis: %w", err)
+	}
+	read, err := s.repo.readIDs(ctx, owner)
+	if err != nil {
+		return nil, Counts{}, err
+	}
+	seen, err := s.repo.seenAt(ctx, owner)
+	if err != nil {
+		return nil, Counts{}, err
+	}
+	out := make([]Notification, 0, len(all))
+	var c Counts
+	for _, n := range all {
+		if !n.Type.isTMDB() {
+			continue
+		}
+		n.Read = read[n.ID]
+		if !n.Read {
+			c.Unread++
+			if n.Timestamp > seen {
+				c.Unseen++
+			}
+		}
+		out = append(out, n)
+	}
+	c.Total = len(out)
+	return out, c, nil
+}
+
+// Notifications returns up to limit TMDB notifications, newest first, with the profile's read state
+// and TMDB titles in lang ("en" or "tr").
+func (s *Service) Notifications(ctx context.Context, profile uint, limit int, lang string) ([]Notification, Counts, error) {
+	items, c, err := s.feed(ctx, profile)
+	if err != nil {
+		return nil, c, err
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return s.localize(items, lang), c, nil
+}
+
+func (s *Service) Count(ctx context.Context, profile uint) (Counts, error) {
+	_, c, err := s.feed(ctx, profile)
+	return c, err
+}
+
+func (s *Service) MarkAsRead(ctx context.Context, profile uint, id string) error {
+	if !s.enabled() {
+		return nil
+	}
+	return s.repo.markRead(ctx, stateOwner(profile), id)
+}
+
+// MarkAllRead marks every notification in the feed read and seen.
+func (s *Service) MarkAllRead(ctx context.Context, profile uint) error {
+	if !s.enabled() {
+		return nil
 	}
 	all, err := s.repo.latest(ctx, maxNotifications)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch notifications from Redis: %w", err)
+		return err
 	}
-	out := make([]Notification, 0, limit)
+	ids := make([]string, 0, len(all))
+	var newest int64
 	for _, n := range all {
-		if len(out) == limit {
-			break
-		}
-		if n.Type.isTMDB() {
-			out = append(out, n)
-		}
+		ids = append(ids, n.ID)
+		newest = max(newest, n.Timestamp)
 	}
-	return out, nil
+	owner := stateOwner(profile)
+	if err := s.repo.markRead(ctx, owner, ids...); err != nil {
+		return err
+	}
+	return s.repo.setSeen(ctx, owner, newest)
 }
 
-func (s *Service) Count(ctx context.Context) (int64, error) {
+// MarkSeen clears the badge up to `until` (a notification timestamp); 0 means the newest notification.
+func (s *Service) MarkSeen(ctx context.Context, profile uint, until int64) error {
 	if !s.enabled() {
-		return 0, nil
+		return nil
 	}
-	return s.repo.count(ctx)
-}
-
-// MarkAsRead is accepted for API compatibility; read state is not stored.
-func (s *Service) MarkAsRead(id string) error {
-	return nil
+	newest, err := s.repo.newest(ctx)
+	if err != nil {
+		return err
+	}
+	if until <= 0 || until > newest {
+		until = newest
+	}
+	return s.repo.setSeen(ctx, stateOwner(profile), until)
 }
 
 // add stores n unless one of its titles was featured recently or it duplicates a notification from the last hour.

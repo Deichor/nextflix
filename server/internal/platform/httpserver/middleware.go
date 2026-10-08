@@ -63,14 +63,50 @@ func requestDeadline() gin.HandlerFunc {
 	}
 }
 
+var (
+	corsMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
+	corsHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-User-ID", "x-user-id",
+		"X-Session-ID", "x-session-id", "X-Lang", "Range", "Cache-Control", "Pragma", "Expires"}
+	corsExpose = []string{"Content-Length", "Content-Range", "Accept-Ranges", "Content-Type", "X-Cache", "Connection"}
+)
+
 func corsMiddleware(allowed []string) gin.HandlerFunc {
-	return cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool { return isAllowedOrigin(origin, allowed) },
-		AllowMethods:    []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "X-User-ID", "x-user-id",
-			"X-Session-ID", "x-session-id", "Range", "Cache-Control", "Pragma", "Expires"},
-		ExposeHeaders:    []string{"Content-Length", "Content-Range", "Accept-Ranges", "Content-Type", "X-Cache", "Connection"},
+	lan := cors.New(cors.Config{
+		AllowOriginFunc:  func(origin string) bool { return isAllowedOrigin(origin, allowed) },
+		AllowMethods:     corsMethods,
+		AllowHeaders:     corsHeaders,
+		ExposeHeaders:    corsExpose,
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,
 	})
+	return func(c *gin.Context) {
+		if c.GetHeader("Origin") == "null" && isWebOSApp(c.Request) {
+			allowWebOSApp(c)
+			return
+		}
+		lan(c)
+	}
+}
+
+// isWebOSApp: the packaged LG TV app runs from file:// and sends "Origin: null". Only the TV's
+// own browser engine (Web0S user agent) gets that origin, so a sandboxed iframe on some website
+// opened in a normal browser still cannot read this API.
+func isWebOSApp(r *http.Request) bool {
+	ua := r.UserAgent()
+	return strings.Contains(ua, "Web0S") || strings.Contains(ua, "webOS")
+}
+
+func allowWebOSApp(c *gin.Context) {
+	h := c.Writer.Header()
+	h.Set("Access-Control-Allow-Origin", "null")
+	h.Add("Vary", "Origin")
+	if c.Request.Method == http.MethodOptions {
+		h.Set("Access-Control-Allow-Methods", strings.Join(corsMethods, ","))
+		h.Set("Access-Control-Allow-Headers", strings.Join(corsHeaders, ","))
+		h.Set("Access-Control-Max-Age", "43200")
+		c.AbortWithStatus(http.StatusNoContent)
+		return
+	}
+	h.Set("Access-Control-Expose-Headers", strings.Join(corsExpose, ","))
+	c.Next()
 }

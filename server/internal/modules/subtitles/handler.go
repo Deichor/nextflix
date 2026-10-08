@@ -1,0 +1,97 @@
+package subtitles
+
+import (
+	"errors"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+type handler struct{ s *Service }
+
+func (h handler) list(c *gin.Context) {
+	q := Query{
+		MediaType: c.DefaultQuery("media_type", "movie"),
+		Hash:      strings.ToLower(strings.TrimSpace(c.Query("hash"))),
+		Title:     c.Query("title"),
+		Langs:     parseLangs(c.Query("langs")),
+	}
+	q.TmdbID, _ = strconv.Atoi(c.Query("tmdb_id"))
+	q.Season, _ = strconv.Atoi(c.Query("season"))
+	q.Episode, _ = strconv.Atoi(c.Query("episode"))
+	q.Index, _ = strconv.Atoi(c.Query("index"))
+	q.Year, _ = strconv.Atoi(c.Query("year"))
+	q.Refresh = c.Query("refresh") == "1"
+
+	if q.MediaType != "movie" && q.MediaType != "tv" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "media_type must be movie or tv"})
+		return
+	}
+	if q.Hash != "" && !infoHashRe.MatchString(q.Hash) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hash"})
+		return
+	}
+	if q.TmdbID <= 0 && q.Hash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tmdb_id or hash is required"})
+		return
+	}
+	if q.MediaType == "tv" && q.TmdbID > 0 && (q.Season < 0 || q.Episode <= 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "season and episode are required for tv"})
+		return
+	}
+	if len(q.Title) > 300 {
+		q.Title = q.Title[:300]
+	}
+	items := h.s.List(c.Request.Context(), q)
+	if items == nil {
+		items = []Sub{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (h handler) file(c *gin.Context) {
+	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks)
+	vtt, partial, err := h.s.FileAt(c.Request.Context(), c.Query("id"), t)
+	switch {
+	case errors.Is(err, ErrBadID):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subtitle id"})
+		return
+	case errors.Is(err, ErrRateLimited):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		log.Printf("subtitles: file: %v", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if partial {
+		// More cues follow while the file plays; the body also carries PartialNote
+		c.Header("Cache-Control", "no-store")
+		c.Header("X-Subtitle-Partial", "1")
+		c.Data(http.StatusOK, "text/vtt; charset=utf-8", vtt)
+		return
+	}
+	c.Header("Cache-Control", "private, max-age=86400")
+	c.Data(http.StatusOK, "text/vtt; charset=utf-8", vtt)
+}
+
+func (h handler) getSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, h.s.Settings())
+}
+
+func (h handler) putSettings(c *gin.Context) {
+	var in SettingsInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	v, err := h.s.UpdateSettings(in)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save subtitle settings"})
+		return
+	}
+	c.JSON(http.StatusOK, v)
+}

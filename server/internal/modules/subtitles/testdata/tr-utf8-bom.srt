@@ -1,0 +1,12 @@
+﻿1
+00:00:01,000 --> 00:00:03,500
+Şimdi Iğdır'a gidiyoruz.
+Çok güzel, öyle değil mi?
+
+2
+00:00:04,000 --> 00:00:06,000
+<i>İstanbul'da yağmur yağıyor.</i>
+
+3
+00:00:06,500 --> 00:01:09,250
+ÇİĞDEM ŞÜKRÜ'YE ÖĞRETMEN DEDİ: "Işık!"

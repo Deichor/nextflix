@@ -227,19 +227,20 @@ type Images struct {
 
 // SearchResult is a movie or TV show normalized to one shape (TV name/first_air_date map to title/release_date).
 type SearchResult struct {
-	ID            int     `json:"id"`
-	Title         string  `json:"title"`
-	OriginalTitle string  `json:"original_title"`
-	Overview      string  `json:"overview"`
-	ReleaseDate   string  `json:"release_date"`
-	PosterPath    string  `json:"poster_path"`
-	BackdropPath  string  `json:"backdrop_path"`
-	VoteAverage   float64 `json:"vote_average"`
-	VoteCount     int     `json:"vote_count"`
-	Popularity    float64 `json:"popularity"`
-	MediaType     string  `json:"media_type"`
-	Adult         bool    `json:"adult"`
-	GenreIDs      []int   `json:"genre_ids"`
+	ID               int     `json:"id"`
+	Title            string  `json:"title"`
+	OriginalTitle    string  `json:"original_title"`
+	Overview         string  `json:"overview"`
+	ReleaseDate      string  `json:"release_date"`
+	PosterPath       string  `json:"poster_path"`
+	BackdropPath     string  `json:"backdrop_path"`
+	VoteAverage      float64 `json:"vote_average"`
+	VoteCount        int     `json:"vote_count"`
+	Popularity       float64 `json:"popularity"`
+	MediaType        string  `json:"media_type"`
+	Adult            bool    `json:"adult"`
+	GenreIDs         []int   `json:"genre_ids"`
+	OriginalLanguage string  `json:"original_language,omitempty"`
 }
 
 type MultiSearchResponse struct {
@@ -250,22 +251,23 @@ type MultiSearchResponse struct {
 }
 
 type rawSearchResult struct {
-	ID            int     `json:"id"`
-	Title         string  `json:"title,omitempty"`
-	Name          string  `json:"name,omitempty"`
-	OriginalTitle string  `json:"original_title,omitempty"`
-	OriginalName  string  `json:"original_name,omitempty"`
-	Overview      string  `json:"overview"`
-	ReleaseDate   string  `json:"release_date,omitempty"`
-	FirstAirDate  string  `json:"first_air_date,omitempty"`
-	PosterPath    string  `json:"poster_path"`
-	BackdropPath  string  `json:"backdrop_path"`
-	VoteAverage   float64 `json:"vote_average"`
-	VoteCount     int     `json:"vote_count"`
-	Popularity    float64 `json:"popularity"`
-	MediaType     string  `json:"media_type"`
-	Adult         bool    `json:"adult"`
-	GenreIDs      []int   `json:"genre_ids"`
+	ID               int     `json:"id"`
+	Title            string  `json:"title,omitempty"`
+	Name             string  `json:"name,omitempty"`
+	OriginalTitle    string  `json:"original_title,omitempty"`
+	OriginalName     string  `json:"original_name,omitempty"`
+	Overview         string  `json:"overview"`
+	ReleaseDate      string  `json:"release_date,omitempty"`
+	FirstAirDate     string  `json:"first_air_date,omitempty"`
+	PosterPath       string  `json:"poster_path"`
+	BackdropPath     string  `json:"backdrop_path"`
+	VoteAverage      float64 `json:"vote_average"`
+	VoteCount        int     `json:"vote_count"`
+	Popularity       float64 `json:"popularity"`
+	MediaType        string  `json:"media_type"`
+	Adult            bool    `json:"adult"`
+	GenreIDs         []int   `json:"genre_ids"`
+	OriginalLanguage string  `json:"original_language"`
 }
 
 type rawMultiSearchResponse struct {
