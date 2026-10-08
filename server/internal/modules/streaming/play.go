@@ -115,9 +115,9 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 	args = append(args, "-i", src)
 	switch track {
 	case tsTrackVideo:
-		args = append(args, "-map", "0:v:0", "-an", "-sn", "-dn")
+		args = append(args, "-map", "0:v:0", "-an", "-sn", "-dn", "-map_chapters", "-1")
 	case tsTrackAudio:
-		args = append(args, "-map", fmt.Sprintf("0:a:%d", audio), "-vn", "-sn", "-dn")
+		args = append(args, "-map", fmt.Sprintf("0:a:%d", audio), "-vn", "-sn", "-dn", "-map_chapters", "-1")
 	default:
 		args = append(args, "-map", "0:v:0", "-map", fmt.Sprintf("0:a:%d?", audio), "-sn", "-dn")
 	}
@@ -155,11 +155,15 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 	}
 	// Split: the file's own timestamps. output_ts_offset undoes the input offset of -ss; tfdt is only
 	// absolute with frag_discont + negative_cts_offsets and no edit list (ffmpeg 5.1 starts at 0
-	// otherwise); make_non_negative only moves encoder priming at t=0 (a few ms) above zero.
+	// otherwise). Audio only: make_non_negative moves encoder priming at t=0 (a few ms) above zero;
+	// video keeps its timestamps (negative_cts_offsets keeps B-frame delays off the decode time).
 	if start > 0 {
 		args = append(args, "-output_ts_offset", ss)
 	}
-	return append(args, "-use_editlist", "0", "-avoid_negative_ts", "make_non_negative",
+	if track == tsTrackAudio {
+		args = append(args, "-avoid_negative_ts", "make_non_negative")
+	}
+	return append(args, "-use_editlist", "0",
 		"-movflags", movflags+"+frag_discont+negative_cts_offsets", "-frag_duration", "1000000",
 		"-f", "mp4", "pipe:1")
 }

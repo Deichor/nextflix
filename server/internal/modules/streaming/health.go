@@ -241,16 +241,21 @@ func (r *tsResolveResult) alive() bool {
 	return r.Health != nil && !r.Health.Dead && (r.Health.ActivePeers > 0 || r.Health.Rate > 0)
 }
 
+// tsCapVerifiedMin: a source of verified length delivering this share of its need plays with
+// some buffering; at the cap it beats one of unknown length whatever that one delivers.
+const tsCapVerifiedMin = 0.5
+
 // tsCapClearly: ratio a is clearly better than b (by 0.1 and by half again).
 func tsCapClearly(a, b float64) bool { return a-b >= 0.1 && a >= 1.5*b }
 
 // tsChoosePlayable picks, when nothing keeps up at the answer cap, the source most likely to
 // play: finished checks and snapshots of running ones alike (rs, best rank first). In order:
 // alive (active peers or data, not dead) over a dead or silent swarm, fit for the client
-// (not unfit), measured over unmeasured, a clearly better rate / need
-// ratio (a 4K below 0.3 never beats a <= 1080p with a higher ratio), a verified duration,
-// the lower need (bitrate) when the ratios are close, then more active peers, connected
-// seeders, Jackett seeders and the rank. -1 when rs is empty.
+// (not unfit), measured over unmeasured (a 4K below 0.3 never beats a <= 1080p with a higher
+// ratio), a verified duration (unless it delivers under tsCapVerifiedMin and the other one
+// clearly more), a clearly better rate / need ratio, the lower need (bitrate) when the ratios
+// are close, then more active peers, connected seeders, Jackett seeders and the rank. -1 when
+// rs is empty.
 func tsChoosePlayable(rs []*tsResolveResult) int {
 	better := func(a, b *tsResolveResult) bool {
 		if a.alive() != b.alive() {
@@ -263,16 +268,6 @@ func tsChoosePlayable(rs []*tsResolveResult) int {
 			return a.measured()
 		}
 		ra, rb := a.Health.ratio(), b.Health.ratio()
-		// A verified length beats an unknown one (a probe that failed or still runs: the
-		// player would wait for it) unless the verified swarm delivers almost nothing
-		if va, vb := a.durationOK(), b.durationOK(); va != vb {
-			if va && (ra >= tsCapUsable || rb < tsCapUsable) {
-				return true
-			}
-			if vb && (rb >= tsCapUsable || ra < tsCapUsable) {
-				return false
-			}
-		}
 		qa, qb := tsQualityHeight(a.Quality), tsQualityHeight(b.Quality)
 		if qa == 2160 && ra < 0.3 && qb > 0 && qb <= 1080 && rb > ra {
 			return false
@@ -280,11 +275,20 @@ func tsChoosePlayable(rs []*tsResolveResult) int {
 		if qb == 2160 && rb < 0.3 && qa > 0 && qa <= 1080 && ra > rb {
 			return true
 		}
+		// A verified length beats an unknown one (a probe that failed or still runs: the
+		// player waits for it) unless the verified swarm delivers under tsCapVerifiedMin of its
+		// need and the other one clearly more
+		if va, vb := a.durationOK(), b.durationOK(); va != vb {
+			rv, ru := ra, rb
+			if vb {
+				rv, ru = rb, ra
+			}
+			if rv >= tsCapVerifiedMin || !tsCapClearly(ru, rv) {
+				return va
+			}
+		}
 		if tsCapClearly(ra, rb) || tsCapClearly(rb, ra) {
 			return ra > rb
-		}
-		if a.durationOK() != b.durationOK() {
-			return a.durationOK()
 		}
 		na, nb := tsResultNeed(a), tsResultNeed(b)
 		if na > 0 && nb > 0 && (float64(na) < 0.8*float64(nb) || float64(nb) < 0.8*float64(na)) {
@@ -474,7 +478,7 @@ func (m *tsWarmMeter) window() (st tsWarmStats, ok bool) {
 	} else {
 		st.median = (rates[k/2-1] + rates[k/2]) / 2
 	}
-	return st, st.span >= tsWarmSustain
+	return st, st.span+tsWarmPoll/4 >= tsWarmSustain // polls come a little late (stat latency)
 }
 
 // keepsUp: the delivered rate reaches enough over tsWarmSustain, or tsWarmFastFactor times
@@ -488,7 +492,7 @@ func (m *tsWarmMeter) keepsUp() bool {
 	if ok {
 		return st.avg >= m.enough
 	}
-	return st.span >= tsWarmFastSpan && st.avg >= tsWarmFastFactor*m.enough
+	return st.span+tsWarmPoll/4 >= tsWarmFastSpan && st.avg >= tsWarmFastFactor*m.enough
 }
 
 // verdict: the window is long enough to judge (or already clearly keeps up).
@@ -671,6 +675,9 @@ func (s *Service) swarmStat(ctx context.Context, hash string, out *tsSwarmStat) 
 
 // torrentStat decodes TorrServer's stat of a loaded torrent into out.
 func (s *Service) torrentStat(ctx context.Context, hash string, out any) error {
+	if ok, err := s.debridStat(hash, out); ok {
+		return err // a debrid source: answered without loading it into TorrServer
+	}
 	statURL := s.torrServerURL() + "/stream?" + url.Values{"link": {hash}, "stat": {""}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statURL, nil)
 	if err != nil {

@@ -54,5 +54,5 @@ type StreamSource struct {
 func (StreamSource) TableName() string { return "stream_sources" }
 
 func Models() []any {
-	return []any{&IndexerSettings{}, &StreamSource{}}
+	return []any{&IndexerSettings{}, &StreamSource{}, &DebridSettings{}}
 }

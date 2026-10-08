@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -49,13 +50,22 @@ func (h handler) list(c *gin.Context) {
 	if items == nil {
 		items = []Sub{}
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	out := gin.H{"items": items}
+	if until := h.s.OpenSubtitlesQuotaUntil(); !until.IsZero() {
+		out["opensubtitles_quota_until"] = until.UTC().Format(time.RFC3339)
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (h handler) file(c *gin.Context) {
 	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks)
 	vtt, partial, err := h.s.FileAt(c.Request.Context(), c.Query("id"), t)
+	var qe QuotaError
 	switch {
+	case errors.As(err, &qe):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "OpenSubtitles download quota used up", "quota": true,
+			"reset_at": qe.Until.UTC().Format(time.RFC3339)})
+		return
 	case errors.Is(err, ErrBadID):
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subtitle id"})
 		return

@@ -286,6 +286,9 @@ func (s *Service) startDeferred(w *tsWarm, q tsResolveQuery) {
 // saveTorrent stores a loaded torrent's metadata in TorrServer's DB (category nextflix, so
 // pruneTorrServerDB removes it after tsDBKeep), so adding it again after a drop is instant.
 func (s *Service) saveTorrent(hash string) {
+	if _, ok := s.debrid.hashSource(hash); ok {
+		return // a debrid source never goes into TorrServer
+	}
 	if s.saveFn != nil {
 		s.saveFn(hash)
 		return

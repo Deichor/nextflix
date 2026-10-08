@@ -122,6 +122,7 @@ func run() error {
 		CacheDir:        envOr("SUBTITLE_CACHE_DIR", "/app/data/subtitles"),
 		FlareSolverrURL: envOr("FLARESOLVERR_URL", "http://flaresolverr:8191/v1"),
 		IMDb:            imdbLookup(tm),
+		Debrid:          debridSource(streamingSvc),
 	})
 	if err := subtitlesSvc.EnsureSettings(); err != nil {
 		log.Printf("seed subtitle settings: %v", err)
@@ -200,4 +201,19 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// debridSource lets the subtitle reads follow files that play from TorBox.
+func debridSource(s *streaming.Service) *subtitles.DebridSource {
+	return &subtitles.DebridSource{
+		FileURL: s.DebridFileURL,
+		Files: func(hash string) ([]subtitles.DebridFile, bool) {
+			files, ok := s.DebridFiles(hash)
+			out := make([]subtitles.DebridFile, 0, len(files))
+			for _, f := range files {
+				out = append(out, subtitles.DebridFile{ID: f.ID, Path: f.Path, Length: f.Length})
+			}
+			return out, ok
+		},
+	}
 }

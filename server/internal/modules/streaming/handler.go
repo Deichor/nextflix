@@ -30,6 +30,12 @@ func (h handler) files(c *gin.Context) {
 		return
 	}
 	h.s.touch(tsHashFromMagnet(magnet))
+	// A TorBox source is listed from what is known: TorrServer never loads it (debrid.go)
+	var debridStat tsTorrentStat
+	if ok, err := h.s.debridStat(magnet, &debridStat); ok && err == nil {
+		writeFiles(c, debridStat)
+		return
+	}
 
 	statURL := h.s.torrServerURL() + "/stream?" + url.Values{"link": {magnet}, "stat": {""}}.Encode()
 	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, statURL, nil)
@@ -49,7 +55,11 @@ func (h handler) files(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid TorrServer response"})
 		return
 	}
+	writeFiles(c, stat)
+}
 
+// writeFiles answers /files with the video files of a torrent.
+func writeFiles(c *gin.Context, stat tsTorrentStat) {
 	files := make([]tsFileStat, 0)
 	for _, f := range stat.FileStats {
 		if tsVideoExts[strings.ToLower(filepath.Ext(f.Path))] {
@@ -81,23 +91,25 @@ func (h handler) probe(c *gin.Context) {
 		return
 	}
 
-	codecs := clientAudioCodecs(c)
+	codecs, splitCodecs := clientAudioCodecs(c), clientSplitAudioCodecs(c)
 	audio := make([]gin.H, 0)
 	for _, st := range p.Streams {
 		if st.CodecType == "audio" {
 			n := len(audio)
 			audio = append(audio, gin.H{
-				"index":    n,
-				"language": st.Tags["language"],
-				"title":    st.Tags["title"],
-				"codec":    st.CodecName,
-				"channels": st.Channels,
-				"default":  st.Disposition["default"] == 1,
-				"direct":   p.audioPlan(n, codecs).copy, // sent untouched to this client (?acodecs=)
+				"index":        n,
+				"language":     st.Tags["language"],
+				"title":        st.Tags["title"],
+				"codec":        st.CodecName,
+				"channels":     st.Channels,
+				"default":      st.Disposition["default"] == 1,
+				"direct":       p.audioPlan(n, codecs).copy,      // sent untouched to this client (?acodecs=)
+				"split_direct": p.audioPlan(n, splitCodecs).copy, // untouched in a track=audio stream (+ ?split_acodecs=)
 			})
 		}
 	}
-	out := gin.H{"duration": p.duration(), "video_codec": "", "audio_tracks": audio}
+	// split: play takes track=video|audio (split.go)
+	out := gin.H{"duration": p.duration(), "video_codec": "", "audio_tracks": audio, "split": true}
 	// With ?type=&tmdb_id= (and season/episode) the player learns whether this is the whole title
 	if rt, mismatch, ok := h.s.probeRuntimeCheck(c, hash, index, p.duration()); ok {
 		out["expected_runtime"], out["duration_mismatch"] = rt, mismatch

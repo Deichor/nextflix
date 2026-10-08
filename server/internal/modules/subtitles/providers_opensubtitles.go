@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -47,6 +48,18 @@ func newOpenSubtitles(base string, client *upstream.Client) *openSubtitles {
 
 // ErrRateLimited is returned while a provider asked us to back off.
 var ErrRateLimited = errors.New("rate limited")
+
+// osQuotaFallback: how long a used-up download quota blocks downloads when the answer has no reset time.
+const osQuotaFallback = time.Hour
+
+// QuotaError: the OpenSubtitles download quota is used up until Until.
+type QuotaError struct{ Until time.Time }
+
+func (e QuotaError) Error() string {
+	return "OpenSubtitles download quota used up until " + e.Until.UTC().Format(time.RFC3339)
+}
+
+func (e QuotaError) Unwrap() error { return ErrRateLimited }
 
 type osSearchResponse struct {
 	Data []struct {
@@ -139,7 +152,7 @@ func (o *openSubtitles) search(ctx context.Context, q Query, st Settings, movieh
 type osDownloadResponse struct {
 	Link         string `json:"link"`
 	FileName     string `json:"file_name"`
-	Remaining    int    `json:"remaining"`
+	Remaining    *int   `json:"remaining"`
 	Message      string `json:"message"`
 	ResetTimeUTC string `json:"reset_time_utc"`
 }
@@ -154,30 +167,19 @@ func (o *openSubtitles) fetch(ctx context.Context, ref string, st Settings) ([]b
 	if err != nil || fileID <= 0 {
 		return nil, "", errors.New("bad OpenSubtitles file id")
 	}
-	o.mu.Lock()
-	blocked := time.Now().Before(o.dlBlocked)
-	o.mu.Unlock()
-	if blocked {
-		return nil, "", fmt.Errorf("OpenSubtitles download quota used up: %w", ErrRateLimited)
+	if until := o.quotaUntil(); !until.IsZero() {
+		return nil, "", QuotaError{Until: until} // not asked again before the reset
 	}
 
 	body, _ := json.Marshal(map[string]any{"file_id": fileID})
 	var res osDownloadResponse
 	err = o.do(ctx, st, http.MethodPost, "/download", body, &res)
 	var se statusError
-	if errors.As(err, &se) && se.code == http.StatusNotAcceptable {
-		// 406: daily download quota reached; it resets at reset_time_utc.
-		until := time.Now().Add(time.Hour)
+	if errors.As(err, &se) && (se.code == http.StatusNotAcceptable || (se.code == http.StatusTooManyRequests && osQuotaBody(se.body))) {
+		// 406 (or a 429 about the quota): the daily download quota is reached until reset_time_utc
 		var q osDownloadResponse
-		if json.Unmarshal(se.body, &q) == nil {
-			if t, perr := time.Parse(time.RFC3339, q.ResetTimeUTC); perr == nil && t.After(time.Now()) {
-				until = t
-			}
-		}
-		o.mu.Lock()
-		o.dlBlocked = until
-		o.mu.Unlock()
-		return nil, "", fmt.Errorf("OpenSubtitles download quota used up until %s: %w", until.UTC().Format(time.RFC3339), ErrRateLimited)
+		_ = json.Unmarshal(se.body, &q)
+		return nil, "", QuotaError{Until: o.blockDownloads(q.ResetTimeUTC)}
 	}
 	if err != nil {
 		return nil, "", err
@@ -185,11 +187,49 @@ func (o *openSubtitles) fetch(ctx context.Context, ref string, st Settings) ([]b
 	if res.Link == "" {
 		return nil, "", fmt.Errorf("OpenSubtitles: no download link (%s)", res.Message)
 	}
+	if res.Remaining != nil && *res.Remaining <= 0 {
+		// That was the quota's last download: the next ones are not even asked
+		o.blockDownloads(res.ResetTimeUTC)
+	}
 	raw, err := getBytes(ctx, o.http, res.Link, nil)
 	if err != nil {
 		return nil, "", err
 	}
 	return raw, firstNonEmpty(res.FileName, name), nil
+}
+
+// quotaUntil is when a used-up download quota resets (zero while downloads are allowed).
+func (o *openSubtitles) quotaUntil() time.Time {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if time.Now().Before(o.dlBlocked) {
+		return o.dlBlocked
+	}
+	return time.Time{}
+}
+
+// blockDownloads stops downloads until reset (RFC 3339; else osQuotaFallback from now).
+func (o *openSubtitles) blockDownloads(reset string) time.Time {
+	until := time.Now().Add(osQuotaFallback)
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(reset)); err == nil && t.After(time.Now()) {
+		until = t
+	}
+	o.mu.Lock()
+	o.dlBlocked = until
+	o.mu.Unlock()
+	log.Printf("subtitles: OpenSubtitles download quota used up until %s", until.UTC().Format(time.RFC3339))
+	return until
+}
+
+// osQuotaBody: an error answer of /download that is about the download quota, not request pacing.
+func osQuotaBody(b []byte) bool {
+	l := strings.ToLower(string(b))
+	for _, w := range []string{"quota", "remaining", "reset_time", "download limit", "allowed"} {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // login returns a cached JWT, logging in when username and password are set. Without them it
@@ -286,7 +326,8 @@ func (o *openSubtitles) raw(ctx context.Context, st Settings, base, token, metho
 		o.mu.Lock()
 		o.blockedUntil = time.Now().Add(wait)
 		o.mu.Unlock()
-		return fmt.Errorf("OpenSubtitles: %w for %s", ErrRateLimited, wait)
+		// The body tells a used-up download quota from request pacing (fetch)
+		return fmt.Errorf("OpenSubtitles: %w for %s: %w", ErrRateLimited, wait, statusError{code: resp.Status, body: b})
 	}
 	if resp.Status < 200 || resp.Status > 299 {
 		return statusError{code: resp.Status, body: b}

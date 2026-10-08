@@ -269,3 +269,23 @@ func TestWarmMeterRecordedSeries(t *testing.T) {
 		}
 	}
 }
+
+// A poll that came a few ms late (TorrServer's stat answered slowly) does not delay the verdict
+// by a whole poll.
+func TestWarmMeterPollJitter(t *testing.T) {
+	rate := 0.29 // MB/s
+	need := int64(rate * mbps)
+	m := newWarmMeter(need)
+	samples := seriesSamples(t, "0.87/4.17 3.62/2.84 3.04/3.73 2.08/2.99 1.24/2.07") // Plan 9 YTS
+	samples[1].at += 7 * time.Millisecond
+	doneAt := 0
+	for _, s := range samples {
+		if m.add(s) {
+			doneAt = int(s.at / time.Second)
+			break
+		}
+	}
+	if doneAt != 4 {
+		t.Fatalf("done after %d s, want 4", doneAt)
+	}
+}

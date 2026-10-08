@@ -40,6 +40,8 @@ type Config struct {
 	SubDLDownloadURL string
 	TurkceAltyaziURL string
 	HTTPClient       *http.Client
+	// Debrid maps files that play from TorBox (nil = TorrServer only)
+	Debrid *DebridSource
 }
 
 // Service lists subtitles from the torrent itself and online providers and serves them as WebVTT.
@@ -90,6 +92,9 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		ta:        newTurkceAltyazi(cfg.TurkceAltyaziURL, cfg.FlareSolverrURL, files),
 		hashes:    map[string]string{},
 		refreshed: map[string]time.Time{},
+	}
+	if cfg.Debrid != nil {
+		debridHook.Store(cfg.Debrid)
 	}
 	s.live = newLiveSubs(cfg.TorrServerURL, func(key string, vtt []byte) {
 		if err := s.files.write(SourceEmbedded, key, ".vtt", vtt); err != nil {
@@ -243,12 +248,47 @@ func (s *Service) List(ctx context.Context, q Query) []Sub {
 		case r := <-results:
 			all = append(all, r.items...)
 		case <-timer.C:
-			return rankCandidates(all, q)
+			return s.rank(all, q)
 		case <-ctx.Done():
-			return rankCandidates(all, q)
+			return s.rank(all, q)
 		}
 	}
-	return rankCandidates(all, q)
+	return s.rank(all, q)
+}
+
+func (s *Service) rank(all []candidate, q Query) []Sub {
+	subs := rankCandidates(all, q)
+	if !s.OpenSubtitlesQuotaUntil().IsZero() {
+		subs = demoteQuota(subs)
+	}
+	return subs
+}
+
+// OpenSubtitlesQuotaUntil is when OpenSubtitles' used-up download quota resets (zero while it is not).
+func (s *Service) OpenSubtitlesQuotaUntil() time.Time { return s.os.quotaUntil() }
+
+// demoteQuota marks the OpenSubtitles items (their downloads are used up) and moves them behind the
+// other items of their language; the order is kept otherwise.
+func demoteQuota(subs []Sub) []Sub {
+	out := make([]Sub, 0, len(subs))
+	for i := 0; i < len(subs); {
+		j := i
+		for j < len(subs) && subs[j].Language == subs[i].Language {
+			j++
+		}
+		var blocked []Sub
+		for _, it := range subs[i:j] {
+			if it.Source == SourceOpenSubtitles {
+				it.Quota = true
+				blocked = append(blocked, it)
+			} else {
+				out = append(out, it)
+			}
+		}
+		out = append(out, blocked...)
+		i = j
+	}
+	return out
 }
 
 func (s *Service) torrentCandidates(ctx context.Context, hash string) ([]candidate, error) {

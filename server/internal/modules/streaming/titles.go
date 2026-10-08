@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -318,39 +319,72 @@ func tsMainTitle(title string) string {
 // englishTitle replaces the title of a query that names a tmdb_id with TMDB's English
 // title. The web shows titles in the profile language ("Başlangıç"), but releases are
 // named in English, and resolve, prefetch, upgrade and release must agree on the keys.
-// The client's title stays when TMDB is unavailable or slower than tsTitleNamesWait.
+// A movie also takes TMDB's release year: tsScore rejects a release named with another
+// year (a remake, a namesake), which only works with the right year, and clients send none
+// (resumes, upgrade polls) or a wrong one.
+// The client's title and year stay when TMDB is unavailable or slower than tsTitleNamesWait.
 func (s *Service) englishTitle(q *tsResolveQuery) {
 	if q.tmdbID <= 0 || s.cfg.TMDB == nil {
 		return
 	}
 	key := fmt.Sprintf("%s:%d", q.mediaType, q.tmdbID)
 	if v, ok := s.titles.Load(key); ok {
-		q.title = v.(string)
+		tsApplyTMDBTitle(q, v.(tsTMDBTitle))
 		return
 	}
-	ch := make(chan string, 1)
+	ch := make(chan tsTMDBTitle, 1)
+	movie, id := q.mediaType == "movie", q.tmdbID
 	go func() {
-		title := ""
-		if q.mediaType == "movie" {
-			if d, err := s.cfg.TMDB.GetMovieDetails(q.tmdbID); err == nil && d != nil {
-				title = d.Title
+		var t tsTMDBTitle
+		if movie {
+			if d, err := s.cfg.TMDB.GetMovieDetails(id); err == nil && d != nil {
+				t.title, t.year = d.Title, tsDateYear(d.ReleaseDate)
 			}
-		} else if d, err := s.cfg.TMDB.GetTVDetails(q.tmdbID); err == nil && d != nil {
-			title = d.Name
+		} else if d, err := s.cfg.TMDB.GetTVDetails(id); err == nil && d != nil {
+			t.title = d.Name
 		}
-		ch <- strings.TrimSpace(title)
+		t.title = strings.TrimSpace(t.title)
+		ch <- t
 	}()
 	select {
-	case title := <-ch:
-		if len(tsNormalize(title)) == 0 {
+	case t := <-ch:
+		if len(tsNormalize(t.title)) == 0 {
 			return
 		}
-		s.titles.Store(key, title)
-		if title != q.title {
-			log.Printf("resolve: using English title %q for %q (tmdb %s)", title, q.title, key)
+		s.titles.Store(key, t)
+		if t.title != q.title {
+			log.Printf("resolve: using English title %q for %q (tmdb %s)", t.title, q.title, key)
 		}
-		q.title = title
+		if movie && t.year > 0 && q.year != t.year {
+			log.Printf("resolve %q: using TMDB's year %d instead of %d (tmdb %s)", t.title, t.year, q.year, key)
+		}
+		tsApplyTMDBTitle(q, t)
 	case <-time.After(tsTitleNamesWait):
 		log.Printf("resolve %q: English title lookup timed out", q.title)
 	}
+}
+
+// tsTMDBTitle is what englishTitle keeps per tmdb id (year 0: unknown, the client's stays).
+type tsTMDBTitle struct {
+	title string
+	year  int
+}
+
+func tsApplyTMDBTitle(q *tsResolveQuery, t tsTMDBTitle) {
+	q.title = t.title
+	if t.year > 0 && q.mediaType == "movie" {
+		q.year = t.year
+	}
+}
+
+// tsDateYear is the year of a TMDB date ("1968-10-01"), 0 without one.
+func tsDateYear(date string) int {
+	if len(date) < 4 {
+		return 0
+	}
+	y, err := strconv.Atoi(date[:4])
+	if err != nil || y < 1870 || y > 2100 {
+		return 0
+	}
+	return y
 }

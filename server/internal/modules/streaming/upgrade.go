@@ -560,6 +560,10 @@ func (h handler) upgrade(c *gin.Context) {
 	if tsQualityLabel(curQ) == "" {
 		curQ = 0
 	}
+	// failed=<why>: the player's last switch to an offer did not work out (it tries once more)
+	if why := tsPlayerReason(c.Query("failed")); why != "" {
+		log.Printf("resolve %q: the player could not switch to the upgrade: %s", q.title, why)
+	}
 	if !q.hevc || q.maxQ > 0 {
 		c.Status(http.StatusNoContent)
 		return
@@ -572,4 +576,18 @@ func (h handler) upgrade(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// tsPlayerReason is a reason a player reports (?failed=, ?why=), cleaned and cut for the log.
+func tsPlayerReason(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s))
+	if r := []rune(s); len(r) > 160 {
+		s = string(r[:160])
+	}
+	return s
 }

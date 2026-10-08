@@ -257,7 +257,7 @@ func TestAfterPickSnapshotPick(t *testing.T) {
 		t.Fatal("the faster alternative is no spare")
 	}
 	// The player stalls and asks for a sidegrade: a spare that does not keep up is never offered
-	if got := s.sidegradeFor(key, tsResolveQuery{}, hx('a'), 1080, tsSideOpts{draining: true}); got != nil {
+	if got := s.sidegradeFor(key, tsResolveQuery{}, hx('a'), 1080, tsSideOpts{}); got != nil {
 		t.Fatalf("sidegrade = %v, want none", got)
 	}
 }

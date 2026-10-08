@@ -353,6 +353,10 @@ func TestThumbViewerLeavingCancelsTheJob(t *testing.T) {
 		errc <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
+	// The viewer's latest request is far away (the scrub moved on)
+	th.mu.Lock()
+	th.newest[thumbHashA+":0"] = 100
+	th.mu.Unlock()
 	cancel()
 	if err := <-errc; err == nil {
 		t.Fatal("no error after cancel")
@@ -366,6 +370,33 @@ func TestThumbViewerLeavingCancelsTheJob(t *testing.T) {
 	th.mu.Unlock()
 	if jobs != 0 || slots != 0 {
 		t.Fatalf("left %d jobs, %d torrent slots", jobs, slots)
+	}
+}
+
+// A request aborted next to the viewer's latest one (the web player moving within a few
+// cells) does not stop its frame: it finishes and is cached for the next hover.
+func TestThumbAbortNearTheLatestRequestFinishes(t *testing.T) {
+	_, th, f, _ := newThumbTest(t)
+	f.gate = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error)
+	go func() {
+		_, err := th.frame(ctx, thumbKey{hash: thumbHashA, t: 10, w: 320}, false, time.Second)
+		errc <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	th.mu.Lock()
+	th.newest[thumbHashA+":0"] = 30 // two cells on
+	th.mu.Unlock()
+	cancel()
+	if err := <-errc; err == nil {
+		t.Fatal("no error after cancel")
+	}
+	close(f.gate)
+	time.Sleep(50 * time.Millisecond)
+	if f.sawDone.Load() != 0 || !th.hasCached(thumbKey{hash: thumbHashA, t: 10, w: 320}) {
+		t.Fatalf("aborted frame near the latest request: cancelled %d, cached %v", f.sawDone.Load(),
+			th.hasCached(thumbKey{hash: thumbHashA, t: 10, w: 320}))
 	}
 }
 

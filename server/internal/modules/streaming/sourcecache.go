@@ -47,6 +47,7 @@ func (s *Service) cachedSource(key string) (*tsResolveResult, bool) {
 		return nil, false
 	}
 	s.resolveCache.Store(key, tsCacheEntry{res: res, expires: expires})
+	s.debridOwns(&res) // a debrid source plays from TorBox again (after a restart)
 	s.applyProbedQuality(&res)
 	return &res, true
 }

@@ -100,6 +100,7 @@ type thumbs struct {
 	perHashRefs map[string]int
 	failed      map[string]time.Time
 	userWaiters int
+	newest      map[string]int // "hash:index" -> t of the latest viewer request
 	queue       []thumbQueued
 	queueSig    chan struct{}
 	workerOnce  sync.Once
@@ -114,6 +115,7 @@ func newThumbs(s *Service, dir string) *thumbs {
 		perHash:     map[string]chan struct{}{},
 		perHashRefs: map[string]int{},
 		failed:      map[string]time.Time{},
+		newest:      map[string]int{},
 		queueSig:    make(chan struct{}, 1),
 	}
 }
@@ -326,9 +328,15 @@ func (th *thumbs) knownDuration(hash string, index int) float64 {
 }
 
 // frame returns the frame of k, joining a running job for it or starting one. It waits up to
-// wait; a job whose last waiter left without timing out (the viewer moved on) is cancelled.
+// wait. A job whose last waiter aborted its request is cancelled only when the viewer's latest
+// request is more than 2 grid cells away (the scrub moved on); a frame next to it finishes and
+// is cached, since the web player keeps a few requests in flight while the cursor moves.
 func (th *thumbs) frame(ctx context.Context, k thumbKey, background bool, wait time.Duration) ([]byte, error) {
 	th.mu.Lock()
+	file := k.hash + ":" + strconv.Itoa(k.index)
+	if !background {
+		th.newest[file] = k.t
+	}
 	j := th.jobs[k.id()]
 	if j == nil {
 		jctx, cancel := context.WithTimeout(context.Background(), th.jobMax)
@@ -363,8 +371,10 @@ func (th *thumbs) frame(ctx context.Context, k thumbKey, background bool, wait t
 	if timedOut {
 		j.keep = true
 	}
-	if j.waiters == 0 && !j.keep && !j.finished {
-		j.cancel()
+	if j.waiters == 0 && !j.keep && !j.finished && ctx.Err() != nil {
+		if d := k.t - th.newest[file]; d > 2*tsThumbGrid || d < -2*tsThumbGrid {
+			j.cancel()
+		}
 	}
 	th.mu.Unlock()
 	return img, err

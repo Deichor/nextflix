@@ -747,6 +747,10 @@ func (s *Service) rewarm(w *tsWarm, res *tsResolveResult) {
 	if warm || res.Magnet == "" {
 		return
 	}
+	if s.debridOwns(res) {
+		s.debridRewarm(w, res)
+		return
+	}
 	s.setSource(w, res.Hash)
 	go func() {
 		ctx, cancel := context.WithTimeout(w.ctx, 40*time.Second)
@@ -826,6 +830,10 @@ func (s *Service) pingTorrent(hash string) {
 // persistTorrent saves a chosen source in TorrServer's DB, so after a drop (or a TorrServer
 // restart) it opens without the metadata exchange.
 func (s *Service) persistTorrent(res tsResolveResult) {
+	if s.debridOwns(&res) {
+		return // TorBox plays it, TorrServer never loads it
+	}
+	s.debridAddUncached(res)
 	if !tsHashPattern.MatchString(res.Hash) || !strings.HasPrefix(res.Magnet, "magnet:?") || s.dropFn != nil {
 		return
 	}
@@ -898,6 +906,10 @@ func (h handler) release(c *gin.Context) {
 		}
 	}
 	if len(hashes) > 0 {
+		// why=<reason>: the player left these torrents after a switch to them failed
+		if why := tsPlayerReason(c.Query("why")); why != "" {
+			log.Printf("player: dropping %s: %s", tsShortHash(hashes[0]), why)
+		}
 		h.s.releaseHashes(hashes)
 		out["hashes"] = len(hashes)
 	}

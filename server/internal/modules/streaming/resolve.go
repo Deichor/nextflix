@@ -55,6 +55,9 @@ type tsResolveResult struct {
 	Cached           bool `json:"cached,omitempty"`
 	// Format of the file: from the release name, corrected by the probe once it read the header
 	Format *tsTags `json:"format,omitempty"`
+	// Debrid: the file plays from TorBox's cache (Source "torbox"), not the swarm (debrid.go)
+	Source string `json:"source,omitempty"`
+	Debrid bool   `json:"debrid,omitempty"`
 
 	durationChecked bool // a runtime was known, so DurationVerified means something
 	nameQ           int  // resolution the release name claims (Quality follows the probed file)
@@ -1038,6 +1041,8 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 			return nil, nil, errNoSource
 		}
 	}
+	// Releases TorBox has cached play from it (debrid_resolve.go)
+	cands, debridItems := s.debridCandidates(ctx, q, raw, cands)
 	pendingNote := ""
 	if sr.late != nil {
 		pendingNote = " (slower indexers still searching)"
@@ -1095,13 +1100,17 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	}
 	claim := tsClaims(cands)
 	live := newLive(len(cands))
+	gate := s.newDebridGate(cands, debridItems)
 	pick := tsPickBestKeep(ctx, warmCtx, len(cands), graceFor, keep, func(ctx context.Context, i int) (*tsResolveResult, error) {
 		window := tsWarmWindow
 		if cands[i].quality == topQ {
 			window = tsWarmWindowTop
 		}
-		return s.checkCandidate(ctx, cands[i], q, sr.base, window, func(h string) bool { return claim(h, i) },
-			func(r *tsResolveResult) { live.set(i, r) })
+		return gate.check(ctx, i, q, func(h string) bool { return claim(h, i) }, func(r *tsResolveResult) { live.set(i, r) },
+			func(ctx context.Context) (*tsResolveResult, error) {
+				return s.checkCandidate(ctx, cands[i], q, sr.base, window, func(h string) bool { return claim(h, i) },
+					func(r *tsResolveResult) { live.set(i, r) })
+			})
 	}, live)
 	phase.background.Store(true)
 	for j, err := range pick.errs {
@@ -1166,7 +1175,11 @@ func tsClaims(cands []tsCandidate) func(hash string, i int) bool {
 // tsRankCandidates scores, de-duplicates and sorts the results and keeps the top ones.
 // The torrents in q.avoid (failed to play, wrong length) go last.
 func tsRankCandidates(raw []JackettResult, q tsResolveQuery) []tsCandidate {
-	cands := tsRankAll(raw, q)
+	return tsTopCandidates(tsRankAll(raw, q), q)
+}
+
+// tsTopCandidates keeps the tsResolveMaxCheck best of ranked candidates.
+func tsTopCandidates(cands []tsCandidate, q tsResolveQuery) []tsCandidate {
 	if len(cands) > tsResolveMaxCheck {
 		// When only 4K releases made the cut, keep the best smaller one as a fallback check
 		top := cands[:tsResolveMaxCheck]

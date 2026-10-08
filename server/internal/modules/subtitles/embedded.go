@@ -200,6 +200,9 @@ func ExtractEmbeddedSub(ctx context.Context, torrServerURL, hash string, fileInd
 }
 
 func torrFileURL(torrServerURL, hash string, fileIndex int) string {
+	if u := debridFileURL(hash, fileIndex); u != "" {
+		return u
+	}
 	return fmt.Sprintf("%s/stream?link=%s&index=%d&play", strings.TrimRight(torrServerURL, "/"), strings.ToLower(hash), fileIndex)
 }
 

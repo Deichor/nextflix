@@ -88,6 +88,9 @@ func torrentFiles(ctx context.Context, torrServerURL, hash string) ([]torrFile, 
 	if !torrHashPattern.MatchString(hash) {
 		return nil, fmt.Errorf("invalid torrent hash %q", hash)
 	}
+	if files, ok := debridFiles(hash); ok {
+		return files, nil
+	}
 	statURL := strings.TrimRight(torrServerURL, "/") + "/stream?" + url.Values{"link": {strings.ToLower(hash)}, "stat": {""}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statURL, nil)
 	if err != nil {

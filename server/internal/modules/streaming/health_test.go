@@ -194,20 +194,26 @@ func TestMeasureHealth(t *testing.T) {
 }
 
 // Plan 9 from Outer Space: at the cap a BDRemux whose probe still ran (unknown length) won
-// over the YTS release of verified length on its better rate / need. The player then waited
-// ~11 s for that probe. A verified, alive source wins unless it delivers almost nothing.
+// over the YTS release of verified length on a better rate / need, and the player waited
+// ~11 s for that probe. A verified source that plays with some buffering (x0.5) wins; one
+// that delivers less gives way to a clearly faster one (His Girl Friday: a verified x0.13
+// lost to a YTS at x0.71 whose probe finished a second after the cap).
 func TestCapPrefersVerifiedAlive(t *testing.T) {
-	remux := measured("remux", "1080p", 2.0, 2.69) // x0.74
+	remux := measured("remux", "1080p", 2.4, 2.69) // x0.89
 	remux.durationChecked, remux.partial = true, true
 	remux.Health.partial, remux.Health.sampled = true, 5*time.Second
-	yts := measured("yts", "1080p", 0.1, 0.29) // x0.34
+	yts := measured("yts", "1080p", 0.16, 0.29) // x0.55
 	yts.durationChecked, yts.DurationVerified = true, true
 	if i := tsChoosePlayable([]*tsResolveResult{remux, yts}); i != 1 {
 		t.Fatalf("got %d, want the verified YTS", i)
 	}
-	// ... but not when it delivers almost nothing and the other one does
-	yts.Health = measured("yts", "1080p", 0.01, 0.29).Health
+	yts.Health = measured("yts", "1080p", 0.04, 0.29).Health // x0.13
 	if i := tsChoosePlayable([]*tsResolveResult{remux, yts}); i != 0 {
-		t.Fatalf("got %d, want the remux over a verified x0.03", i)
+		t.Fatalf("got %d, want the clearly faster remux over a verified x0.13", i)
+	}
+	remux.Health = measured("remux", "1080p", 0.5, 2.69).Health // x0.19: not clearly faster
+	remux.Health.partial, remux.Health.sampled = true, 5*time.Second
+	if i := tsChoosePlayable([]*tsResolveResult{remux, yts}); i != 1 {
+		t.Fatalf("got %d, want the verified YTS", i)
 	}
 }

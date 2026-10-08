@@ -30,7 +30,12 @@ type tsTorrentStat struct {
 	FileStats []tsFileStat `json:"file_stats"`
 }
 
+// fileURL is where ffmpeg / ffprobe read a file: TorrServer, or for a debrid source the
+// TorBox proxy (debrid.go).
 func (s *Service) fileURL(hash string, index int) string {
+	if u, ok := s.debridURL(hash, index); ok {
+		return u
+	}
 	return fmt.Sprintf("%s/stream?link=%s&index=%d&play", s.torrServerURL(), hash, index)
 }
 

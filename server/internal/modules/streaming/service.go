@@ -21,6 +21,8 @@ type Config struct {
 	BitsearchURL string
 	// FlareSolverrURL is used when Bitsearch answers with a Cloudflare challenge
 	FlareSolverrURL string
+	// TorBoxURL is the TorBox API base ("" = https://api.torbox.app/v1/api; tests use a fake)
+	TorBoxURL string
 }
 
 type Service struct {
@@ -35,6 +37,7 @@ type Service struct {
 	imdbTitles   sync.Map // IMDb id -> tsIMDbTitle
 	seasonEps    sync.Map // TMDB tv id -> tsSeasonEpsEntry (episodes per season)
 	bitsearch    *bitsearch
+	debrid       *tsDebrid // TorBox (debrid.go)
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
@@ -105,6 +108,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		playIntent:    tsPlayIntent,
 		pauseSettle:   tsReleaseSettle,
 	}
+	s.debrid = newDebrid(s, cfg.TorBoxURL)
 	if cfg.BitsearchURL != "" {
 		s.bitsearch = newBitsearch(cfg.BitsearchURL, cfg.FlareSolverrURL)
 	}

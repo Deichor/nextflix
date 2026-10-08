@@ -1,0 +1,502 @@
+package streaming
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math/rand"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+
+	"nextflix/internal/platform/torbox"
+)
+
+const (
+	tbHash   = "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c"
+	tbKey    = "tb-s3cret-key"
+	tbVideo  = "Movie (2020)/Movie.2020.1080p.mkv"
+	tbSample = "Movie (2020)/Sample/sample.mkv"
+)
+
+// fakeTorBox is the TorBox API plus its CDN on one test server.
+type fakeTorBox struct {
+	srv     *httptest.Server
+	content []byte
+
+	mu        sync.Mutex
+	torrents  map[string]int64 // hash -> id in the account
+	failAPI   int              // non-zero: every API call answers this status
+	gen       int              // links of older generations are refused (403)
+	cutNext   bool             // the next CDN read is cut after 1 MB
+	malformed bool             // checkcached answers garbage
+
+	checks, creates, lists, dls, cdnReads atomic.Int32
+	onlyCached                            atomic.Bool
+}
+
+func newFakeTorBox(t *testing.T) *fakeTorBox {
+	f := &fakeTorBox{torrents: map[string]int64{}, content: make([]byte, 3<<20)}
+	rand.New(rand.NewSource(1)).Read(f.content)
+	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeTorBox) files() string {
+	// TorBox's ids need not follow the list order: the sample comes first here
+	return fmt.Sprintf(`[{"id":0,"name":%q,"short_name":"sample.mkv","size":1000},{"id":1,"name":%q,"short_name":"Movie.2020.1080p.mkv","size":%d}]`,
+		tbSample, tbVideo, len(f.content))
+}
+
+func (f *fakeTorBox) serve(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/cdn/") {
+		f.cdn(w, r)
+		return
+	}
+	f.mu.Lock()
+	fail := f.failAPI
+	f.mu.Unlock()
+	if fail != 0 {
+		w.WriteHeader(fail)
+		fmt.Fprint(w, `{"success":false,"error":"BAD_TOKEN","detail":"bad"}`)
+		return
+	}
+	auth := r.Header.Get("Authorization") == "Bearer "+tbKey || r.URL.Query().Get("token") == tbKey
+	if !auth || r.Header.Get("User-Agent") != torbox.UserAgent {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"success":false,"error":"NO_AUTH"}`)
+		return
+	}
+	switch r.URL.Path {
+	case "/user/me":
+		fmt.Fprint(w, `{"success":true,"data":{"plan":2,"premium_expires_at":"2026-11-01T00:00:00Z","email":"x@y"}}`)
+	case "/torrents/checkcached":
+		f.checks.Add(1)
+		f.mu.Lock()
+		bad := f.malformed
+		f.mu.Unlock()
+		if bad {
+			fmt.Fprint(w, `{"success":true,"data":"?"}`)
+			return
+		}
+		var items []string
+		for _, h := range strings.Split(r.URL.Query().Get("hash"), ",") {
+			if h == tbHash {
+				items = append(items, fmt.Sprintf(`{"name":"Movie (2020)","size":%d,"hash":%q,"files":[{"name":%q,"size":%d},{"name":%q,"size":1000}]}`,
+					len(f.content)+1000, h, tbVideo, len(f.content), tbSample))
+			}
+		}
+		fmt.Fprintf(w, `{"success":true,"data":[%s]}`, strings.Join(items, ","))
+	case "/torrents/mylist":
+		f.lists.Add(1)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if id := r.URL.Query().Get("id"); id != "" {
+			fmt.Fprintf(w, `{"success":true,"data":{"id":%s,"hash":%q,"download_state":"cached","download_present":true,"files":%s}}`, id, tbHash, f.files())
+			return
+		}
+		var list []string
+		for h, id := range f.torrents {
+			list = append(list, fmt.Sprintf(`{"id":%d,"hash":%q,"download_state":"cached","files":%s}`, id, strings.ToUpper(h), f.files()))
+		}
+		fmt.Fprintf(w, `{"success":true,"data":[%s]}`, strings.Join(list, ","))
+	case "/torrents/createtorrent":
+		f.creates.Add(1)
+		_ = r.ParseMultipartForm(1 << 20)
+		f.onlyCached.Store(r.FormValue("add_only_if_cached") == "true")
+		if !strings.Contains(r.FormValue("magnet"), tbHash) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.torrents[tbHash] = 77
+		f.mu.Unlock()
+		fmt.Fprint(w, `{"success":true,"data":{"torrent_id":77,"hash":"`+tbHash+`"}}`)
+	case "/torrents/requestdl":
+		f.dls.Add(1)
+		if r.URL.Query().Get("torrent_id") != "77" || r.URL.Query().Get("file_id") != "1" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"success":false,"detail":"wrong file %s"}`, r.URL.RawQuery)
+			return
+		}
+		f.mu.Lock()
+		gen := f.gen
+		f.mu.Unlock()
+		fmt.Fprintf(w, `{"success":true,"data":"%s/cdn/%d/file.mkv"}`, f.srv.URL, gen)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// cdn serves the content with single ranges; old link generations get 403.
+func (f *fakeTorBox) cdn(w http.ResponseWriter, r *http.Request) {
+	f.cdnReads.Add(1)
+	gen, _ := strconv.Atoi(strings.Split(strings.TrimPrefix(r.URL.Path, "/cdn/"), "/")[0])
+	f.mu.Lock()
+	expired := gen < f.gen
+	cut := f.cutNext
+	f.cutNext = false
+	f.mu.Unlock()
+	if expired || r.Header.Get("User-Agent") != torbox.UserAgent {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	size := int64(len(f.content))
+	start, end := int64(0), size-1
+	status := http.StatusOK
+	if rg := r.Header.Get("Range"); rg != "" {
+		spec := strings.TrimPrefix(rg, "bytes=")
+		a, b, _ := strings.Cut(spec, "-")
+		start, _ = strconv.ParseInt(a, 10, 64)
+		if b != "" {
+			end, _ = strconv.ParseInt(b, 10, 64)
+		}
+		end = min(end, size-1)
+		status = http.StatusPartialContent
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+	}
+	w.Header().Set("Content-Type", "video/x-matroska")
+	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	w.WriteHeader(status)
+	body := f.content[start : end+1]
+	if cut && len(body) > 1<<20 {
+		_, _ = w.Write(body[:1<<20])
+		w.(http.Flusher).Flush()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+		return
+	}
+	_, _ = w.Write(body)
+}
+
+func newDebridService(t *testing.T, f *fakeTorBox) *Service {
+	t.Helper()
+	s := NewService(memDB(t), Config{TorBoxURL: f.srv.URL, TorrServerURL: "http://127.0.0.1:1"})
+	key := tbKey
+	in := DebridSettingsInput{}
+	in.TorBox = &struct {
+		APIKey      optString `json:"api_key"`
+		Enabled     *bool     `json:"enabled"`
+		Prefer      *bool     `json:"prefer"`
+		AddUncached *bool     `json:"add_uncached"`
+	}{APIKey: optString{Value: key}}
+	if _, err := s.UpdateDebridSettings(in); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func registerVideo(t *testing.T, s *Service) {
+	t.Helper()
+	if it := s.debrid.item(context.Background(), tbHash); it == nil {
+		t.Fatal("not cached")
+	}
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 1, path: tbVideo, size: 3 << 20, title: "Movie (2020)"})
+}
+
+func TestDebridLinkAddsOnlyCachedAndReusesTorrent(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	l, err := s.debrid.link(context.Background(), tbHash, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.torrentID != 77 || l.fileID != 1 || f.creates.Load() != 1 || !f.onlyCached.Load() {
+		t.Fatalf("link %+v, creates %d, only cached %v", l, f.creates.Load(), f.onlyCached.Load())
+	}
+	if _, err := s.debrid.link(context.Background(), tbHash, 1, false); err != nil || f.dls.Load() != 1 {
+		t.Fatalf("second link: %v, requestdl %d", err, f.dls.Load())
+	}
+	// Another process: the torrent is found in the account, not added again
+	s2 := newDebridService(t, f)
+	registerVideo(t, s2)
+	if _, err := s2.debrid.link(context.Background(), tbHash, 1, false); err != nil || f.creates.Load() != 1 {
+		t.Fatalf("reuse: %v, creates %d", err, f.creates.Load())
+	}
+}
+
+func TestDebridProxyRefreshesAndResumes(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	u := s.fileURL(tbHash, 1)
+	if !strings.HasPrefix(u, "http://127.0.0.1:") || !strings.Contains(u, "/f/"+tbHash+"/1") {
+		t.Fatalf("fileURL %q", u)
+	}
+	// The link expires (403) and the next read is cut: the reader still gets one whole file
+	f.mu.Lock()
+	f.gen++
+	f.cutNext = true
+	f.mu.Unlock()
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || !bytes.Equal(got, f.content) {
+		t.Fatalf("status %d, %d of %d bytes, equal %v, err %v", resp.StatusCode, len(got), len(f.content), bytes.Equal(got, f.content), err)
+	}
+	if f.dls.Load() != 2 {
+		t.Fatalf("requestdl %d, want 2 (refresh after 403)", f.dls.Load())
+	}
+	// Ranges (ffmpeg seeks, the moviehash reads)
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Range", "bytes=100-199")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 206 || resp.Header.Get("Content-Range") != fmt.Sprintf("bytes 100-199/%d", len(f.content)) ||
+		!bytes.Equal(got, f.content[100:200]) {
+		t.Fatalf("range: %d %q %d bytes", resp.StatusCode, resp.Header.Get("Content-Range"), len(got))
+	}
+}
+
+func TestDebridFallsBackWhenTorBoxFails(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	f.mu.Lock()
+	f.failAPI = http.StatusForbidden // key revoked / plan expired
+	f.mu.Unlock()
+	u := s.fileURL(tbHash, 1)
+	if !strings.HasPrefix(u, "http://127.0.0.1:1/stream?link="+tbHash+"&index=1&play") {
+		t.Fatalf("fileURL %q, want TorrServer", u)
+	}
+	if s.debrid.usable() {
+		t.Fatal("TorBox not paused after an unauthorized answer")
+	}
+	// While paused nothing is asked
+	n := f.checks.Load()
+	if got := s.debrid.cachedItems(context.Background(), []string{strings.Repeat("a", 40)}); len(got) != 0 || f.checks.Load() != n {
+		t.Fatalf("paused check: %v, calls %d -> %d", got, n, f.checks.Load())
+	}
+}
+
+func TestDebridMalformedCheckIsNotCached(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	f.mu.Lock()
+	f.malformed = true
+	f.mu.Unlock()
+	if got := s.debrid.cachedItems(context.Background(), []string{tbHash}); len(got) != 0 {
+		t.Fatalf("malformed: %v", got)
+	}
+	f.mu.Lock()
+	f.malformed = false
+	f.mu.Unlock()
+	// Unknown, not "not cached": the next resolve asks again and finds it
+	if got := s.debrid.cachedItems(context.Background(), []string{tbHash}); got[tbHash] == nil || f.checks.Load() != 2 {
+		t.Fatalf("second check: %v, calls %d", got, f.checks.Load())
+	}
+	// Answers are kept: no third call
+	other := strings.Repeat("b", 40)
+	s.debrid.cachedItems(context.Background(), []string{tbHash})
+	s.debrid.cachedItems(context.Background(), []string{other})
+	s.debrid.cachedItems(context.Background(), []string{other, tbHash})
+	if f.checks.Load() != 3 {
+		t.Fatalf("calls %d, want 3", f.checks.Load())
+	}
+}
+
+func TestDebridBoostWithinResolution(t *testing.T) {
+	cand := func(name string, q int, score float64) tsCandidate {
+		return tsCandidate{raw: JackettResult{Title: name}, hash: name, quality: q, score: score}
+	}
+	cands := []tsCandidate{cand("A", 2160, 200), cand("B", 1080, 180), cand("C", 1080, 150), cand("D", 1080, 140), cand("E", 720, 100)}
+	cached := map[string]bool{"C": true, "D": true, "E": true}
+	tsDebridBoost(cands, func(c tsCandidate) bool { return cached[c.hash] })
+	tsSortCandidates(cands, tsResolveQuery{})
+	var order []string
+	for _, c := range cands {
+		order = append(order, fmt.Sprintf("%s%.0f", c.raw.Title, c.score))
+	}
+	if got := strings.Join(order, " "); got != "A200 C185 B180 D175 E105" {
+		t.Fatalf("order %s", got)
+	}
+}
+
+func TestDebridGateStopsLowerChecks(t *testing.T) {
+	cands := []tsCandidate{
+		{hash: tbHash, quality: 1080}, {hash: strings.Repeat("b", 40), quality: 1080}, {hash: strings.Repeat("c", 40), quality: 2160},
+	}
+	g := (&Service{}).newDebridGate(cands, map[string]*torbox.CachedItem{tbHash: {Hash: tbHash}})
+	if g.lead != 0 {
+		t.Fatalf("lead %d", g.lead)
+	}
+	g.finish(&tsResolveResult{Quality: "1080p"}, nil)
+	if err := g.wait(context.Background(), 1); !errors.Is(err, errDebridPicked) {
+		t.Fatalf("same resolution: %v", err)
+	}
+	if err := g.wait(context.Background(), 2); err != nil {
+		t.Fatalf("higher resolution: %v", err)
+	}
+	// A failed lead lets every check run
+	g = (&Service{}).newDebridGate(cands, map[string]*torbox.CachedItem{tbHash: {Hash: tbHash}})
+	g.finish(nil, errors.New("probe failed"))
+	if err := g.wait(context.Background(), 1); err != nil {
+		t.Fatalf("after a failed lead: %v", err)
+	}
+}
+
+func TestCheckDebridPlaysFromTorBox(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	s.probeFn = func(ctx context.Context, hash string, index int) (*tsProbe, error) {
+		// The probe reads the TorBox file through the proxy
+		if u := s.fileURL(hash, index); !strings.Contains(u, "/f/"+tbHash+"/1") {
+			return nil, fmt.Errorf("probe url %s", u)
+		}
+		p := &tsProbe{Streams: []tsProbeStream{{CodecType: "video", CodecName: "h264", Width: 1920, Height: 1080}}}
+		p.Format.Duration = "5400"
+		return p, nil
+	}
+	it := s.debrid.item(context.Background(), tbHash)
+	q := tsResolveQuery{mediaType: "movie", title: "Movie", year: 2020, runtime: 90}
+	c := tsCandidate{raw: JackettResult{Title: "Movie 2020 1080p WEB-DL", Seeders: 3}, hash: tbHash, quality: 1080, score: 100}
+	res, err := s.checkDebrid(context.Background(), c, q, it, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Debrid || res.Source != "torbox" || res.Index != 1 || res.FileName != "Movie.2020.1080p.mkv" || !res.DurationVerified ||
+		res.Health == nil || res.Health.Rate <= 0 || !res.good() {
+		t.Fatalf("result %+v health %v", res, res.Health)
+	}
+	b, _ := json.Marshal(res)
+	if !strings.Contains(string(b), `"debrid":true`) || !strings.Contains(string(b), `"source":"torbox"`) {
+		t.Fatalf("json %s", b)
+	}
+	// TorrServer's stat of it is answered locally (pings, names never load it there)
+	var st tsTorrentStat
+	if err := s.torrentStat(context.Background(), tbHash, &st); err != nil || st.Name != c.raw.Title || len(st.FileStats) != 1 {
+		t.Fatalf("stat %+v %v", st, err)
+	}
+	// The cached source plays from TorBox after a restart too
+	key := "movie|movie|2020"
+	s.storeSource(key, *res)
+	s2 := NewService(s.db, Config{TorBoxURL: f.srv.URL, TorrServerURL: "http://127.0.0.1:1"})
+	if _, ok := s2.cachedSource(key); !ok {
+		t.Fatal("not cached")
+	}
+	if u := s2.fileURL(tbHash, 1); !strings.Contains(u, "/f/"+tbHash+"/1") {
+		t.Fatalf("after restart fileURL %q", u)
+	}
+}
+
+func TestDebridSettingsKeepTheKeySecret(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := NewService(memDB(t), Config{TorBoxURL: f.srv.URL})
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	Register(r.Group("/api"), s)
+	call := func(method, path, body string) (int, string) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if strings.Contains(w.Body.String(), tbKey) || strings.Contains(w.Body.String(), "wrong-key") {
+			t.Fatalf("%s %s leaks the key: %s", method, path, w.Body)
+		}
+		return w.Code, w.Body.String()
+	}
+	view := func(body string) DebridSettingsView {
+		var v DebridSettingsView
+		if err := json.Unmarshal([]byte(body), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	if code, body := call(http.MethodGet, "/api/settings/debrid", ""); code != 200 || view(body).TorBox.APIKeySet ||
+		!view(body).TorBox.Enabled || !view(body).TorBox.Prefer || view(body).TorBox.AddUncached {
+		t.Fatalf("defaults %d %s", code, body)
+	}
+	if code, _ := call(http.MethodPost, "/api/settings/debrid/test", ""); code != 400 {
+		t.Fatalf("test without key: %d", code)
+	}
+	code, body := call(http.MethodPut, "/api/settings/debrid", `{"torbox":{"api_key":" `+tbKey+` ","prefer":false}}`)
+	if v := view(body); code != 200 || !v.TorBox.APIKeySet || v.TorBox.Prefer {
+		t.Fatalf("put %d %s", code, body)
+	}
+	if code, body := call(http.MethodPut, "/api/settings/debrid", `{"torbox":{"api_key":"","enabled":false}}`); code != 200 ||
+		!view(body).TorBox.APIKeySet || view(body).TorBox.Enabled {
+		t.Fatalf("empty key keeps it: %d %s", code, body)
+	}
+	if code, body := call(http.MethodPost, "/api/settings/debrid/test", ""); code != 200 ||
+		!strings.Contains(body, `"plan_name":"Pro"`) || !strings.Contains(body, `"premium_expires_at":"2026-11-01T00:00:00Z"`) {
+		t.Fatalf("test %d %s", code, body)
+	}
+	if code, body := call(http.MethodPost, "/api/settings/debrid/test", `{"torbox":{"api_key":"wrong-key"}}`); code != 401 {
+		t.Fatalf("wrong key: %d %s", code, body)
+	}
+	if code, body := call(http.MethodPut, "/api/settings/debrid", `{"torbox":{"api_key":null}}`); code != 200 || view(body).TorBox.APIKeySet {
+		t.Fatalf("null clears: %d %s", code, body)
+	}
+	if code, _ := call(http.MethodPut, "/api/settings/debrid", `{"torbox":{"api_key":"has space"}}`); code != 400 {
+		t.Fatalf("invalid key: %d", code)
+	}
+}
+
+// A player re-adding a TorBox source (saved progress, a switch) gets its files without
+// TorrServer, which is unreachable here.
+func TestDebridFilesSkipTorrServer(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	Register(r.Group("/api"), s)
+	w := httptest.NewRecorder()
+	magnet := "magnet:?xt=urn:btih:" + strings.ToUpper(tbHash) + "&dn=Movie"
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/torrent-stream/files?magnet="+url.QueryEscape(magnet), nil))
+	var got struct {
+		Hash  string
+		Files []struct {
+			ID   int
+			Path string
+		}
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil {
+		t.Fatalf("files: %d %s", w.Code, w.Body)
+	}
+	if got.Hash != tbHash || len(got.Files) != 1 || got.Files[0].ID != 1 || got.Files[0].Path != tbVideo {
+		t.Fatalf("files: %+v", got)
+	}
+}
+
+// In a pack the index is the file's place in checkcached's list + 1, whatever TorBox's own
+// file ids are: another episode of a registered pack maps to its own file.
+func TestDebridPackIndexMapsToTheListPosition(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	src, ok := s.debrid.source(tbHash, 2)
+	if !ok || src.path != tbSample || src.size != 1000 {
+		t.Fatalf("index 2: %+v %v", src, ok)
+	}
+	// TorBox's ids run the other way round (sample 0, video 1)
+	files := []torbox.File{{ID: 0, Name: tbSample, Size: 1000}, {ID: 1, Name: tbVideo, Size: 3 << 20}}
+	if id, ok := tsDebridMatchFile(files, src, s.debrid.cachedNames(tbHash)); !ok || id != 0 {
+		t.Fatalf("index 2 -> TorBox file %d %v, want 0", id, ok)
+	}
+	video, _ := s.debrid.source(tbHash, 1)
+	if id, ok := tsDebridMatchFile(files, video, s.debrid.cachedNames(tbHash)); !ok || id != 1 {
+		t.Fatalf("index 1 -> TorBox file %d %v, want 1", id, ok)
+	}
+}

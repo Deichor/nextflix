@@ -103,6 +103,8 @@ type Sub struct {
 	Downloads int     `json:"downloads,omitempty"`
 	// An embedded track of a big file: read while it plays, so its file answers grow (live.go)
 	Live bool `json:"live,omitempty"`
+	// OpenSubtitles' download quota is used up: listed last, its file answers 429 until the reset
+	Quota bool `json:"quota,omitempty"`
 }
 
 // Query is a subtitle search for one movie or episode.

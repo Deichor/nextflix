@@ -43,7 +43,7 @@ func movieHashReader(r io.ReaderAt, size int64) (string, error) {
 
 // torrServerFileHash hashes a torrent file through two HTTP range reads on TorrServer.
 func torrServerFileHash(ctx context.Context, client *http.Client, torrServerURL, hash string, index int) (string, int64, error) {
-	u := fmt.Sprintf("%s/stream?link=%s&index=%d&play", strings.TrimRight(torrServerURL, "/"), hash, index)
+	u := torrFileURL(torrServerURL, hash, index) // TorrServer, or the debrid proxy
 	head, size, err := rangeRead(ctx, client, u, 0, hashChunk-1)
 	if err != nil {
 		return "", 0, err

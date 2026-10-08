@@ -21,4 +21,7 @@ func Register(api *gin.RouterGroup, s *Service) {
 	api.GET("/settings/indexer", h.getSettings)
 	api.PUT("/settings/indexer", h.updateSettings)
 	api.POST("/settings/indexer/test", h.testSettings)
+	api.GET("/settings/debrid", h.getDebridSettings)
+	api.PUT("/settings/debrid", h.updateDebridSettings)
+	api.POST("/settings/debrid/test", h.testDebridSettings)
 }
