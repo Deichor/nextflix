@@ -1,0 +1,356 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertCircle, ArrowLeft, CalendarClock, MessageSquare, Pause, Play, RotateCcw, RotateCw, SkipForward } from 'lucide-react';
+import Spinner from '../components/Spinner';
+import { img } from '../lib/http';
+import { useI18n } from '../lib/i18n';
+import { KEY, direction, isBack } from '../lib/webos';
+import { episodeLabel, type PlayRequest } from '../lib/stream';
+import { focusById, focusDefault, move, pushKeyHandler } from '../nav/spatial';
+import { PlayerEngine, type PlayerState } from './engine';
+import AudioSubtitlePanel from './AudioSubtitlePanel';
+import SubtitleOverlay from './SubtitleOverlay';
+
+const HIDE_MS = 4500;
+const COMMIT_MS = 800;
+
+function formatTime(s: number): string {
+  if (!isFinite(s) || s < 0) s = 0;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return `${h > 0 ? `${h}:` : ''}${h > 0 ? String(m).padStart(2, '0') : m}:${String(sec).padStart(2, '0')}`;
+}
+
+// Remote: OK play/pause, left/right seek 10 s (held: 30 s, then 60 s steps), up shows the buttons,
+// Back closes (or closes the Audio & Subtitles panel). Media keys work everywhere.
+export default function Player({ req, onClose }: { req: PlayRequest; onClose: () => void }) {
+  const i18n = useI18n();
+  const { t, locale } = i18n;
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const engineRef = useRef<PlayerEngine | null>(null);
+  const [s, setS] = useState<PlayerState | null>(null);
+  const [visible, setVisible] = useState(true);
+  const [zone, setZone] = useState<'timeline' | 'buttons'>('timeline');
+  const [panel, setPanel] = useState(false);
+  const [preview, setPreview] = useState<number | null>(null);
+  const previewRef = useRef<number | null>(null);
+  const repeatRef = useRef(0);
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const stateRef = useRef<PlayerState | null>(null);
+  stateRef.current = s;
+  const panelRef = useRef(panel);
+  panelRef.current = panel;
+  const zoneRef = useRef(zone);
+  zoneRef.current = zone;
+
+  useEffect(() => {
+    const engine = new PlayerEngine(videoRef.current!, req, locale);
+    engineRef.current = engine;
+    setS(engine.state);
+    const off = engine.subscribe(() => setS(engine.state));
+    return () => {
+      off();
+      engine.destroy();
+      engineRef.current = null;
+    };
+    // one engine per player
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const reveal = useCallback(() => {
+    setVisible(true);
+    clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => {
+      const st = stateRef.current;
+      if (panelRef.current || !st || !st.playing) return;
+      setVisible(false);
+      // Hidden controls: OK plays/pauses again
+      if (zoneRef.current === 'buttons') focusById('pl-timeline');
+    }, HIDE_MS);
+  }, []);
+
+  useEffect(() => { reveal(); return () => { clearTimeout(hideTimer.current); clearTimeout(commitTimer.current); }; }, [reveal]);
+  // Playback (re)started: the controls fade out after a while
+  useEffect(() => { if (s?.playing) reveal(); }, [s?.playing, reveal]);
+
+  const playable = !!s && s.phase === 'ready' && s.duration > 0 && !s.fatal;
+  const overlay = !s ? 'loading'
+    : s.phase === 'resolving' ? 'resolving'
+      : s.phase === 'error' ? 'error'
+        : s.phase === 'unreleased' ? 'unreleased'
+          : s.fatal ? 'fatal'
+            : s.countdown !== null ? 'countdown'
+              : '';
+
+  // Focus follows what is on screen: an overlay's buttons, else the timeline
+  useEffect(() => {
+    if (panel) return;
+    const raf = requestAnimationFrame(() => {
+      const root = rootRef.current;
+      if (!root) return;
+      if (overlay) focusDefault(root);
+      else if (zoneRef.current === 'timeline' || !root.contains(document.activeElement)) focusById('pl-timeline');
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [overlay, panel, playable]);
+
+  const commit = useCallback(() => {
+    clearTimeout(commitTimer.current);
+    const p = previewRef.current;
+    previewRef.current = null;
+    setPreview(null);
+    if (p !== null) engineRef.current?.seekTo(p);
+  }, []);
+
+  const scrub = useCallback((sign: 1 | -1, repeat: boolean) => {
+    const engine = engineRef.current;
+    const st = stateRef.current;
+    if (!engine || !st || st.duration <= 0) return;
+    repeatRef.current = repeat ? repeatRef.current + 1 : 0;
+    const n = repeatRef.current;
+    const step = n < 5 ? 10 : n < 15 ? 30 : 60;
+    const from = previewRef.current ?? engine.positionNow();
+    const next = Math.max(0, Math.min(st.duration - 1, from + sign * step));
+    previewRef.current = next;
+    setPreview(next);
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(commit, COMMIT_MS);
+  }, [commit]);
+
+  const closePanel = useCallback(() => {
+    setPanel(false);
+    requestAnimationFrame(() => focusById('pl-audio'));
+  }, []);
+
+  // All keys go to the player while it is open
+  useEffect(() => pushKeyHandler(e => {
+    const engine = engineRef.current;
+    const st = stateRef.current;
+    if (!engine || !st) return true;
+    const code = e.keyCode;
+    const canPlay = st.phase === 'ready' && st.duration > 0 && !st.fatal;
+    reveal();
+
+    if (code === KEY.STOP) { onClose(); return true; }
+    if (code === KEY.PLAY) { engine.play(); return true; }
+    if (code === KEY.PAUSE) { engine.pause(); return true; }
+    if (code === KEY.PLAY_PAUSE) { engine.togglePlay(); return true; }
+    if (code === KEY.FAST_FORWARD || code === KEY.REWIND) {
+      if (canPlay) scrub(code === KEY.FAST_FORWARD ? 1 : -1, e.repeat);
+      return true;
+    }
+    if (isBack(e)) {
+      if (panelRef.current) closePanel();
+      else onClose();
+      return true;
+    }
+    const dir = direction(e);
+    const onTimeline = !panelRef.current && canPlay && st.countdown === null && zoneRef.current === 'timeline';
+    if (onTimeline) {
+      if (dir === 'left' || dir === 'right') scrub(dir === 'right' ? 1 : -1, e.repeat);
+      else if (dir === 'up') move('up');
+      else if (code === KEY.ENTER) {
+        if (previewRef.current !== null) commit();
+        else engine.togglePlay();
+      }
+      return true;
+    }
+    if (dir) {
+      move(dir);
+      return true;
+    }
+    if (code === KEY.ENTER) {
+      const el = document.activeElement as HTMLElement | null;
+      if (el && el.hasAttribute('data-nav')) el.click();
+      return true;
+    }
+    return true;
+  }), [onClose, reveal, scrub, commit, closePanel]);
+
+  const engine = engineRef.current;
+  const subtitleTime = useCallback(() => engineRef.current?.subtitleTime() ?? 0, []);
+  if (!s) {
+    return (
+      <div className="player" ref={rootRef} data-nav-layer="player">
+        <video ref={videoRef} className="player-video" playsInline />
+      </div>
+    );
+  }
+
+  const m = s.meta;
+  const subtitle = m.media_type === 'tv' ? [episodeLabel(locale, m.season, m.episode), m.episode_title].filter(Boolean).join(' · ') : '';
+  const shown = preview ?? s.position;
+  const pct = s.duration > 0 ? Math.min(100, (shown / s.duration) * 100) : 0;
+  const controls = playable && (visible || !s.playing || panel || preview !== null);
+  const nextLabel = s.next ? episodeLabel(locale, s.next.season, s.next.episode) : '';
+  const errorText = (e: { key?: Parameters<typeof t>[0]; text?: string } | null) => (e ? (e.key ? t(e.key) : e.text || '') : '');
+  const releaseDate = s.unreleased
+    ? s.unreleased.status === 'in_theaters' ? s.unreleased.digital_date : s.unreleased.release_date || s.unreleased.digital_date
+    : null;
+
+  return (
+    <div className={`player ${controls ? 'show-controls' : ''}`} ref={rootRef} data-nav-layer="player" onMouseMove={reveal}>
+      <video ref={videoRef} className="player-video" playsInline onClick={() => engine?.togglePlay()} />
+
+      {playable && s.subId && s.cues.length > 0 && <SubtitleOverlay cues={s.cues} time={subtitleTime} raised={!!controls} />}
+
+      {(overlay === 'resolving' || overlay === 'loading' || overlay === 'error' || overlay === 'unreleased') && (
+        <div className="player-cover">
+          {!!m.backdrop_path && <img className="player-cover-img" src={img(m.backdrop_path, 'w1280')} alt="" />}
+          <div className="player-cover-shade" />
+          <div className="player-cover-body">
+            <h1 className="player-cover-title">{m.title}</h1>
+            {!!subtitle && <p className="player-cover-sub">{subtitle}</p>}
+            {overlay === 'resolving' && s.resolveElapsed >= 300 && (
+              <>
+                <Spinner />
+                <p className="player-status">{t(s.stage)}</p>
+                <p className="player-status-sub">{s.resolveElapsed >= 30000 ? t('player.stillSearching') : ''}</p>
+              </>
+            )}
+            {overlay === 'error' && (
+              <>
+                <AlertCircle className="player-alert" />
+                <p className="player-status">{t(m.media_type === 'tv' ? 'player.couldNotStartEpisode' : 'player.couldNotStartTitle')}</p>
+                <p className="player-status-sub">{errorText(s.error)}</p>
+                <div className="player-dialog-buttons">
+                  <button type="button" className="btn btn-primary" data-nav data-nav-default onClick={() => engine?.retry()}>{t('player.retry')}</button>
+                  <button type="button" className="btn btn-secondary" data-nav onClick={onClose}>{t('common.close')}</button>
+                </div>
+              </>
+            )}
+            {overlay === 'unreleased' && (
+              <>
+                <CalendarClock className="player-alert" />
+                <p className="player-status">{t(m.media_type === 'tv' ? 'availability.episodeNotReleased' : 'availability.titleNotReleased')}</p>
+                {!!releaseDate && <p className="player-status-sub">{t(s.unreleased?.status === 'in_theaters' ? 'availability.inTheatersUntil' : 'availability.comingOn', { date: i18n.date(releaseDate) })}</p>}
+                <div className="player-dialog-buttons">
+                  <button type="button" className="btn btn-primary" data-nav data-nav-default onClick={onClose}>{t('common.close')}</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {overlay === '' && s.phase === 'ready' && s.buffering && !s.ended && (
+        <div className="player-center">
+          <Spinner />
+          <p className="player-status">{t(s.reconnecting ? 'player.reconnecting' : s.duration > 0 ? 'player.buffering' : s.status)}</p>
+          {s.holding && !s.reconnecting && <p className="player-status-sub">{t('player.smoothBuffering')}</p>}
+        </div>
+      )}
+
+      {overlay === 'fatal' && (
+        <div className="player-center player-dialog">
+          <AlertCircle className="player-alert" />
+          <p className="player-status">{errorText(s.fatal)}</p>
+          <div className="player-dialog-buttons">
+            <button type="button" className="btn btn-primary" data-nav data-nav-default onClick={() => engine?.retry()}>{t('player.retry')}</button>
+            <button type="button" className="btn btn-secondary" data-nav onClick={onClose}>{t('common.close')}</button>
+          </div>
+        </div>
+      )}
+
+      {overlay === 'countdown' && (
+        <div className="player-center player-dialog">
+          <p className="player-kicker">{t('player.nextEpisode')}</p>
+          <p className="player-status">{t('player.nextStartsIn', { label: nextLabel, n: Math.max(0, s.countdown || 0) })}</p>
+          <div className="player-dialog-buttons">
+            <button type="button" className="btn btn-primary" data-nav data-nav-default onClick={() => engine?.playNext()}>
+              <Play className="btn-icon btn-icon-fill" /> {t('player.playNow')}
+            </button>
+            <button type="button" className="btn btn-secondary" data-nav onClick={() => engine?.stopCountdown()}>{t('common.cancel')}</button>
+          </div>
+        </div>
+      )}
+
+      {!!s.toast && <div className="player-toast">{t(s.toast)}</div>}
+
+      <div className={`player-top ${controls || overlay ? 'is-visible' : ''}`}>
+        <button type="button" className="player-back" data-nav data-nav-id="pl-close" onClick={onClose} aria-label={t('player.back')}>
+          <ArrowLeft className="player-back-icon" />
+        </button>
+        {!overlay && (
+          <div className="player-heading">
+            <div className="player-title">{m.title}</div>
+            {!!subtitle && <div className="player-subtitle">{subtitle}</div>}
+          </div>
+        )}
+        {!!s.quality && !overlay && (
+          <div className="player-badges">
+            <span className="badge">{s.quality.label}</span>
+            {s.quality.dv ? <span className="badge">Dolby Vision</span> : s.quality.hdr ? <span className="badge">HDR</span> : null}
+            {!!s.audioBadge && <span className="badge">{s.audioBadge}</span>}
+          </div>
+        )}
+      </div>
+
+      {playable && (
+        <div className={`player-bottom ${controls ? 'is-visible' : ''}`}>
+          <div className="player-buttons" data-nav-group="pl-buttons">
+            <button type="button" className="pbtn" data-nav data-nav-id="pl-playpause" data-nav-default onFocus={() => setZone('buttons')} onClick={() => engine?.togglePlay()}>
+              {s.playing ? <Pause className="pbtn-icon" /> : <Play className="pbtn-icon btn-icon-fill" />}
+              <span className="pbtn-label">{t(s.playing ? 'player.pause' : 'player.play')}</span>
+            </button>
+            <button type="button" className="pbtn" data-nav data-nav-id="pl-back10" onFocus={() => setZone('buttons')} onClick={() => engine?.seekTo(engine.positionNow() - 10)}>
+              <RotateCcw className="pbtn-icon" />
+              <span className="pbtn-label">{t('player.back10')}</span>
+            </button>
+            <button type="button" className="pbtn" data-nav data-nav-id="pl-fwd10" onFocus={() => setZone('buttons')} onClick={() => engine?.seekTo(engine.positionNow() + 10)}>
+              <RotateCw className="pbtn-icon" />
+              <span className="pbtn-label">{t('player.forward10')}</span>
+            </button>
+            {!!s.next && (
+              <button type="button" className="pbtn" data-nav data-nav-id="pl-next" onFocus={() => setZone('buttons')} onClick={() => engine?.playNext()}>
+                <SkipForward className="pbtn-icon" />
+                <span className="pbtn-label">{t('player.nextEpisode')} {nextLabel}</span>
+              </button>
+            )}
+            <button type="button" className="pbtn" data-nav data-nav-id="pl-audio" onFocus={() => setZone('buttons')} onClick={() => setPanel(true)}>
+              <MessageSquare className="pbtn-icon" />
+              <span className="pbtn-label">{t('player.audioSubtitles')}</span>
+            </button>
+          </div>
+          <div
+            className="timeline"
+            data-nav
+            data-nav-id="pl-timeline"
+            tabIndex={-1}
+            onFocus={() => setZone('timeline')}
+            onClick={e => {
+              const r = e.currentTarget.getBoundingClientRect();
+              engine?.seekTo(((e.clientX - r.left) / r.width) * s.duration);
+            }}
+          >
+            <div className="timeline-bar">
+              <div className="timeline-fill" style={{ width: `${pct}%` }} />
+              <div className="timeline-thumb" style={{ left: `${pct}%` }} />
+              {preview !== null && <div className="timeline-preview" style={{ left: `${pct}%` }}>{formatTime(preview)}</div>}
+            </div>
+            <div className="timeline-times">
+              <span>{formatTime(shown)}</span>
+              <span>-{formatTime(Math.max(0, s.duration - shown))}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {panel && playable && (
+        <AudioSubtitlePanel
+          audioTracks={s.audioTracks}
+          audio={s.audio}
+          onAudio={i => engine?.setAudio(i)}
+          originalLang={m.original_language}
+          subtitles={s.subs}
+          subtitleId={s.subId}
+          onSubtitle={id => engine?.setSubtitle(id)}
+          subAlt={s.subAlt}
+          onSubAlt={() => engine?.switchSubAlt()}
+        />
+      )}
+    </div>
+  );
+}

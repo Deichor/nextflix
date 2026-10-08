@@ -1,0 +1,148 @@
+# Nextflix for LG webOS TVs
+
+A packaged webOS web app (Vite + React + TypeScript) with a 10-foot Netflix-style UI for the Nextflix server.
+It talks to the same API as the web app (`docs/API.md`) and streams through the server's `/play` fragmented MP4.
+
+Targets webOS 6+ (Chromium 79+). The build is lowered to Chromium 53 (one classic IIFE script plus polyfills), so
+webOS 4.x and 5.x should work too, but they are untested.
+
+```
+tv/webos/
+  appinfo.json        webOS manifest (version comes from package.json at build time)
+  index.html          Vite entry
+  src/
+    main.tsx          polyfills, fonts, spatial navigation, React root
+    App.tsx           screens, Back key, player overlay, exit dialog
+    nav/              spatial.ts (D-pad focus engine), router.tsx (screen stack + focus restore)
+    lib/              api client, catalog, streaming, subtitles, i18n (en / tr), webOS helpers
+    screens/          Setup, Profiles, Add Profile, Home, Movies, TV Shows, Search, Detail, Settings
+    player/           engine.ts (resolve / probe / play / seek / upgrade), Player UI, panel, subtitle overlay
+    components/       rows, cards, hero, side menu, on-screen keyboard
+  scripts/            build.sh, check.sh, dev.sh, ares.sh, smoke.sh (+ smoke.mjs, finalize.mjs)
+  docker/             ares.Dockerfile (webOS CLI), smoke.Dockerfile (Playwright + Chrome)
+```
+
+Everything runs in containers. From PowerShell, call the scripts through WSL, for example
+`wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/nextflix/tv/webos/scripts/build.sh`.
+`node_modules` lives in the Docker volume `nextflix-tv-node-modules`, not on the Windows drive.
+
+## Build
+
+```
+scripts/check.sh      # type check only, prints TSC_EXIT=0
+scripts/build.sh      # type check + build -> dist/, then out/com.nextflix.tv_<version>_all.ipk
+```
+
+`build.sh` builds the image `nextflix-ares:3.2.6` (Node + `@webos-tools/cli`) on first use and packages `dist/`
+with `ares-package`. Bump `version` in `package.json` for a new release.
+
+## Desktop dev mode
+
+```
+scripts/dev.sh                # foreground; DETACH=1 scripts/dev.sh runs it in the background
+```
+
+Open http://127.0.0.1:5173 (bound to localhost only). Arrow keys move, Enter selects, Esc or Backspace is Back.
+`?server=http://192.168.1.221:8252` in the URL overrides the stored server address. `docker stop nextflix-tv-dev`
+stops a background server.
+
+`scripts/smoke.sh` drives the dev server in headless Google Chrome and writes screenshots to `out/screens/`.
+`PLAY=1 scripts/smoke.sh` also plays "Night of the Living Dead" (1968, public domain) and removes the progress it
+saved when the profile had none before. `SCRIPT=intro scripts/smoke.sh` checks the opening intro instead (frames
+in `out/screens/intro-*.png`, key skip, settings switch, sting level).
+
+## Install on the TV
+
+### 1. Developer Mode on the TV
+
+1. Create a free account at https://webostv.developer.lge.com.
+2. On the TV, install **Developer Mode** from the LG Content Store and sign in with that account.
+3. Turn **Dev Mode Status** on; the TV restarts.
+4. Open Developer Mode again and turn **Key Server** on. Note the TV's IP address and the **passphrase** shown there.
+
+Developer Mode expires after 50 hours; the app's "Extend" button (or a re-login) resets the timer. Apps installed
+in Dev Mode disappear when it expires.
+
+### 2. Register the TV (once)
+
+`scripts/ares.sh` runs any `ares-*` command in a container with host networking. The device list and the SSH key
+are kept in `tv/webos/.ares/` (gitignored), so this is done once.
+
+```
+scripts/ares.sh ares-setup-device -a tv -i "host=192.168.1.50" -i "port=9922" -i "username=prisoner"
+scripts/ares.sh ares-novacom --device tv --getkey      # asks for the passphrase from the TV
+scripts/ares.sh ares-device --device tv --system-info  # checks the connection
+```
+
+Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-device -l` lists devices and
+`ares-setup-device -r tv` removes one.
+
+### 3. Install and start
+
+```
+scripts/build.sh
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.4_all.ipk
+scripts/ares.sh ares-launch --device tv com.nextflix.tv
+```
+
+`ares-install --device tv --remove com.nextflix.tv` uninstalls it; `ares-inspect --device tv --app com.nextflix.tv`
+prints a DevTools URL for debugging.
+
+## Point the app at the server
+
+On first start the app tries `http://nextflix.local:8252`, `http://192.168.1.221:8252` and `http://127.0.0.1:8252`
+and preselects the first that answers (not every TV resolves `.local` names); you can still edit the address. Type it with the on-screen
+keyboard (or the remote's number keys) and choose **Save and continue**; **Test connection** only checks it. A bare
+address gets `http://` and port `8252` added. It is stored on the TV (localStorage) and can be changed later in
+Settings or with **Change server** on the profile screen.
+
+The packaged app is loaded from `file://`, so its requests carry `Origin: null`. The server accepts that origin only
+from a webOS user agent (`Web0S`), so no configuration is needed; a desktop browser sending `Origin: null` (e.g. a
+sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach port 8252 (see the root docs).
+
+## Remote control
+
+| Where | Keys |
+|---|---|
+| Everywhere | arrows move, OK selects, Back goes back (on Home: side menu, then "Exit?") |
+| Rows | Left from the first card opens the side menu; focus comes back to the same card after Back |
+| Player | OK play / pause, Left / Right seek 10 s (held: 30 s, then 60 s steps, applied when released), Up shows the buttons (play, ±10 s, next episode, Audio & Subtitles), Back closes |
+| Media keys | Play, Pause, Play/Pause, Stop (closes), Rewind / Fast forward (seek) |
+| Magic Remote | pointing focuses, click selects, clicking the progress bar seeks |
+
+## Opening intro
+
+On a cold start the red N lands on black, crimson light ribbons fan out of it and it zooms through into the app
+(`components/Intro.tsx`, about 2.8 s, transform / opacity only; fewer layers on webOS 4/5). The N, its glow and the
+radial lights are drawn once on canvases, which the GPU only scales: as text and CSS gradients they were re-rastered
+at the zoom's largest scale and froze the TV's compositor for the whole animation. The intro holds its black first
+frame until the TV draws frames steadily (`whenOnScreen` in `lib/intro.ts`; `window.__nxBoot` logs the launch
+timeline). A two-hit sting is synthesized with Web Audio (`lib/intro.ts`, no audio files, peak about -12 dBFS).
+Profiles load behind it, any key or click skips it, and it does not replay when the app comes back from the
+background. Settings has **Opening animation** and **Opening sound** switches; `prefers-reduced-motion` skips the
+animation.
+
+## Playback
+
+- Capabilities are detected once: HEVC and Dolby Vision via `MediaSource.isTypeSupported` / `canPlayType`, HDR10,
+  Dolby Vision and Atmos via the TV's config (Luna `com.webos.service.config/getConfigs`, the keys webOSTV.js reads),
+  audio codecs (`aac, opus, mp3, ac3, eac3, truehd, dts`; not FLAC, whose silent frames stall the TV's MSE) via MSE.
+  They are sent as `hevc=1`, `hdr=1`, `dv=1`, `atmos=1` and `acodecs=` on every streaming call of a title (resolve,
+  prefetch, release, sidegrade, upgrade, probe, seekpoint, play), so video and audio are copied instead of converted.
+  Settings shows what was detected and can force HDR on or off.
+- The `/play` stream reaches the `<video>` through Media Source Extensions (`player/mseStream.ts`): webOS reads the
+  metadata of a live fragmented MP4 given as `src` but decodes no frame of it (sound only, black picture). The
+  codecs come from the init segment (`player/mp4Codecs.ts`: avc1 / hvc1 / hev1 / dvh1, mp4a / opus / flac / ac-3 /
+  ec-3); a type the TV refuses falls back to `src`. Every seek or switch is a new request into a new MediaSource.
+  The download pauses with 2 min buffered (below 1.5 min it resumes) and data a minute behind the position is
+  removed, so the TV's buffer quota is not reached (a quota error lowers the target and retries).
+- Like the web player: saved torrents are reused, the probe's duration check finds a complete version, stalls restart
+  the stream, a starving source is swapped for a faster one (sidegrade) or a lower resolution, and below 4K the
+  player asks `upgrade` every 15 s for 5 minutes and switches at the current position. A draining buffer
+  (`player/bufferHealth.ts`, shared logic with the web) asks `sidegrade` early; with a single `<video>` the offer is
+  held and used (restart at the same position) once the buffer is nearly empty or playback stalls.
+- Subtitles are fetched as WebVTT and drawn over the video at `stream offset + video time`. Without a subtitle in the
+  profile's language the list is fetched again after 8 s and 20 s (slower providers finish later).
+- Progress is saved every 10 s, on pause, when the player closes and when the TV's Home button hides the app.
+  Closing releases the title and every torrent the player used. The next episode is warmed near the end and starts
+  after a 5 s countdown (turn off in Settings).

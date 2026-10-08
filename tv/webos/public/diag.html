@@ -1,0 +1,34 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Nextflix TV check</title>
+<style>body{background:#141414;color:#fff;font:28px sans-serif;padding:40px}img{height:220px;margin:10px;border:2px solid #555}.ok{color:#46d369}.bad{color:#e50914}</style>
+</head><body>
+<h1>Nextflix TV check</h1>
+<div id="out"></div>
+<div id="imgs"></div>
+<script>
+var out = document.getElementById('out');
+function line(t, ok) { var p = document.createElement('div'); p.textContent = t; if (ok !== undefined) p.className = ok ? 'ok' : 'bad'; out.appendChild(p); }
+var base = location.protocol + '//' + location.hostname + ':8252';
+var chrome = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
+line('User agent: ' + navigator.userAgent);
+line('Chrome version: ' + (chrome || '?'));
+line('IntersectionObserver: ' + (typeof IntersectionObserver !== 'undefined'), typeof IntersectionObserver !== 'undefined');
+line('fetch: ' + (typeof fetch !== 'undefined'), typeof fetch !== 'undefined');
+var urls = [
+  base + '/tmdb-img/t/p/w342/qJ2tW6WMUDux911r6m7haRef0WH.jpg',
+  base + '/tmdb-img/t/p/w780/62ySrux6DMuV7eEXf48VFvjhGxZ.jpg',
+  'icon.png'
+];
+urls.forEach(function (u) {
+  var i = new Image(); var t0 = Date.now();
+  i.onload = function () { line('IMG ok ' + i.naturalWidth + 'x' + i.naturalHeight + ' in ' + (Date.now() - t0) + 'ms: ' + u, true); };
+  i.onerror = function () { line('IMG FAILED after ' + (Date.now() - t0) + 'ms: ' + u, false); };
+  i.src = u; document.getElementById('imgs').appendChild(i);
+});
+if (typeof fetch !== 'undefined') {
+  fetch(urls[0]).then(function (r) { line('fetch image: HTTP ' + r.status + ' ' + r.headers.get('content-type'), r.ok); })
+    .catch(function (e) { line('fetch image error: ' + e, false); });
+  fetch(base + '/api/profiles').then(function (r) { line('API: HTTP ' + r.status, r.ok); })
+    .catch(function (e) { line('API error: ' + e, false); });
+}
+</script></body></html>
