@@ -1,0 +1,169 @@
+"use client";
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Play, X } from 'lucide-react';
+import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
+import { useActiveProfile } from '@/shared/lib/profile';
+import {
+  PlayRequest,
+  StreamProgress,
+  deleteProgress,
+  episodeLabel,
+  getProgressList,
+  progressPercent,
+  progressToRequest,
+} from '@/features/watch/api';
+
+interface ContinueWatchingRowProps {
+  /** Overrides the default "Continue Watching for <profile>" heading */
+  title?: string;
+  className?: string;
+}
+
+// Netflix-style "Continue Watching" row for the active profile.
+// Clicking a card resumes it directly in the torrent player.
+export default function ContinueWatchingRow({ title, className = '' }: ContinueWatchingRowProps) {
+  const profile = useActiveProfile();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [items, setItems] = useState<StreamProgress[]>([]);
+  const [request, setRequest] = useState<PlayRequest | null>(null);
+  const [canLeft, setCanLeft] = useState(false);
+  const [canRight, setCanRight] = useState(false);
+
+  const profileId = profile?.id ?? null;
+
+  const load = useCallback(async () => {
+    if (!profileId) { setItems([]); return; }
+    const list = await getProgressList(profileId);
+    setItems(list);
+  }, [profileId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const updateArrows = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setCanLeft(el.scrollLeft > 4);
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  }, []);
+
+  useEffect(() => {
+    updateArrows();
+    window.addEventListener('resize', updateArrows);
+    return () => window.removeEventListener('resize', updateArrows);
+  }, [items, updateArrows]);
+
+  const scrollBy = (dir: 1 | -1) => {
+    const el = scrollRef.current;
+    if (el) el.scrollBy({ left: dir * el.clientWidth * 0.85, behavior: 'smooth' });
+  };
+
+  const remove = async (p: StreamProgress) => {
+    if (!profileId) return;
+    setItems(prev => prev.filter(x => !(x.media_type === p.media_type && x.tmdb_id === p.tmdb_id)));
+    const ok = await deleteProgress(profileId, p.media_type, p.tmdb_id);
+    if (!ok) load();
+  };
+
+  const closePlayer = useCallback(() => {
+    setRequest(null);
+    // Give the final progress save a moment to land
+    setTimeout(load, 600);
+  }, [load]);
+
+  if (!profileId || items.length === 0) {
+    return request ? <TorrentStreamPlayer {...request} onClose={closePlayer} /> : null;
+  }
+
+  return (
+    <section className={`relative group/row ${className}`}>
+      <h2 className="text-white font-bold text-lg md:text-[1.3rem] mb-2 px-4 md:px-12">
+        {title || `Continue Watching for ${profile?.name ?? ''}`}
+      </h2>
+
+      <div className="relative">
+        {canLeft && (
+          <button
+            onClick={() => scrollBy(-1)}
+            className="absolute left-0 top-0 bottom-8 z-20 w-10 md:w-12 flex items-center justify-center bg-black/50 hover:bg-black/70 opacity-0 group-hover/row:opacity-100 transition-opacity"
+            aria-label="Scroll left"
+          >
+            <ChevronLeft className="w-8 h-8 text-white" />
+          </button>
+        )}
+        {canRight && (
+          <button
+            onClick={() => scrollBy(1)}
+            className="absolute right-0 top-0 bottom-8 z-20 w-10 md:w-12 flex items-center justify-center bg-black/50 hover:bg-black/70 opacity-0 group-hover/row:opacity-100 transition-opacity"
+            aria-label="Scroll right"
+          >
+            <ChevronRight className="w-8 h-8 text-white" />
+          </button>
+        )}
+
+        <div
+          ref={scrollRef}
+          onScroll={updateArrows}
+          className="flex gap-2 overflow-x-auto overflow-y-visible px-4 md:px-12 py-3 scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {items.map(p => {
+            const pct = progressPercent(p);
+            const ep = p.media_type === 'tv' ? episodeLabel(p.season, p.episode) : '';
+            const img = p.backdrop_path || p.poster_path;
+            return (
+              <div
+                key={`${p.media_type}-${p.tmdb_id}`}
+                className="group/card relative shrink-0 w-[220px] sm:w-[260px] md:w-[300px] transition-transform duration-300 hover:scale-[1.08] hover:z-10"
+              >
+                <button
+                  onClick={() => setRequest(progressToRequest(p))}
+                  className="block w-full text-left"
+                  title={`Resume ${p.title}${ep ? ` ${ep}` : ''}`}
+                >
+                  <div className="relative aspect-video rounded overflow-hidden bg-[#2f2f2f]">
+                    {img ? (
+                      <img
+                        src={`/tmdb-img/t/p/w780${img}`}
+                        alt={p.title}
+                        loading="lazy"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-[#b3b3b3] text-sm px-3 text-center">{p.title}</div>
+                    )}
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover/card:bg-black/40 transition-colors">
+                      <span className="w-12 h-12 rounded-full border-2 border-white bg-black/50 flex items-center justify-center opacity-0 group-hover/card:opacity-100 transition-opacity">
+                        <Play className="w-5 h-5 text-white fill-current translate-x-0.5" />
+                      </span>
+                    </div>
+                    <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[#5a5a5a]/80">
+                      <div className="h-full bg-[#E50914]" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                  <div className="pt-2 pr-6">
+                    <p className="text-white text-sm font-semibold truncate">{p.title}</p>
+                    {!!ep && (
+                      <p className="text-[#b3b3b3] text-xs truncate">
+                        {ep}{p.episode_title ? ` · ${p.episode_title}` : ''}
+                      </p>
+                    )}
+                  </div>
+                </button>
+                <button
+                  onClick={() => remove(p)}
+                  className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/70 border border-white/40 hover:border-white flex items-center justify-center opacity-0 group-hover/card:opacity-100 focus:opacity-100 transition-opacity"
+                  title="Remove from row"
+                  aria-label={`Remove ${p.title} from Continue Watching`}
+                >
+                  <X className="w-4 h-4 text-white" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {!!request && <TorrentStreamPlayer {...request} onClose={closePlayer} />}
+    </section>
+  );
+}

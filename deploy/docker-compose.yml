@@ -1,0 +1,96 @@
+# Nextflix stack. Run from the repo root:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# Copy deploy/config/*.env.example to *.env first.
+name: nextflix
+
+services:
+  server:
+    build:
+      context: ../server
+      dockerfile: ../deploy/server.Dockerfile
+    ports:
+      - "8252:8252"
+    env_file:
+      # Optional so "compose config" works before setup; copy server.env.example first
+      - path: ./config/server.env
+        required: false
+    environment:
+      - PORT=8252
+      - DATABASE_URL=/app/data/nextflix.db
+      - REDIS_URL=redis://redis:6379/0
+      - TORRSERVER_URL=http://torrserver:8090
+      - JACKETT_URL=http://jackett:9117
+    volumes:
+      # SQLite lives in a named volume (WAL/mmap is unreliable on /mnt/c bind mounts)
+      - db:/app/data
+    depends_on:
+      - redis
+      - jackett
+      - torrserver
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../web
+      dockerfile: ../deploy/web.Dockerfile
+      args:
+        # Baked in at build time: /api rewrites and server-side calls go to this address
+        BACKEND_INTERNAL_URL: http://server:8252
+    ports:
+      - "3008:3008"
+    env_file:
+      - path: ./config/web.env
+        required: false
+    environment:
+      - NODE_ENV=production
+      - PORT=3008
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - AUTO_UPDATE=true
+    volumes:
+      - ${JACKETT_CONFIG_DIR:-./data/jackett}:/config
+    ports:
+      - "127.0.0.1:9117:9117"
+    restart: unless-stopped
+
+  # Solves Cloudflare challenges for Jackett indexers like 1337x (internal only).
+  # Keep the service name: Jackett's config points to http://flaresolverr:8191.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
+    environment:
+      - LOG_LEVEL=info
+      - TZ=UTC
+    restart: unless-stopped
+
+  # Streams torrents over HTTP while they download (used by the "Watch" button)
+  torrserver:
+    image: ghcr.io/yourok/torrserver:MatriX.145.1
+    environment:
+      - TS_PORT=8090
+      - TS_CONF_PATH=/opt/ts/config
+      - TS_TORR_DIR=/opt/ts/torrents
+    volumes:
+      - torrserver-data:/opt/ts
+    ports:
+      - "127.0.0.1:8090:8090"
+    restart: unless-stopped
+
+volumes:
+  db:
+  redis-data:
+  torrserver-data:

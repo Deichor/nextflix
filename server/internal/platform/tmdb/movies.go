@@ -1,0 +1,62 @@
+package tmdb
+
+import (
+	"fmt"
+	"net/url"
+)
+
+func (c *Client) GetMovieDetails(movieID int) (*MovieDetails, error) {
+	return Cached(c, fmt.Sprintf("movie_details_%d", movieID), func() (*MovieDetails, error) {
+		var d MovieDetails
+		if err := c.Get(fmt.Sprintf("/movie/%d", movieID), url.Values{"append_to_response": {"credits"}}, &d); err != nil {
+			return nil, err
+		}
+		return &d, nil
+	})
+}
+
+// GetMovieDetailsWithExtras returns movie details with credits and videos.
+func (c *Client) GetMovieDetailsWithExtras(movieID int) (*MovieDetailsWithExtras, error) {
+	return Cached(c, fmt.Sprintf("movie_details_extras_%d", movieID), func() (*MovieDetailsWithExtras, error) {
+		var d MovieDetailsWithExtras
+		if err := c.Get(fmt.Sprintf("/movie/%d", movieID), url.Values{"append_to_response": {"credits,videos"}}, &d); err != nil {
+			return nil, err
+		}
+		return &d, nil
+	})
+}
+
+// GetMovieImages returns posters, backdrops and logos for a movie.
+func (c *Client) GetMovieImages(movieID int) (*Images, error) {
+	return Cached(c, fmt.Sprintf("movie_images_%d", movieID), func() (*Images, error) {
+		var images Images
+		if err := c.Get(fmt.Sprintf("/movie/%d/images", movieID), nil, &images); err != nil {
+			return nil, err
+		}
+		return &images, nil
+	})
+}
+
+// GetMovieCertification returns the US certification (PG-13, R, ...), falling back to GB/AU/CA, or "".
+func (c *Client) GetMovieCertification(movieID int) string {
+	if !c.Enabled() || movieID <= 0 {
+		return ""
+	}
+	var rd releaseDatesResponse
+	if err := c.Get(fmt.Sprintf("/movie/%d/release_dates", movieID), nil, &rd); err != nil {
+		return ""
+	}
+	for _, country := range []string{"US", "GB", "AU", "CA"} {
+		for _, entry := range rd.Results {
+			if entry.ISO31661 != country {
+				continue
+			}
+			for _, d := range entry.ReleaseDates {
+				if d.Certification != "" {
+					return d.Certification
+				}
+			}
+		}
+	}
+	return ""
+}

@@ -1,0 +1,7 @@
+# Keep LF everywhere: scripts and Dockerfiles run in Linux containers
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff2 binary

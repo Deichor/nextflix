@@ -1,0 +1,99 @@
+"use client";
+
+import React, { useEffect, useState } from 'react';
+import { Info, Play } from 'lucide-react';
+import { useNavigate } from '@/shared/navigation/useNavigate';
+import { fetchLogo, imageUrl, matchPercent, NfTitle } from '@/features/catalog/titles';
+
+interface BillboardProps {
+  item: NfTitle | null;
+  loading?: boolean;
+  onPlay?: (item: NfTitle) => void;
+  /** Small label above the title, e.g. "SERIES" or "FILM" */
+  kicker?: string;
+}
+
+// Full-bleed billboard: backdrop, logo or big title, short overview, Play + More Info, vignette into #141414
+export default function Billboard({ item, loading, onPlay, kicker }: BillboardProps) {
+  const navigate = useNavigate();
+  const [logo, setLogo] = useState<string | null>(null);
+  const [logoFailed, setLogoFailed] = useState(false);
+
+  useEffect(() => {
+    setLogo(null);
+    setLogoFailed(false);
+    if (!item) return;
+    let cancelled = false;
+    fetchLogo(item.id, item.mediaType).then(l => { if (!cancelled) setLogo(l); });
+    return () => { cancelled = true; };
+  }, [item]);
+
+  const backdrop = item?.backdropPath ? imageUrl(item.backdropPath, 'w1280') : item?.backdrop;
+  const match = matchPercent(item?.rating);
+
+  return (
+    <section className="relative h-[70vw] max-h-[88vh] min-h-[440px] w-full overflow-hidden bg-[#141414] sm:h-[56.25vw]">
+      {loading && !item && <div className="absolute inset-0 animate-pulse bg-[#1f1f1f]" />}
+      {!!backdrop && (
+        <img
+          key={backdrop}
+          src={backdrop}
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover object-top"
+        />
+      )}
+      {/* Left and bottom vignettes, like the Netflix billboard */}
+      <div className="absolute inset-0 bg-gradient-to-r from-black/75 via-black/30 to-transparent" />
+      <div className="absolute inset-x-0 bottom-0 h-[30%] bg-gradient-to-b from-transparent to-[#141414]" />
+      <div className="absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/60 to-transparent" />
+
+      {!!item && (
+        <div className="absolute bottom-[18%] left-4 right-4 z-10 md:left-12 md:right-auto md:w-[42%]">
+          {!!kicker && (
+            <p className="mb-2 flex items-center gap-2 text-xs font-bold tracking-[0.3em] text-[#e5e5e5] md:text-sm">
+              <span className="text-xl font-black tracking-normal text-[#E50914] md:text-2xl">N</span>
+              {kicker}
+            </p>
+          )}
+          {logo && !logoFailed ? (
+            <img
+              src={logo}
+              alt={item.title}
+              onError={() => setLogoFailed(true)}
+              className="mb-4 max-h-28 w-auto max-w-[80%] object-contain object-left drop-shadow-[0_4px_20px_rgba(0,0,0,0.6)] md:mb-6 md:max-h-40"
+            />
+          ) : (
+            <h1 className="mb-3 text-3xl font-black leading-tight text-white drop-shadow-lg sm:text-5xl md:mb-5 lg:text-6xl">
+              {item.title}
+            </h1>
+          )}
+          <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+            {match !== null && <span className="text-[#46d369]">{match}% Match</span>}
+            {!!item.year && <span className="text-[#e5e5e5]">{item.year}</span>}
+          </div>
+          {!!item.overview && (
+            <p className="mb-5 hidden text-sm leading-snug text-white drop-shadow-md sm:line-clamp-3 md:text-lg md:leading-normal">
+              {item.overview}
+            </p>
+          )}
+          <div className="flex items-center gap-2 md:gap-3">
+            <button
+              onClick={() => (onPlay ? onPlay(item) : navigate.push(item.playHref || item.href))}
+              className="flex items-center gap-2 rounded bg-white px-5 py-2 text-sm font-bold text-black transition-colors hover:bg-white/75 md:px-8 md:py-2.5 md:text-lg"
+            >
+              <Play className="h-5 w-5 fill-current md:h-7 md:w-7" />
+              Play
+            </button>
+            <button
+              onClick={() => navigate.push(item.href)}
+              className="flex items-center gap-2 rounded bg-[rgba(109,109,110,0.7)] px-5 py-2 text-sm font-bold text-white transition-colors hover:bg-[rgba(109,109,110,0.4)] md:px-7 md:py-2.5 md:text-lg"
+            >
+              <Info className="h-5 w-5 md:h-7 md:w-7" />
+              More Info
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
