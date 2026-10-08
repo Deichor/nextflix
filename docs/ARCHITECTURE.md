@@ -6,7 +6,7 @@ in its own module on both sides; shared infrastructure lives in `platform/` (ser
 ```
 server/                     Go 1.24, gin, gorm + SQLite, go-redis v8   (module name: nextflix)
   cmd/nextflix/main.go      wiring only
-  internal/platform/        config, database, httpserver, cache, tmdb, upstream
+  internal/platform/        config, database, httpserver, cache, tmdb, upstream, torbox
   internal/modules/         profiles, progress, ratings, recommendations, top10, catalog, providers,
                             notifications, streaming, images
 web/                        Next.js 15 (App Router), React 19, TypeScript
@@ -30,6 +30,7 @@ docs/                       this folder
 | `cache` | go-redis v8 wrapper; a nil `*Cache` is valid and behaves as "no cache" |
 | `tmdb` | TMDB HTTP client (v4 token as Bearer, on `upstream`), types, 24 h in-memory cache shared by catalog, providers and notifications; expired entries are kept 7 days and served when TMDB fails (see [DPI resilience](#dpi-resilience)) |
 | `upstream` | Resilient HTTP client for TMDB API, image CDN and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |
+| `torbox` | TorBox debrid API client (`checkcached` in batches of 100, `createtorrent`, `mylist`, `requestdl`, `user/me`), Bearer key plus a `Nextflix/1.0` User-Agent (Cloudflare refuses default ones), HTTP/1.1 with short dial / TLS / header timeouts; the key never reaches an error message (see [Debrid](#debrid-torbox)) |
 
 ### Modules (`server/internal/modules/…`)
 
@@ -43,7 +44,7 @@ docs/                       this folder
 | `catalog` | TMDB lists, details, search, related titles, seasons | – |
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
-| `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings; see [Streaming](#streaming) | `torrent_configs`, `stream_sources` |
+| `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
 | `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 
@@ -256,6 +257,11 @@ connections from Docker (logs showed `connection reset by peer` on turkcealtyazi
 - a provider call that failed on the network (`ErrTransport`, a timeout, 5xx, a cut JSON answer, a FlareSolverr
   network error) is not cached: the next `/api/subtitles` call (the players ask again after 8 s and 20 s) tries
   again. Real "no results" stay cached 30 min, other failures (bad key, quota, title not found) 3 min.
+- OpenSubtitles download quota (free key without login: 5 a day): once a download answers 406 (or a 429 about the
+  quota, or `remaining: 0`) the service remembers it until `reset_time_utc` (1 h without it). Until then no download is
+  sent: `/api/subtitles/file` answers 429 `{quota: true, reset_at}` at once, and the list marks OpenSubtitles items
+  `quota: true` and moves them behind the other items of their language. Only the file endpoint downloads, once per
+  id (shared by concurrent requests, then served from the disk cache, also after `refresh=1` lists).
 
 Web:
 
@@ -367,7 +373,12 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    with its info hash, and for a name still cut off, a fuller name of the same size (within 2 %) that continues it
    word by word (`tsContinues`; hashes must not differ), so hashless cut-off copies ("... WEB-DL DD" with 1867
    seeders) are scored with their real tags and merge into their torrent. A check that finds a hash another check
-   already owns stops. Episode requests only accept the episode, ranges covering it, season packs of its season and
+   already owns stops. A movie name whose first word after the title is a year more than 1 off the title's year is
+   another film (remake, namesake: "Night.Of.The.Living.Dead.2026...", the 1990 remake for the 1968 film) and is
+   rejected; names without a year pass. Every path ranks through `tsScore` (resolve, TorBox boost, late results,
+   upgrade / sidegrade searches, spares, `subalt`), so the year must be right: with a `tmdb_id` it is TMDB's release
+   year (`englishTitle`, cached with the English title), whatever year the client sent (none on resumes and some
+   upgrade polls, a wrong one from tests). Episode requests only accept the episode, ranges covering it, season packs of its season and
    complete-series packs containing it; bonus material ("Greatest Moments", "Inside the Episode", "Making of",
    "Recap", "Sample", ...) is rejected. The episode info after the title (`tsParseEpisode`, after an optional year /
    country and the repeated title of "Çukur / Cukur (Season: 4 ...") must come first, else the title goes on (another
@@ -394,7 +405,8 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
      cached 24 h in memory; the client's `runtime` is the fallback). A probe still running after 12 s goes on (up to
      25 s more) once the warm-up shows peers or data, instead of being killed and started over; one that failed early is
      retried once on a warm swarm. There is one ffprobe per file at a time: later callers (the player's probe, play)
-     wait for the running one and only start their own when it fails. A verified file beats any file of unknown
+     wait for the running one and only start their own when it fails. Background work passes the quiet gate before
+     it registers its probe, so a player never joins a probe that is put off. A verified file beats any file of unknown
      duration. Without a runtime the header is
      still probed in the background, so the player's probe is a cache hit. The probe also gives the real resolution:
      the candidate's quality follows the video size (height ≥ 1600 or width ≥ 3200 → 2160p, ≥ 900 / ≥ 1800 → 1080p,
@@ -440,8 +452,10 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    source (`tsChoosePlayable`) among the finished checks and the snapshots of running ones (each check reports one as
    soon as its file is picked, then after every poll): alive (active peers or data, not dead) over a dead or silent
    swarm, fit for the client (not unfit), measured (a verdict, or ≥ 2 s
-   of samples) over unmeasured, a clearly better rate / need ratio (≥ 0.1 higher and ≥ 1.5×; a 4K below 0.3 never
-   beats a ≤ 1080p with a higher ratio), a verified duration, the lower need (bitrate) when the ratios are close,
+   of samples) over unmeasured (a 4K below 0.3 never beats a ≤ 1080p with a higher ratio), a verified duration over
+   an unknown one (a failed probe, or one still running that the player would wait for) unless the verified one
+   delivers < 0.5 of its need and the other clearly more, a clearly better rate / need ratio (≥ 0.1 higher and
+   ≥ 1.5×), the lower need (bitrate) when the ratios are close,
    then active peers, connected seeders and Jackett seeders. When nothing is measured yet at the cap (or only ones
    below 0.1 while other checks still lack a measurement) it waits up to 4 s more (`tsResolveCapExtra`) and answers as
    soon as a measured one delivers ≥ 0.1 of its need. Only when no candidate even has its metadata does the first one
@@ -468,6 +482,90 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
 The chosen source is saved in TorrServer's DB (`save_to_db`, category `nextflix`), so after a drop or a restart it opens
 from its stored metadata (≈ 20 ms instead of seconds of metadata exchange). Closed entries older than 7 days are
 removed at start and every 6 hours.
+
+### Debrid (TorBox)
+
+With a TorBox key (`/api/settings/debrid`, advanced settings), a release TorBox has cached plays from its CDN at line
+speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `platform/torbox`).
+
+- Resolve: after ranking (before any TorrServer check) the hashes of the best 40 candidates are asked in one
+  `checkcached` call (≤ 2.5 s; answers kept 30 min, cached and not cached alike). A failed, partial or malformed answer
+  leaves a hash unknown, never "not cached" (asked again next time). With "prefer TorBox" (default on) every cached
+  candidate is raised by the same amount within its resolution, so the best cached one ranks 5 above the best release
+  of that resolution and the cached ones keep their order; other resolutions are untouched (a cached 1080p does not
+  beat a 4K). Then the usual top 4 are checked.
+- A cached candidate is checked without TorrServer: its file is picked from TorBox's file list with the usual
+  movie / episode / pack logic (`tsPickFile`; the file's index is its place in that list + 1), the torrent is found in
+  the account (`mylist`) or added (`createtorrent` with `add_only_if_cached`; nothing is downloaded), `requestdl` gives
+  the HTTPS link, the duration probe reads it (the duration check still applies) and a short read from the middle of
+  the file (≤ 2 s, ≤ 32 MB) stands in for the swarm health. The answer carries `source: "torbox"` and `debrid: true`.
+  When TorBox cannot give a link the candidate is checked through its swarm instead.
+- The best ranked cached check goes first: checks ranked below it wait until it finished (≤ 5 s); once it is a good
+  pick the ones of its resolution or lower stop (`a TorBox source of this resolution was picked`), so no swarm competes
+  with it for the line. Higher resolutions still run and feed `upgrade`.
+- Playback: hash / index keep naming the file on every endpoint (`probe`, `play`, `seekpoint`, `thumb`, subtitles).
+  `fileURL` maps a debrid source to a loopback proxy (`http://127.0.0.1:<random>/f/<hash>/<index>`, not reachable from
+  the LAN) that reads the TorBox link with `Range`: the link is cached 2 h (TorBox opens it for 3 h) and requested
+  again on a 401 / 403 / 404 / 410; a reset, cut or stalled (20 s) upstream read is resumed at the next byte on a new
+  connection, so ffmpeg / ffprobe see one unbroken file and keep their own `-reconnect` flags. The subtitle module
+  reads through the same proxy (moviehash range reads, embedded and live tracks, subtitle files of the torrent from
+  TorBox's list), wired in `main.go`.
+- TorrServer never loads a debrid source: its stat (pings, release names) and `files` (a player re-adding a saved
+  or offered source) are answered from what is known, it is not
+  saved to TorrServer's DB, and a cached debrid source is re-warmed by fetching its link and header. After a restart
+  a cached source with `debrid: true` is registered again when it is read from `stream_sources`.
+- Fallback: TorBox unreachable, rate limited (429), unauthorized or with an expired plan pauses it (30 s, 1 min,
+  10 min) and everything takes the torrent path silently: resolve skips the cache check, and a debrid source plays
+  from TorrServer (the same file found there by path and size). Switching TorBox off does the same. Uncached releases
+  are never added, unless "add uncached to TorBox" (default off) sends the picked torrent source to TorBox afterwards
+  (≤ 20 an hour) so a later play is cached.
+- Players: the web player shows a small "⚡ TorBox" badge next to the quality badge for a debrid source.
+- Live check: `go test -tags live -run TestLiveTorBox -v ./internal/modules/streaming/` with `TORBOX_API_KEY` (and
+  ffmpeg) checks the account read-only with the public-domain Big Buck Bunny torrent.
+
+### Trick play thumbnails
+
+`GET /thumb` (`thumbs.go`) gives the frame a seek lands near, for the TV's scrub strip and the web seek bar:
+
+- One ffmpeg per frame: `-noaccurate_seek -ss <t>` on TorrServer's stream URL, one decoder thread, `-fps_mode
+  passthrough` (else the keyframe before `t`, whose time is negative after the seek, is dropped and ffmpeg decodes on
+  to the next one), one MJPEG frame scaled to the width (display aspect kept), HDR tone-mapped like the re-encoded
+  play stream. No `-skip_frame nokey`: H.264 counts only IDR frames as key, and on Night of the Living Dead (Matroska,
+  I-frame keyframes) that read 9-34 MB per frame instead of about 0.5 MB.
+- Times snap down to a 10 s grid (clients ask coarser steps as multiples); widths to 160 / 240 / 320 / 480 / 640.
+  Frames are cached on disk in `/app/data/thumbs/<hash>/<index>/<t>_<w>.jpg` (`THUMB_CACHE_DIR`), written through a
+  temp file, capped at 500 MB: the least recently used (mtime, refreshed at most hourly on a hit) go first, down to
+  90 %. A frame ffmpeg could not make is remembered for 1 minute (404).
+- Limits: concurrent requests for one frame share one job; one ffmpeg per torrent and 2 server-wide. A request waits
+  up to 6 s (then 504); a job whose request timed out finishes anyway (up to 15 s) so the retry is a hit. A job
+  whose viewers all aborted their requests is cancelled only when the viewer's latest request is more than 2 grid
+  cells away (the scrub moved on); one next to it finishes and is cached.
+- Never at the expense of a stream: a cached frame is always served; otherwise the pieces are only read for the
+  playing torrent while its stream flows (a seek's new stream that has not sent bytes yet, or a running player probe,
+  answers 204), or for any torrent while nothing else plays or starts (204 otherwise). A running frame counts as a
+  seekpoint for the stream guard, so its torrent is never dropped under it.
+- Prefetch (`POST /thumb/prefetch`): the TV asks every 20 s for the grid points from 30 s behind the position to 30 s
+  ahead within its buffer (pieces TorrServer already holds). They are made one at a time, only while the torrent's
+  stream flows and is older than 30 s, no other torrent starts and no viewer waits for a frame; the queue keeps 24,
+  each at most a minute old.
+
+Measured from a test container on `nextflix_default` (Night of the Living Dead 1968, 1080p H.264 Matroska, w=320/480):
+a disk hit 2-5 ms; a fresh frame whose pieces TorrServer holds 120-250 ms; during playback at a new position
+0.1-1.5 s (one 3 s); on an idle torrent 0.4-0.8 s (before the fix above 4-6 s); while a held key fires a request per
+step, the queued ones arrive after 0.6-1.6 s.
+
+Clients: the TV (`tv/webos/src/player/TrickPlay.tsx`, `thumbs.ts`) shows a strip while Left / Right scrub (target
+frame large with a white border, ±1 and ±2 scrub steps smaller and dimmer, widths following the video's aspect
+ratio, the target time below; placeholders with their time until a frame arrives). It loads two frames at a time,
+the target first, then the next one in the scrub direction; requests are not aborted (their frames are cached either
+way), 204 / 504 are asked again after `Retry-After`, and frames are kept as object URLs (150). Seeking never waits for
+them. The web player (`components/SeekThumbnail.tsx`) shows one frame above the seek bar on hover and drag:
+requests are snapped to the 10 s grid (moving inside a cell asks nothing), debounced 80 ms and never aborted (an
+aborted request made the server stop the frame, so nothing was ever cached and no frame showed); at most 3 are in
+flight and only the newest waiting one is kept, older ones still finish and fill the memory cache (120 frames).
+Until the hovered frame arrives the nearest loaded one (within 60 s) shows dimmed with a spinner; 204 / 504 are
+asked again after `Retry-After` while that cell is still hovered. While playing it asks `thumb/prefetch` every 20 s
+for the grid points 30 s around the playhead.
 
 ### Subtitle alternatives (`subalt.go`)
 
@@ -508,17 +606,21 @@ source is linked through the source cache when it starts.
   warm-up, late indexers, spare measurements) and drops its torrents after 2 s; with `delay=60` (detail page left
   without Play) it waits first and any new intent cancels it. With `hash=`: the torrents a closing player used.
 - Spares are dropped 60 s after the pick without playback, or 3 minutes into playback (counted from the spare's
-  arrival or the player's last `draining=1` poll when those are later). `GET /sidegrade` offers one that keeps up, or
-  one clearly faster than a starving source (≥ 1.5× its rate, ≥ 0.5× its need), measured within 45 s (else it
-  measures them in the background), at most one per title every 2 minutes, never one in `avoid=` (such spares are
-  dropped). For a starving source a spare of a lower resolution counts too when it keeps up (the playing resolution
-  or higher is preferred).
-- A draining player (`draining=1`, polled every 5-10 s while its buffer drains) makes the source count as starving
-  whatever resolve measured; `critical=1` (under 6 s of buffer) also allows a lower resolution that keeps up. When
-  no spare is left to measure, it starts a background search (`searchSidegrade`, at most every 3 minutes per title):
-  the title is resolved again capped at the playing resolution, without the playing torrent and the avoided ones; its
-  checks are background work (quiet gate). A pick that keeps up with a fitting length becomes a spare, which a later
-  poll offers.
+  arrival or the player's last `draining=1` poll when those are later). `GET /sidegrade` offers only a spare that
+  keeps up (`tsSidegradeWorthy`), measured within 45 s (else it measures them in the background), and, when the
+  playing source's last measurement kept up too, has ≥ 1.5× its rate / need (against an unmeasured, starving or dead
+  source keeping up is enough); at most one per title every 2 minutes, never one in `avoid=` (such spares are
+  dropped). A spare that does not keep up is never offered, whatever the player reports: a switch reloads or
+  restarts the player (the TV once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a
+  starving source a spare of a lower resolution counts too when it keeps up (the playing resolution or higher is
+  preferred).
+- A draining player (`draining=1`, polled every 5-10 s while its buffer drains) keeps the spares alive;
+  `critical=1` (under 6 s of buffer) also allows a lower resolution. When no spare is left to measure, it starts a
+  background search (`searchSidegrade`, at most every 3 minutes per title): the title is resolved again capped at the
+  playing resolution, without the playing torrent and the avoided ones; its checks are background work (quiet gate).
+  Only a pick that finished good (keeps up, fitting length) becomes a spare, never the search's cap answer ("best so
+  far"); a later poll offers it under the rules above. `upgrade` likewise offers only a finished, measured
+  higher resolution that keeps up with a fitting length.
 - TorrServer's `TorrentDisconnectTimeout` is 45 s: only the safety net for torrents Nextflix lost track of.
 
 Playback priority (`priority.go`): while a `play` stream runs (or ended less than 20 s ago: a seek, the next
@@ -541,7 +643,8 @@ it; and any other episode or capability variant of the same movie / show: same t
   again from the DB (a stat), its waiting work goes on and a deferred prefetch starts.
 
 The player (`web/src/features/watch/components/TorrentStreamPlayer.tsx`) polls `upgrade` every 15 s during the first
-5 minutes while a source below 2160p plays on an HEVC client. At most one upgrade per session, never after a step down.
+5 minutes while a source below 2160p plays on an HEVC client. At most one upgrade per session (a dropped preparation
+is tried once more after 60 s, see below), never after a step down.
 When playback stalls (two stalls within 60 s or one over 8 s) it first asks `sidegrade` for a faster source of the
 same quality (at most every 2 minutes; a source resolve measured as starving is checked 8 s after it is ready, then
 every 15 s during the first 3 minutes, before the first frame too when playback started at 0), else it re-resolves
@@ -584,22 +687,48 @@ less than 13 s buffered 2 s from `t0` count as ready, so it takes over at a fram
 runs dry; no toast, no overlay. A sidegrade still loading is dropped (its torrent released) once the visible stream
 was healthy again for 15 s. Torrents the player left for being slow (any sidegrade or step down away from them) and
 sidegrades whose preparation failed are never switched to again in the session (an offer of one is released). The
-TV app (`tv/webos/src/player/engine.ts`, one `<video>`) uses the same verdict but cannot switch without a restart: it
-holds the offer and switches (with the toast) as soon as the buffer is critical or playback stalls, and drops it
-after 15 s of healthy playback.
+TV app (`tv/webos/src/player/engine.ts`, one `<video>`) uses the same verdict, sized to its MSE byte budget (a 4K
+stream fits ~30 s in all, so the draining / critical levels shrink with it and a full buffer is healthy; a download
+the player paused on purpose never counts as draining). Only an offer measured clearly faster (rate / bitrate ≥ 1.3
+and above the playing source) is held; while the buffer drains it is spliced in without a restart (see TV splicing
+below); a restart onto it only follows a real stall (waiting with under 1 s buffered for 3 s, not the start hold).
+The offer is dropped after 15 s of healthy playback. Every restart logs `[restart] <reason>` to the console
+(`window.__nxPlayer` is the engine for DevTools).
+
+TV splicing (`tv/webos/src/player/mseStream.ts`): upgrades, sidegrades and audio track changes go into the playing
+MediaSource like a DASH quality switch. The new stream is requested about 10 s ahead (3 s for audio) inside what is
+buffered, at a `seekpoint` keyframe; it is held in memory until it covers 4 s (audio 2 s) past its start, then each
+SourceBuffer drops its data from that start on, switches codecs with `changeType` and takes the new stream with a
+`timestampOffset` (muxed: seek point − player offset; split: 0). Data that cannot be ready 1 s before the cut, a
+seek or a close drops the preparation and nothing changes. Measured on an LG TV (Chrome 120): H.264 → H.264 of
+another release plays across the cut with no waiting and no frozen frame (the old stream loses a few B-frames just
+before the cut; a stop there would jump to the cut). Another codec family (H.264 → HEVC) is refused: after
+`changeType` the TV never shows a frame of it (the clock stops at the cut and seeks on either side never finish), so
+such an upgrade waits for the next seek, which restarts anyway. A source of another length (> 3 s) is not spliced,
+and a switch with a restart never starts at 0 from a position past 30 s: a file that does not reach the position
+(a pack's wrong file) sends the player back to the source it came from.
+
+TV split mode: when the server's probe says `split` and the selected audio track is one the TV plays only on its
+own (E-AC-3 / AC-3, `split_direct`), the player requests `track=video` and `track=audio` (`docs/API.md` "Split
+streams") into two SourceBuffers (each with its own byte budget: ~79 MB video, ~18 MB audio measured), plays on the
+file's timeline (offset 0, no `seekpoint`) and keeps Atmos. A server without `split` gets the muxed request with
+converted audio, as before; a TV that refuses a split SourceBuffer falls back to muxed for the session.
 
 Switching sources (`web/src/features/watch/seamlessSwitch.ts`): the player has two `<video>` slots, the visible one
 and a hidden, muted one; every handler, the controls, the progress saver and the subtitle overlay follow the active
 slot. An upgrade or sidegrade offered while the current stream plays (or is paused) is prepared in the hidden slot,
 one preparation at a time:
 
-1. `files` (re-adds the torrent), then the same `probe` the player runs before playing. A failed probe,
-   `duration_mismatch`, or a length more than 3 s off the playing file ends it silently.
-2. The new stream is requested about 8 s ahead of the visible position, with the audio track of the current track's
-   language (same channel count first, else the usual default rules) and the same `hevc`/`acodecs` caps.
-   `seekpoint` gives its real start `t0` (the keyframe before the request; asked again further ahead while that is
-   too close). It is ready once `readyState` ≥ HAVE_FUTURE_DATA with 5 s buffered from `t0` (2 s once the browser
-   stopped fetching on its own).
+1. `files` (re-adds the torrent; not for a TorBox source, which never goes through TorrServer), then the same
+   `probe` the player runs before playing. A failed probe, `duration_mismatch`, or a length more than 3 s off the
+   playing file ends it silently.
+2. The new stream is requested about 8 s ahead of the visible position (20 s for a TorBox source: its `seekpoint`
+   takes ~4 s and its play stream ~4.5 s to the first bytes, since every ffmpeg seek is a new CDN request; with 8 s
+   the visible video always got there first), with the audio track of the current track's language (same channel
+   count first, else the usual default rules) and the same `hevc`/`acodecs` caps. `seekpoint` runs next to the play
+   request and gives its real start `t0` (the keyframe before the request; a keyframe too close to the visible
+   position starts it again further ahead, twice at most). It is ready once `readyState` ≥ HAVE_FUTURE_DATA with 5 s
+   buffered from `t0` (2 s once the browser stopped fetching on its own).
 3. When the visible video presents the frame at `t0` (within 50 ms, `requestVideoFrameCallback`; a 40 ms poll where it
    is missing) the hidden one starts playing, still muted and invisible, next to it. Only once its time advances (within
    3 s; else the preparation is dropped and the visible stream is never touched) the visible one is paused, the hidden one gets the current volume, fades in over 150 ms, and becomes the active stream (hash, file, duration, audio tracks, offset, quality badge). 250 ms later the
@@ -607,14 +736,26 @@ one preparation at a time:
    small "Now in 4K" note for 2 s while the controls are hidden. Subtitles are listed again for the new file.
 4. If the visible stream stalls while the hidden one already holds the current moment (1.5 s of it buffered, also
    before it counts as ready), it takes over at once (after a seek inside its buffer). If the visible video got past the hidden start, the hidden one seeks forward inside its
-   buffer, else it restarts further ahead (up to 3 times, the lead grows). A seek that leaves the hidden start ahead
+   buffer, else it restarts further ahead (up to 3 times; the lead grows by 8 s, 20 s for TorBox, and at least to
+   the time the last try ran plus 7 s). A seek that leaves the hidden start ahead
    keeps it; any other seek (or another audio track) restarts the preparation once the visible stream plays again
    (up to 4 times). Not ready within 60 s, an element error, or the end of the title near: the preparation is
-   dropped and its torrent released (an upgrade is not tried again this session).
+   dropped and its torrent released. The reason is logged in the console (`[nextflix] upgrade to <hash> dropped:
+   …`) and reaches the server log: a dropped upgrade is offered once more a minute later (that `upgrade` poll
+   carries `failed=<reason>`, logged as `the player could not switch to the upgrade: …`), any other dropped switch
+   releases its torrent with `why=<reason>` (`player: dropping <hash>: …`). After the second failure the upgrade
+   is not tried again this session.
 
 A stalled (or not yet started) player still switches the old way: PlayerCore remounts on the new source at the same
 position with the loading screen and a toast ("Switched to 4K", "Switched to a faster source"); a step down always
-does. Dev builds expose `window.__nfxDebugSwitch({ hash, index })`, which prepares a seamless switch to that file (for browser tests).
+does. PlayerCore is keyed by the resolved source (not the retry counter): keyed by the counter it mounted once with
+the previous source and the session's first start position, and the new source started there (Frieren: an upgrade
+offered while the visible stream was buffering went back to 0). Rewind guard (`rewindGuard.ts`): once the item
+played past 30 s, a start at 0 the viewer did not ask for (hard switch, retry, recovery, a new PlayerCore) resumes
+at the last position that played; the position the parent keeps is only written by a running stream, so a
+PlayerCore still opening its file never reports 0. Dev builds expose `window.__nfxDebugSwitch({ hash, index,
+debrid?, kind?, hard? })`, which switches like an offer would: seamless while the player plays, else (or with
+`hard`) the hard switch (for browser tests).
 
 The player has a single exit control, a Back arrow at the top left (shown with the other controls, which stay up while
 paused). It does what closing always did (saves progress, releases the title and its torrents, cancels the next
@@ -656,6 +797,14 @@ those retries and the audio is in another language:
 - Late uploads: every 10 minutes the list is asked again with `refresh=1` (the server skips its cached provider
   answers, at most every 5 min per title). New subtitles are added to the panel; when the profile language arrives
   and the viewer has not chosen a subtitle it is shown, with the toast "Türkçe altyazı bulundu".
+- A subtitle file that fails (web player; `subtitles.ts`, `nextSubtitleAfterFailure`): after a 429 (OpenSubtitles'
+  daily quota or another rate limit) the next subtitle of the same language from another provider is shown (SubDL,
+  Türkçe Altyazı, embedded, torrent; that provider is not tried again), after a 5xx another provider first, then the
+  same one. A quota failure shows the toast "OpenSubtitles günlük indirme hakkı doldu" / "OpenSubtitles daily
+  download limit reached" once. Failed files are remembered (a quota until its `reset_at`, others 5 minutes) and not
+  asked again on seeks; they and the items the server marks `quota: true` are greyed in the panel with the hint
+  "giriş yapınca hak artar" / "more after signing in", and the default pick, a remembered pick and late lists only
+  take them when nothing else of that language is left. Only the chosen file is ever downloaded.
 
 Embedded text tracks of big files are read live (`modules/subtitles/live.go`): extracting a track of an MKV / MP4
 means reading the whole file, so before, such tracks were only offered for small or mostly cached files. Now they are
