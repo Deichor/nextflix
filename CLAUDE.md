@@ -25,8 +25,12 @@ isolated from the host machine.
   effectively root on the host.
 - Never mount the home directory or a whole drive. Persistent data lives in named volumes (`db`, `redis-data`,
   `torrserver-data`) and `deploy/data/`.
-- Ports are for the LAN only, and only `web` (3008) and `server` (8252) are published on the LAN. Jackett (9117) and
+- Ports are for the LAN only, and only `web` (3008, and 80 for http://nextflix.local) and `server` (8252) are
+  published on the LAN; the `mdns` service announces nextflix.local (UDP 5353). Jackett (9117) and
   TorrServer (8090) bind to `127.0.0.1`; Redis and FlareSolverr are not published. None of them have auth.
+  The one exception is TorrServer's BitTorrent peer port 41413 (TCP+UDP), forwarded on the router for inbound
+  peers; it speaks only the BitTorrent protocol. Never forward any other port. (Not 51413: Windows reserves
+  51379-51478 for Hyper-V, and mirrored WSL shares the host ports.)
 - There is no login, so never add endpoints that run shell commands, expose the filesystem or manage the host
   (the old `/api/admin/*` remote-shell endpoints were removed on purpose and must not come back).
 - Secrets go in `deploy/config/*.env` (gitignored), never in code or docs.

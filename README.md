@@ -19,7 +19,6 @@ restructured into a small modular monolith: one Go server, one Next.js web app, 
 - **Continue Watching** – per-profile progress, per-episode progress bars, and "Play" jumps to the next episode
   once the current one is finished.
 - **My List** – per profile.
-- **Streaming providers** – browse what is on Netflix, Disney+, Prime Video and others (TMDB data).
 - **Notifications** – a feed of new and upcoming releases, backed by Redis.
 - **Settings** – Jackett indexer URL and API key with a connection test, profile management.
 
@@ -29,7 +28,7 @@ restructured into a small modular monolith: one Go server, one Next.js web app, 
 |---|---|---|
 | `server` | Go/gin API (`server/`), SQLite in the `db` volume, ffmpeg for remuxing | 8252 |
 | `web` | Next.js 15 app (`web/`), proxies `/api/*` to the server and `/tmdb-img/*` to TMDB | 3008 |
-| `redis` | Cache for providers and the notification feed | internal |
+| `redis` | Backs the notification feed | internal |
 | `jackett` | Torrent indexer aggregator | 127.0.0.1:9117 |
 | `flaresolverr` | Solves Cloudflare challenges for Jackett | internal |
 | `torrserver` | Streams torrents over HTTP while they download | 127.0.0.1:8090 |

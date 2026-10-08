@@ -19,10 +19,13 @@ services:
       - DATABASE_URL=/app/data/nextflix.db
       - REDIS_URL=redis://redis:6379/0
       - TORRSERVER_URL=http://torrserver:8090
+      - TV_APP_DIR=/app/tv
       - JACKETT_URL=http://jackett:9117
     volumes:
       # SQLite lives in a named volume (WAL/mmap is unreliable on /mnt/c bind mounts)
       - db:/app/data
+      # Built TV app, served at /tv/ for the TV's own browser (tv/webos/scripts/build.sh)
+      - ../tv/webos/dist:/app/tv:ro
     depends_on:
       - redis
       - jackett
@@ -38,6 +41,8 @@ services:
         BACKEND_INTERNAL_URL: http://server:8252
     ports:
       - "3008:3008"
+      # http://nextflix.local without a port number (LAN only, see the mdns service)
+      - "80:3008"
     env_file:
       - path: ./config/web.env
         required: false
@@ -46,6 +51,20 @@ services:
       - PORT=3008
     depends_on:
       - server
+    restart: unless-stopped
+
+  # The built TV app (tv/webos/scripts/build.sh), reached through web at http://tv.nextflix.local and /tv/
+  tvapp:
+    image: nginx:1.27-alpine
+    volumes:
+      - ../tv/webos/dist:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
+  # Announces nextflix.local on the LAN (mDNS); needs the host network to reach multicast
+  mdns:
+    build:
+      context: ./mdns
+    network_mode: host
     restart: unless-stopped
 
   redis:
@@ -88,6 +107,9 @@ services:
       - torrserver-data:/opt/ts
     ports:
       - "127.0.0.1:8090:8090"
+      # BitTorrent peer port only (forwarded on the router); the API above stays local
+      - "41413:41413/tcp"
+      - "41413:41413/udp"
     restart: unless-stopped
 
 volumes:

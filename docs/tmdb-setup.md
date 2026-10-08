@@ -29,10 +29,10 @@ curl -s "http://127.0.0.1:8252/api/tmdb/movie/popular" | head -c 300
 ## How the app uses TMDB
 
 - The server (`platform/tmdb`) calls `api.themoviedb.org` and keeps a 24-hour in-memory cache shared by the
-  catalog and notifications modules. Provider showcases are additionally cached in Redis.
-- Browsers never talk to TMDB. Images go through the web container's `/tmdb-img/*` proxy, for example
-  `/tmdb-img/t/p/w500/<file>.jpg` (`web/src/shared/lib/image.ts`). Common sizes: `w185`, `w342`, `w500`, `w780`,
-  `w1280`, `original`.
+  catalog, providers and notifications modules.
+- Browsers never talk to TMDB. Images go through `/tmdb-img/*` (web rewrite -> server disk cache -> TMDB), for
+  example `/tmdb-img/t/p/w500/<file>.jpg` (`web/src/shared/lib/image.ts`). Allowed sizes: `w92`, `w154`, `w185`,
+  `w300`, `w342`, `w500`, `w780`, `w1280`, `original`. See [Images](ARCHITECTURE.md#images).
 - If TMDB requests fail although the token is valid, the ISP may be hijacking DNS; see the DNS note in the README.
 
 The full TMDB API reference used during development is in [reference/tmdb_api_doc.md](reference/tmdb_api_doc.md).

@@ -28,3 +28,9 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# webOS TV app (tv/webos)
+/tv/webos/node_modules/
+/tv/webos/dist/
+/tv/webos/out/
+/tv/webos/.ares/

@@ -3,8 +3,23 @@
 Base URL: `http://<host>:8252/api` (the web app also proxies `/api/*` to the server). All responses are JSON
 except the video stream. Errors look like `{ "error": "message" }`.
 
-Per-profile endpoints read the active profile from the `X-User-ID` header (My List) or from the `profile_id`
-query/body field (progress).
+Per-profile endpoints (progress, ratings, favorites, recommendations) read the active profile from the
+`profile_id` query/body field and fall back to the `X-User-ID` header when it is missing.
+
+Content language: requests may send `X-Lang: tr|en` (the web sends the active profile's language on every
+`/api` fetch). Endpoints with TMDB data (catalog, recommendations, Top 10, notifications, providers) answer
+titles, overviews, taglines, genre and episode names in that language (`tr` -> TMDB `tr-TR`, anything else or a
+missing header -> `en-US`) and send `Vary: X-Lang`. Text TMDB has no Turkish translation for comes from en-US
+(see [ARCHITECTURE.md](ARCHITECTURE.md#localization)). CORS allows the header. Streaming always resolves with the
+English title of `tmdb_id`, whatever `title` the client sends.
+
+## Images (`modules/images`)
+
+Served on the server root, not under `/api`. The web app proxies `/tmdb-img/*` here.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET, HEAD | `/tmdb-img/t/p/:size/:file` | TMDB image from the disk cache (fetched from `image.tmdb.org` on a miss). `size`: `w92 w154 w185 w300 w342 w500 w780 w1280 original`; `file`: bare TMDB file name. `Cache-Control: public, max-age=31536000, immutable`, `ETag`, `X-Cache: HIT` or `MISS`. 404 for invalid paths or files TMDB does not have, 504 within about 4 s when TMDB is unreachable or too slow (remembered 30 s), 502 for a bad upstream answer |
 
 ## Health
 
@@ -21,7 +36,7 @@ Profile: `{ "id": 1, "name": "Home", "avatar": "smile", "color": "#E50914", "cre
 | GET | `/api/profiles` | 200 `[Profile]` ordered by id |
 | POST | `/api/profiles` | body `{name, avatar, color}` → 201 Profile; 400 if the name is empty or longer than 20 characters, or 5 profiles exist |
 | PUT | `/api/profiles/:id` | body with any of `{name, avatar, color}` → 200 Profile; 404 if missing |
-| DELETE | `/api/profiles/:id` | 204; also deletes the profile's progress and My List; 400 for the last profile |
+| DELETE | `/api/profiles/:id` | 204; also deletes the profile's progress, ratings and favorites; 400 for the last profile |
 
 If there are no profiles at startup, the server creates `{name: "Home", avatar: "smile", color: "#E50914"}`.
 
@@ -44,17 +59,99 @@ Progress:
 | GET | `/api/stream-progress/title?profile_id=&media_type=tv&tmdb_id=` | every entry of one title for the profile, finished ones included (per-episode progress bars) |
 | DELETE | `/api/stream-progress?profile_id=&media_type=&tmdb_id=` | 204; removes all episodes of that title |
 
-## My List (`modules/mylist`)
+## Ratings and Favorites (`modules/ratings`)
 
-Scoped by the `X-User-ID` header (400 `X-User-ID header is required` without it). `:id` is the list media id:
-`"9"` followed by the TMDB id.
+Replaces My List (the `/api/mylist*` endpoints are gone). Every profile can rate a title "Not for me"
+(`dislike`), "I like this" (`like`) or "Love this!" (`love`) and mark it as a Favorite, independently of each other.
+
+Rating:
+
+```json
+{ "profile_id": 1, "media_type": "movie", "tmdb_id": 27205, "title": "Inception",
+  "poster_path": "/abc.jpg", "backdrop_path": "/def.jpg", "rating": "love", "favorite": true,
+  "updated_at": "2026-10-08T11:00:00Z" }
+```
+
+`rating` is `"dislike"`, `"like"`, `"love"` or `null`. `media_type` is `movie` or `tv`. `profile_id` may be left
+out of a query or body when `X-User-ID` is sent. 400 `{error}` for a missing profile, bad `media_type`, `tmdb_id`
+or `rating`; 400 `Unknown profile` when the profile does not exist.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/mylist` | 200 `[{id, user_id, media_id, media_type, notes, priority, added_at}]` |
-| GET | `/api/mylist/check/:id` | 200 `{in_list}` |
-| POST | `/api/mylist/:id` | body `{media_type, notes?, priority?}` → 200 `{message}`; 500 `item already exists in my list` |
-| DELETE | `/api/mylist/:id` | 200 `{message}` |
+| GET | `/api/ratings?profile_id=N[&favorite=1][&rating=love]` | 200 `[Rating]`, newest change first (`updated_at`). `favorite=1` (or `true`) keeps favorites only, `rating=` one rating value |
+| GET | `/api/ratings/item?profile_id=N&media_type=movie&tmdb_id=27205` | 200 Rating, 404 `{error: "No rating found"}` when the title has neither a rating nor a favorite |
+| PUT | `/api/ratings` | body `{profile_id, media_type, tmdb_id, title, poster_path, backdrop_path, rating?, favorite?}` → 200 Rating. Partial update: only the fields that are present change; `"rating": null` (or `""`) clears the rating, leaving `rating` out keeps it; `favorite` left out keeps it. Empty `title`/`poster_path`/`backdrop_path` keep the stored values. A row left with no rating and `favorite: false` is deleted, and the response shows that cleared state (`rating: null, favorite: false`) |
+| GET | `/api/favorites?profile_id=N` | 200 `[Rating]` with `favorite: true`, the most recently favorited first (rating a favorite later does not move it) |
+
+Examples:
+
+```
+PUT /api/ratings {"profile_id":1,"media_type":"tv","tmdb_id":1396,"title":"Breaking Bad","poster_path":"/b.jpg","favorite":true}
+→ 200 {"profile_id":1,"media_type":"tv","tmdb_id":1396,"title":"Breaking Bad","poster_path":"/b.jpg","backdrop_path":"","rating":null,"favorite":true,"updated_at":"..."}
+PUT /api/ratings {"profile_id":1,"media_type":"tv","tmdb_id":1396,"rating":"love"}
+→ 200 {..., "rating":"love","favorite":true, ...}
+PUT /api/ratings {"profile_id":1,"media_type":"tv","tmdb_id":1396,"rating":null,"favorite":false}
+→ 200 {..., "rating":null,"favorite":false, ...}   (row deleted; GET /api/ratings/item now 404)
+```
+
+On startup the server copies the old My List (`my_list_items`, media id `"9"` + TMDB id) into Favorites once;
+see [ARCHITECTURE.md](ARCHITECTURE.md#ratings-and-favorites). Migrated rows may start with an empty `title` or
+`poster_path` until a background TMDB lookup fills them in.
+
+## Recommendations (`modules/recommendations`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/recommendations?profile_id=N` | 200 `{rows: [Row]}`; computed from the profile's ratings and favorites (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#recommendations)), cached 30 min per profile and `X-Lang` and recomputed after any rating/favorite change of that profile |
+
+Row: `{id, title, reason, items: [Item]}`. Item:
+
+```json
+{ "id": 1396, "media_type": "tv", "title": "Breaking Bad", "overview": "...", "poster_path": "/p.jpg",
+  "backdrop_path": "/b.jpg", "vote_average": 8.9, "first_air_date": "2008-01-20", "genre_ids": [18, 80] }
+```
+
+`id` is the TMDB id. Movies carry `release_date`, TV shows `first_air_date` (the other key is absent). `genre_ids`
+is always an array.
+
+| Row `id` | `title` | `reason` |
+|---|---|---|
+| `top-picks` | `Top Picks for You` (20 items) | `top_picks` |
+| `because-<media_type>-<tmdb_id>` | `Because you loved <Title>` | `because_loved` |
+| `because-<media_type>-<tmdb_id>` | `Because you liked <Title>` | `because_liked` |
+| `because-<media_type>-<tmdb_id>` | `Because you added <Title> to Favorites` (favorite without a rating) | `because_favorite` |
+| `trending` | `Trending Now` (20 items) | `popular` |
+
+With positive signals the response is `top-picks` followed by up to 3 `because-*` rows (8 to 20 items each).
+A profile without any `like`/`love`/favorite (or when TMDB returns nothing) gets the single `trending` row instead.
+`rows` is `[]` only when TMDB is unreachable.
+
+```json
+{ "rows": [
+  { "id": "top-picks", "title": "Top Picks for You", "reason": "top_picks", "items": [ { "id": 670292, "media_type": "movie", "title": "The Creator", "...": "..." } ] },
+  { "id": "because-movie-27205", "title": "Because you loved Inception", "reason": "because_loved", "items": [ "..." ] }
+] }
+```
+
+## Top 10 (`modules/top10`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/top10?region=TR\|global&type=movie\|tv` | 200 `{region, week, type, items: [Item]}`; `region` defaults to `global` (case-insensitive, answered as `TR` / `global`), `type` to `movie`. 400 for other values, 503 `{error: "Top 10 is not available yet"}` before the first successful download |
+
+Item: `{rank, tmdb_id, media_type, title, poster_path, backdrop_path, overview, vote_average, release_date | first_air_date}`
+(movies `release_date`, TV `first_air_date`). Up to 10 items in Netflix's rank order. `rank` is Netflix's rank, so a
+gap means that title could not be matched to TMDB; a show listed with two seasons appears once at its best rank
+(the TR TV list of 2026-10-04 has 9 items for that reason). `week` is the last day (Sunday) of Netflix's week. With
+`X-Lang: tr` the stored (English) list is answered with `title`, `overview`, `poster_path` and `backdrop_path` from
+the Turkish TMDB details (cached 24 h); ranks are unchanged and titles without a translation keep the stored text.
+
+```json
+{ "region": "TR", "week": "2026-10-04", "type": "movie", "items": [
+  { "rank": 1, "tmdb_id": 1492640, "media_type": "movie", "title": "UNABOMBER", "poster_path": "/....jpg",
+    "backdrop_path": "/....jpg", "overview": "...", "vote_average": 7.1, "release_date": "2026-09-25" },
+  { "rank": 2, "tmdb_id": 939243, "media_type": "movie", "title": "Sonic the Hedgehog 3", "...": "..." } ] }
+```
 
 ## Catalog (`modules/catalog`, TMDB)
 
@@ -78,27 +175,57 @@ Scoped by the `X-User-ID` header (400 `X-User-ID header is required` without it)
 | GET | `/api/tmdb/tv/:id/season/:season` |
 | GET | `/api/tmdb/:id/related` |
 
+All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search not at all). With `X-Lang: tr`,
+`/api/tmdb/movie/:id/images` lists only Turkish, English and language-less images (`include_image_language=tr,en,null`),
+and details videos include English trailers (`include_video_language=tr,en,null`).
+
+### Availability
+
+`GET /api/availability?media_type=movie|tv&tmdb_id=N[&season=S&episode=E]` → 200
+
+```json
+{ "status": "available" | "not_released" | "in_theaters" | "unknown",
+  "release_date": "YYYY-MM-DD" | null, "theatrical_date": "YYYY-MM-DD" | null, "digital_date": "YYYY-MM-DD" | null }
+```
+
+400 `{error}` for a bad `media_type`, `tmdb_id`, `season` or `episode`. TMDB failures answer `unknown` (never a
+block). Dates are compared with today's date in Europe/Istanbul.
+
+- TV episode (`season` + `episode`, from the season details, cached 6 h): the episode's `air_date` after today →
+  `not_released` with `release_date` = air date; on or before today → `available`. An episode without a date (or
+  missing from the season) is `not_released` (`release_date: null`) while the season's `air_date` is in the future,
+  else `unknown`. Only `season`: the season's `air_date`. Neither: the show's `first_air_date` (a show without one
+  whose TMDB status is Planned / In Production / Pilot is `not_released`).
+- Movie (TMDB `/movie/{id}/release_dates`, all regions, cached 6 h): `available` when any digital (4), physical (5)
+  or TV (6) date is on or before today. Else `in_theaters` when a theatrical date (2 limited, 3) is on or before
+  today: `digital_date` = `release_date` = the earliest announced future digital date (or null). Films in cinemas
+  for over 120 days without an announced digital date, and films released in cinemas over a year ago, count as
+  `available` (TMDB often lists no home release for them). Else `not_released` with `release_date` = the earliest
+  upcoming theatrical date, else the earliest upcoming home release (null after a festival premiere (1) alone; a
+  premiere older than 120 days without other dates is `available`). Without any release dates the movie's
+  `release_date` decides: in the future → `not_released`, else `unknown`. `theatrical_date` is the earliest
+  theatrical date, `digital_date` the earliest digital one.
+
+```
+GET /api/availability?media_type=tv&tmdb_id=320754&season=1&episode=1      (Money Trap, on 2026-10-08)
+→ 200 {"status":"not_released","release_date":"2026-10-16","theatrical_date":null,"digital_date":null}
+GET /api/availability?media_type=movie&tmdb_id=1368337                     (The Odyssey, on 2026-10-08)
+→ 200 {"status":"in_theaters","release_date":"2026-11-17","theatrical_date":"2026-07-15","digital_date":"2026-11-17"}
+GET /api/availability?media_type=movie&tmdb_id=27205                       (Inception)
+→ 200 {"status":"available","release_date":"2010-12-03","theatrical_date":"2010-07-15","digital_date":"2020-08-13"}
+```
+
 ## Providers (`modules/providers`, TMDB)
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/providers` | |
-| GET | `/api/providers/showcase` | cached in Redis (`providers:showcase`) |
-| GET | `/api/providers/:id` | |
-| GET | `/api/providers/:id/content` | |
-| GET | `/api/providers/:id/movies` | |
-| GET | `/api/providers/:id/tv` | |
-| GET | `/api/providers/:id/trending` | |
-| GET | `/api/providers/:id/popular` | |
-| GET | `/api/providers/:id/top-rated` | |
-| GET | `/api/providers/:id/new` | |
-| GET | `/api/content/:type/:id/providers` | providers of one title |
+| GET | `/api/providers/:id/tv` | TV shows on one streaming provider (TMDB discover, merged across US/IN/BD); `sort_by` (default `popularity.desc`), `page`. Used by the TV Shows page rows |
 
 ## Notifications (`modules/notifications`)
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/notifications` | `{ notifications: [], count: 0 }` when Redis is unavailable |
+| GET | `/api/notifications` | `{ notifications: [], count: 0 }` when Redis is unavailable. With `X-Lang: tr`, `tmdb_titles`, `media_details[].title/overview/genres` and the first title's `title`/`overview`/`genres` are Turkish (lookups slower than 3 s stay English for that answer) |
 | GET | `/api/notifications/count` | |
 | POST | `/api/notifications/:id/read` | |
 
@@ -107,12 +234,220 @@ Scoped by the `X-User-ID` header (400 `X-User-ID header is required` without it)
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/torrent-stream/resolve?type=movie&title=&year=` | auto-pick for the Watch button |
-| GET | `/api/torrent-stream/resolve?type=tv&title=&season=&episode=` | → 200 `{magnet, hash, index, file_name, torrent_title, quality, seeders, size}`, 404 `{error: "No playable source found"}`; can take up to ~60 s |
+| GET | `/api/torrent-stream/resolve?type=tv&title=&season=&episode=` | → 200 `{magnet, hash, index, file_name, torrent_title, quality, seeders, size, hdr?, health?, duration?, duration_verified, cached?, format?}`, 404 `{error: "No playable source found"}`; 425 `{error: "not_released", status: "not_released"\|"in_theaters", release_date, digital_date}` (dates `YYYY-MM-DD` or null) when `tmdb_id` names a title that is not out yet or only in cinemas (see [Availability](#availability)): nothing is searched. `unknown` availability, a lookup slower than 4 s, a cached source or a resolve already running never answer 425. Can take up to ~60 s. `health` = `{rate, peak?, need, active_peers, seeders, keeps_up, dead?}` (bytes/s; `rate` is the robust verdict, `peak` the best 3 s window for comparison). `quality` is the probed video size once the header was read (else the release name). `format` = `{audio?, channels?, atmos?, dv?, dv_only?, hdr10?, hdr10plus?, source?, truncated?, probed?, undecodable?, subs?}` (see [Playback capabilities](#playback-capabilities); `probed` once ffprobe corrected it; `subs`: ISO 639-1 languages of the text subtitles inside the file or next to it in the torrent, from the check). When nothing keeps up the answer comes about 12 s after the checks started (up to 16 s while nothing is measured yet) with the most playable source so far (`health.keeps_up: false`); every alternative keeps measuring for `sidegrade`. Optional: `tmdb_id`, `runtime` (minutes), `hevc=1`, `hdr=1`, `dv=1`, `atmos=1`, `acodecs=`, `maxq=1080\|720`,|720`, `refresh=1` (skip the cache, avoid the cached torrent), `avoid=<hash>,<hash>` (up to 5 torrents that must not be picked again, ranked last), `cached=1` (only answer from the cache, never search) |
+| POST | `/api/torrent-stream/prefetch?<same query as resolve>` | 202 `{status: started|ready|running|busy|failed_recently|early|not_released|deferred}`; the intent to watch: starts the resolve job in the background and holds the title warm (a cached source is re-added to TorrServer and its header read). While another title plays (playback priority, `docs/ARCHITECTURE.md`) a detail-page prefetch answers `deferred`: the title is held but nothing is searched or loaded until the last stream ends, then it starts by itself; a next-episode prefetch (`next_pos`) of the playing show is never deferred.|ready\|running\|busy\|failed_recently\|early\|not_released}`; the intent to watch: starts the resolve job in the background and holds the title warm (a cached source is re-added to TorrServer and its header read). Optional `next_pos=&next_dur=` (seconds of the current episode): a next-episode prefetch only runs once 10 min are left (85 % for episodes under 25 min), else `early`. A title that is not out yet (resolve would answer 425) gets `{status: "not_released", availability: "not_released"\|"in_theaters", release_date, digital_date}` and no job is started |
+| POST | `/api/torrent-stream/release?<resolve query>[&delay=<s>]` / `?hash=<h>,<h>` | 202 `{status: released\|scheduled, titles?, hashes?}`; drops a title's warmed torrents from TorrServer (every capability variant of that title / episode) and cancels its background work (resolve job unless a player waits for it, upgrade warm-up, late indexer results). `delay` (≤ 120 s) waits first; any prefetch, resolve or play of the title cancels it. `hash` (≤ 10) drops torrents a closing player used. Playing torrents and ones another title holds are never dropped: no torrent a player reads (a `play` stream, `probe` or `seekpoint`), or whose `play` stream ended less than 60 s ago, is dropped by any path (the drop is retried once it is free). A title release while a player reads one of the title's torrents (any capability variant) is checked again 5 s later and ignored if the player still reads it; a `hash` that a player reads is ignored. Made for `navigator.sendBeacon`; 400 without a title or hash |
+| GET | `/api/torrent-stream/sidegrade?<same query as resolve>&current=<hash>&current_q=[&draining=1][&critical=1][&avoid=<hash>,<hash>]` | 200 resolve result of a different torrent of at least `current_q` that keeps up now, or is clearly faster than a starving `current` (≥ 1.5× its rate and ≥ 0.5× its own bitrate), or, while `current` starves, one of a lower resolution that keeps up (the playing resolution or higher first) (a spare the resolve kept warm; measured within 45 s), 204 otherwise (then it measures the spares in the background). At most one per title every 2 minutes; spares exist only until 60 s after the pick without playback or 3 minutes into playback (or after their arrival / the last `draining=1` poll, whichever is later). `draining=1`: the player's buffer drains, so `current` counts as starving whatever resolve measured; when no spare is left to measure, the server searches for alternatives in the background (at most every 3 min per title, capped at the playing resolution, without `current` and `avoid`; its checks wait while a stream starts) and a pick that keeps up is offered on a later poll. `critical=1` (buffer under 6 s, implies `draining`): a lower resolution that keeps up is fine too. `avoid=` (≤ 5): torrents the player found slow, never offered (spares among them are dropped). 400 for an invalid `current` |
+| GET | `/api/torrent-stream/subalt?<same query as resolve>&current=<hash>[&current_q=][&lang=tr][&avoid=]` | 200 resolve result (with `format.subs`) of another release of the title whose subtitles include `lang` (default: the profile's, `X-Lang`): checked for the same client caps, kept up when measured (within 30 min), of a fitting length, of the playing resolution, a higher one or one step lower (not below 720p unless playing below; no 4K without `hevc=1`; `maxq` holds). 204 otherwise; then the server scans up to 3 untried candidates' headers in the background (one scan server-wide, at most every 10 min per title) and answers 204 with `Retry-After: 30` while it runs. The player calls it when the playing file has no subtitle in the profile's language; the cached source is not changed. 400 for an invalid `current` |
+| GET | `/api/torrent-stream/upgrade?<same query as resolve>&current=<hash>&current_q=<2160\|1080\|720\|480>` | 200 resolve result of a higher resolution than the playing `current` once its swarm keeps up (robust rate ≥ 1.3× its bitrate, duration verified; resolutions are the probed ones, and for the cached source the server's probed resolution wins over `current_q`); 204 otherwise (also for requests without `hevc=1`, with `maxq`, or `current_q=2160`). Without a running background warm-up it starts one upgrade search for the title (at most every 10 min); 400 for an invalid `current` |
 | GET | `/api/torrent-stream/files?magnet=` | `{hash, name, files: [{id, name, path, size}]}` |
-| GET | `/api/torrent-stream/probe?hash=&index=` | `{duration, video_codec, audio_tracks: [{index, language, title, codec, channels}]}` |
-| GET | `/api/torrent-stream/play?hash=&index=&t=<sec>&audio=<n>` | live fragmented MP4; seeking = new request with a new `t` |
-| GET | `/api/settings/indexer` | 200 `{id, jackett_url, jackett_api_key, min_seeders, preferred_quality, created_at, updated_at}` |
-| PUT | `/api/settings/indexer` | any of `{jackett_url, jackett_api_key, min_seeders, preferred_quality}` → 200 settings; 400 on invalid values |
+| GET | `/api/torrent-stream/probe?hash=&index=` | `{duration, video_codec, width, height, hdr, dolby_vision, direct, audio_tracks: [{index, language, title, codec, channels, default, direct}], expected_runtime?, duration_mismatch?}`; `direct` = sent untouched to this client (takes `hevc`, `acodecs` like play); `default` = the track's default disposition in the file. With `type` and `tmdb_id` (plus `season`, `episode`; or `runtime` minutes) it adds `expected_runtime` (minutes) and `duration_mismatch` (same rule as resolve) |
+| GET | `/api/torrent-stream/play?hash=&index=&t=<sec>&audio=<n>&acodecs=&hevc=1` | live fragmented MP4; seeking = new request with a new `t`. Audio tracks whose codec is in `acodecs` and fits MP4 (aac, opus, flac, mp3, ac3, eac3) are copied; others are re-encoded to Opus (when `acodecs` has `opus`) or AAC at 48 kHz, 5.1 for multichannel sources (7.1 → 5.1, 384 kbps), stereo 160 kbps (Opus) / 256 kbps (AAC). Without `acodecs` only AAC is copied |
+| GET | `/api/torrent-stream/seekpoint?hash=&index=&t=&audio=&acodecs=&hevc=1` | `{t, exact?}`: where a play stream requested at `t` really starts. Streams with copied video or audio start on the keyframe before `t` |
+| GET | `/api/settings/indexer` | 200 `{id, jackett_url, api_key_set, min_seeders, preferred_quality, bitsearch_enabled, created_at, updated_at}`; the API key is never returned |
+| PUT | `/api/settings/indexer` | any of `{jackett_url, jackett_api_key, min_seeders, preferred_quality, bitsearch_enabled}`; for `jackett_api_key` an empty string (or a missing field) keeps the stored key, `null` clears it → 200 like GET; 400 on invalid values |
 | POST | `/api/settings/indexer/test` | optional body `{jackett_url, jackett_api_key}` (empty fields fall back to the saved settings, then env) → 200 `{success: true, message, jackett_url, test_results}`; 400 when nothing is configured, 503 when Jackett fails |
 
 The indexer settings endpoints replace the old `/api/torrents/config` and `/api/torrents/test-connection`.
+
+### Playback capabilities
+
+A client declares what it can play with the same query parameters on every streaming call of a title (`resolve`,
+`prefetch`, `release`, `sidegrade`, `upgrade`, and `probe` / `seekpoint` / `play`). Resolve ranks for them and they are
+part of the source cache key, so a TV and a PC never share a cached pick; send the same set on every call or the
+calls address different cache entries.
+
+| Parameter | Meaning | Used by |
+|---|---|---|
+| `hevc=1` | decodes HEVC Main / Main10 (4K HEVC is copied, not re-encoded) | ranking, key, probe/play |
+| `hdr=1` | HDR display (only with `hevc=1`); without it HDR is tone-mapped by the display path and ranks below SDR | ranking, key |
+| `dv=1` | shows Dolby Vision itself, profile 5 included (only with `hevc=1`): DV ranks first, DV-only releases are fine | ranking, key |
+| `atmos=1` | passes Atmos (E-AC-3 JOC / TrueHD) through to the speakers; only counts together with `eac3` in `acodecs` | ranking, key |
+| `acodecs=` | comma list of audio codecs the client decodes: `aac`, `opus`, `flac`, `mp3`, `ac3`, `eac3`, `truehd`, `dts` (ffprobe names; unknown names are ignored) | ranking (with `atmos=1`; `ac3`, `truehd`, `dts` are part of the key), probe/play |
+
+Ranking within one resolution (resolution, source tier and the measured swarm health always come first):
+
+- Native audio (`atmos=1` and `eac3` in `acodecs`): Atmos (DD+ Atmos; TrueHD Atmos only with `truehd`; DTS:X only with
+  `dts`) > 7.1 > 5.1 > stereo. A multichannel codec the client did not declare ranks a bit below a declared 5.1 (the
+  server would re-encode it).
+- Otherwise (browsers): multichannel (5.1 / 7.1, any codec, Atmos included) > stereo; the play stream re-encodes it
+  to Opus / AAC 5.1.
+- HDR with `dv=1`: DV > HDR10+ > HDR10 > SDR. Without `dv=1`: HDR10 / HDR10+ / DV with an HDR10 layer > SDR on an HDR
+  display; DV-only releases (profile 5) are ranked far down and, once ffprobe shows profile 5, only picked when
+  nothing else is left.
+- Higher bitrate (size per minute) up to about twice the typical one of the resolution; more seeders count fully up
+  to 30, barely above.
+
+Key examples: a PC browser `…|hevc|hdr`; a DV / Atmos TV `…|hevc|hdr|dv|atmos+ac3` (`+truehd`, `+dts` when declared).
+`play` copies `aac`, `opus`, `flac`, `mp3`, `ac3` and `eac3` into its fragmented MP4 when `acodecs` declares them
+(AC-3 / E-AC-3 with `delay_moov`, so the init segment comes with the first fragment); E-AC-3 Atmos (JOC) survives
+the copy. TrueHD and DTS are always re-encoded there (5.1 at most).
+
+Search: resolve asks each configured Jackett indexer that carries the media type (`/api/v2.0/indexers/<id>/results`)
+and ranks as soon as enough is there: once every indexer it waits for answered; once the indexers that usually answer
+within 1 s (moving average per indexer, kept in memory; unmeasured ones count as fast) answered, or 1.2 s passed, and
+3 usable, title-matched candidates of the top wanted resolution arrived (2160p for HEVC clients without `maxq`, else
+1080p or the cap); once the fast ones answered and 1.2 s passed (or 1.5 s passed) with 3 of 1080p or more, 4K
+included (4K clients); at the latest after 3.5 s. These times count from the start of the resolve: the title is
+searched at once, while the TMDB / IMDb lookups below run next to it and add their queries when they answer.
+Slower ones (1337x) are merged when they finish (≤ 25 s) and can still improve the cached source or feed `upgrade`.
+The log line `N results in Xs (<reason>)` says which rule cut. A resolve answers 502 `Torrent search
+failed. Check the Jackett settings.` only when every indexer request failed and Bitsearch found nothing either.
+
+Bitsearch (`bitsearch_enabled`, on by default): the search page of bitsearch.to (a DHT index, `BITSEARCH_URL`; it
+redirects to bitsearch.eu, which is remembered) is scraped next to Jackett as one more source of the same search
+(same cut-off rules, its answer time averaged like an indexer's); what it finds later joins the late results. It finds torrents no Jackett indexer lists (single files such as
+`Kardeşler.Araştırma.2026.mp4`). Each name is searched once in folded form (`kardesler arastirma`), movies with a
+year only as `<name> <year>`, TV with the `SxxEyy` queries first, then the absolute and bare ones (a season query
+is dropped when its bare name is searched), at most 4 queries per search round. Results outside video categories (Movies, TV, Anime,
+Other/Video, Other) are dropped; the site's own category filter is not used because DHT finds are filed as
+Other/Video. The magnet is built from the info hash with the page's trackers plus well-known open trackers. At most
+one request per second, results cached 30 min per query, concurrent identical queries share one request; a
+Cloudflare challenge goes through FlareSolverr (`FLARESOLVERR_URL`), any other failure pauses Bitsearch for 2 min
+(logged) and the search goes on with Jackett alone.
+
+IMDb: with `tmdb_id`, resolve looks up the IMDb id (TMDB external ids) and IMDb's English title
+(`https://v3.sg.media-imdb.com/suggestion/x/<id>.json`, cached 7 days, failures 10 min, never waited for more than
+2 s). The title joins the other names below ("Detective Brothers" on TMDB is "Brothers Investigation" on IMDb). For
+movies, every indexer whose torznab caps list `imdbid` for movie search is also asked with
+`t=movie&imdbid=<id>` once the id is known (part of the same per-indexer deadline); items that name another IMDb id
+are dropped. These
+results are accepted even when their name matches none of the known titles (the title part of the release name
+before its year is used for ranking).
+
+Other titles: with `tmdb_id`, resolve also looks up the original title, original language and alternative titles
+(TMDB, ≤ 2.5 s, cached). Releases of foreign titles usually carry the original title in ASCII ("Money Trap" is
+"Organize İşler: Karun Hazinesi" on TMDB, released as "Organize.Isler..."). For a non-English original the search
+also runs the original title, its ASCII transliteration (ş→s, ğ→g, ı/İ→i/I, ç→c, ö→o, ü→u, other accents dropped),
+for TV the part before a colon, IMDb's English title, and up to 2 alternative titles (US, GB, TR first; non-Latin
+ones skipped), at most 4 extra names, each with the same queries as the title, added to the running search as soon
+as the lookup answers, within the same per-indexer deadline (each query's results count as soon as they arrive; ones
+that answer after the cut join the late results). The search does not end on "every indexer answered" before these
+queries ran, and ranking waits for the other names when the title alone found fewer than 5 usable results. A name that starts with an already searched
+one is matched but not searched. For an English original the other names (IMDb title, alternative titles) are
+searched only when the title found fewer than 5 usable results. Release names are matched against the title and
+every other name, normalized the same way (`Organize İşler` matches `Organize.Isler.S01E01.1080p`); duplicates are
+merged as usual.
+
+Episodes: TV is searched as `<name> SxxEyy` and `<name> Sxx`. Foreign releases often use other notations, so for a
+non-English original the other names also add the bare original name (ASCII, at most 2) and, from season 2 on,
+`<name> <absolute episode>` ("Cukur", "Cukur 93"); an English original gets the bare title only when the first round
+found fewer than 5 usable results. With `tmdb_id` the show's season list (`episode_count` per season, specials left
+out, cached) gives the absolute episode number (Çukur S4E1 = 33 + 34 + 25 + 1 = 93); without it, release names that
+carry both numbers ("Cukur 94 S4 E1") decide. Release and file names are read with these notations: `S01E05`,
+`S1 E5`, `1x05`, `Season 1 Episode 5`, `Sezon 1 Bölüm 5`, `2. Sezon 5. Bölüm`, `S01.Bolum.05`, `01.sez`; `E05`, `B05`,
+`BL.90`, `Bölüm 5`, `5. Bölüm`, `ep.1`, `Episode 1`, `Episodes 01-107`; a bare number right after the title is the
+absolute number. Years, resolutions (720, 1080, ...), codecs (264, 265) and channel counts (5.1) are not episode
+numbers. A name with season and episode matches by them; a number without a season matches the absolute number;
+episode numbers past their season's length that fit its absolute numbers are absolute ("Season: 1 / Episodes:
+01-107 of 107" is the whole show and accepted as a complete pack, up to 300 GB). In a pack the file is picked by
+season and episode (the file's name, its folder "Season 2/", or the pack's season), then by its absolute number.
+
+Resolve checks each candidate before answering: TorrServer must open it, its swarm must keep up with the file's
+bitrate, and its duration (ffprobe of the header, cached for play) must fit the expected runtime: movies within
+max(10 min, 12 %), episodes within max(8 min, 25 %); releases tagged extended / director's cut / uncut may run up to
+40 % longer. The expected runtime comes from TMDB when `tmdb_id` is given (movie runtime, episode runtime from the
+season, else the show's `episode_run_time`; cached in memory), else from `runtime`. When either value is unknown
+the file is not rejected. `tmdb_id` and `runtime` are not part of the source cache key.
+
+A candidate whose duration was verified beats every candidate of unknown duration (the probe failed), whatever its
+resolution; one of unknown duration is only picked when no verified one exists (`duration_verified: false`). A probe
+still running after 12 s goes on (up to 25 s more) as soon as the swarm shows peers or data; one that failed early is
+retried once. One ffprobe runs per file: the player's `probe` (and `play`) waits for a running one instead of
+starting a second. The player
+probes again before playing; on `duration_mismatch` it resolves with `refresh=1&avoid=<hash>` and shows "Finding a
+complete version…", at most twice per title.
+
+Swarm health is measured after a warm-up, not cold: the server reads the middle of the file and polls TorrServer's
+stat every second, for up to 15 s for the highest resolution on offer (8 s for lower ones), starting once the header
+was probed (at the latest 2.5 s after the file was picked) so the two reads do not compete. The verdict is the median
+of the per-second rates (read rate or TorrServer's download speed, whichever is higher) after the first 1.5 s, over
+the last 6 s, so a start burst or one spike never makes a weak swarm look healthy; it keeps up at ≥ 1.3× the file's
+average bitrate (size / runtime) and stops early once that median covers 3 s; no peers and no data for 8 s means dead.
+A candidate that keeps up with a verified duration (or an unknown runtime) answers at once; resolve waits (3 s, cut
+short when the promise fades) only while a better-ranked check of at least its resolution delivers ≥ 0.8 of its need
+so far. A higher resolution still warming (HEVC clients without `maxq`) keeps warming in the background (up to 2
+candidates, 90 s from the start of the checks).
+Once it keeps up it replaces the cached source, so `upgrade` offers it and the next play starts with it.
+
+Resolve answers at the latest 12 s after the checks started (a hard wall, also for a grace) with the best so far
+(verified duration first, then the highest rate relative to its need; a check whose duration is known counts with its
+health so far) instead of waiting for every check; a candidate with active peers or data always beats a dead or silent one. When
+no check has a verdict or a checked duration yet (slow
+metadata, a slow probe), a check's snapshot from before its verdict answers: the highest rate so far for its need,
+else the most active peers, then the most seeders (`health`, when sampled, shows the rate so far with `keeps_up: false`;
+`duration_verified` is false). Only without any candidate's metadata does it wait for the first one (≤ 20 s).
+The others keep measuring: one of the same resolution that keeps up, or is clearly faster
+(≥ 1.5× the pick's rate), becomes a spare for `sidegrade` and the cached source; a higher one feeds `upgrade`. The
+player asks `sidegrade` 8 s after such a start (also before the first frame when it started at 0), then every 15 s,
+and whenever its buffer drains during playback (every 5-10 s; see the proactive sidegrade in ARCHITECTURE.md).
+
+Once resolve has answered, its background work (checks still running, upgrade warm-ups and searches, spare
+measurements, late candidates, sidegrade searches, their probes) waits while another torrent starts: the player's
+`probe` of it runs, or its play stream is younger than 30 s (up to 90 s while it has sent no bytes yet), so the
+starting stream (or a seek) has the line to itself; a running measurement that already has a verdict ends with it.
+Prefetch on the detail page and the checks before the answer never wait.
+
+Quality: an explicit resolution in a release name (2160p, 4K, 1080p, 720p, 480p) wins over UHD-ish words, and once
+ffprobe read a candidate's header its quality follows the video size (height ≥ 1600 or width ≥ 3200 → 2160p, ≥ 900 /
+≥ 1800 → 1080p, ≥ 600 / ≥ 1200 → 720p, else 480p), for the answer, the cached source and the upgrade decisions.
+Source cache keys are versioned (`v10`): picks of older rankings (v9: language-blind, v8: format-blind) are resolved again.
+The subtitle part (below) did not bump it: an older pick still plays, and `subalt` covers one without the subtitle.
+
+Audio language: resolve reads the profile language from `X-Lang` (web and TV send it on every call). Release names
+with dub-only markers (`MVO`, `Dub`, `Дубляж`, `Rus`, `iTA` without `ENG`, `TRUEFRENCH`, ...) rank slightly lower,
+`MULTi` / `Dual Audio` / `ENG` slightly higher. A checked file whose audio tracks are all tagged with languages that
+are neither the title's original language (TMDB) nor the profile's is taken only when no other candidate is left
+(see ARCHITECTURE.md). The language is not part of the cache key.
+
+Subtitle language: for the profile language (not the original one) release names that name its subtitle (`TR Sub`,
+`Türkçe Altyazı`, `Subs: ENG, TUR`, for Turkish also `TUR` / `Turkish`) rank slightly higher (+6), `MULTi-SUB` /
+`Multi Subs` a little (+4); a checked file with a text subtitle track or a subtitle file of that language gets +8, one
+without it loses the name's hint. These parts stay below a resolution step and never beat the swarm or duration checks.
+
+## Subtitles (`modules/subtitles`)
+
+Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|turkcealtyazi", "language": "tr",
+"label": "Türkçe", "release": "BDRip HDRINVASION", "hi": false, "forced": false, "synced": false, "score": 0.3,
+"author": "WoraZ", "fps": 23.976, "downloads": 6527, "live": true }` (`author`, `fps`, `downloads` only when known; `live`: an
+embedded track of a big file, read while it plays, see below)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/subtitles` | `tmdb_id`, `media_type=movie\|tv`, `season`, `episode` (required for tv), `hash` + `index` (playing TorrServer file), `langs=tr,en` (default: the settings order), `title` (playing torrent name, ranking hint), `year`, `refresh=1` (late uploads: ask the providers again, skipping the 30 min list cache and turkcealtyazi's 24 h page cache (pages older than 10 min); at most every 5 min per title, otherwise the cache answers) → 200 `{items: [Sub]}`; 400 without `tmdb_id` and `hash` |
+| GET | `/api/subtitles/file?id=[&t=<sec>]` | 200 `text/vtt; charset=utf-8`; for a `live` embedded track the cues read so far from about `t` (the player's position) on, marked by a `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` (`no-store`) while more follow (ask again; the whole track is cached once every part of the file was read); 400 unknown id, 429 provider quota or rate limit, 502 provider failure |
+| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, turkcealtyazi: {enabled}, default_langs: ["tr","en"]}`; secrets are never returned |
+| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, turkcealtyazi: {enabled}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
+
+Sources: subtitle files inside the torrent and embedded text tracks (whole when the file is small or mostly cached, else
+live: read from the playing position on while it streams, see ARCHITECTURE.md), OpenSubtitles.com
+(API key; username/password log in for a JWT cached 23 h, which raises the download quota), SubDL (API key) and
+turkcealtyazi.org (scraped, on by default). `/api/subtitles` answers within 6 s with what is ready; slower providers keep
+running and fill the 30 min in-memory list cache for the next call (failures are cached 3 min, except network
+failures and 5xx, which the next call retries). Provider requests go through `platform/upstream`: resets, stalls and
+cut answers are retried on a new connection (also the OpenSubtitles login/download and turkcealtyazi form POSTs). So the players (web and
+TV) ask again 8 s and 20 s after the first answer when it is empty or has no subtitle in the profile's language (the
+first of `langs`), merge the lists by id and stop once that language is there; while the viewer has not picked a
+subtitle and none is shown, the default pick runs again on the fuller list. Still missing after the retries (and the audio
+is in another language), the players ask `subalt` for a release that carries it and re-query the list every 10 min with
+`refresh=1` (see ARCHITECTURE.md). Settings live in the
+`subtitle_settings` table.
+
+- OpenSubtitles: search by `tmdb_id` (movies) or `parent_tmdb_id` + season/episode, plus the `moviehash` of the playing
+  file (size + 64-bit word sums of the first and last 64 KiB, read through TorrServer range requests); a hash match is
+  marked `synced`. `429` honours `Retry-After`; a `406` on download blocks downloads until `reset_time_utc`.
+- SubDL: search by `tmdb_id` + type (+ season/episode, and a second `full_season=1` query for packs) with `unpack=1`, so a
+  pack's single episode file is downloaded directly; otherwise the episode is picked from the zip.
+- turkcealtyazi.org: the title page is found by IMDb id (`/tt<id>/`, via TMDB external ids), the download is the page's
+  POST form (`/ind`) returning a zip. At most one request every 2 s server-wide, pages cached 24 h on disk, a clear
+  User-Agent; on a Cloudflare challenge the page is loaded through FlareSolverr and its cookies are reused. RAR archives
+  are not supported (none seen so far).
+
+Ranking, per language in the requested order: synced (same torrent, embedded, OpenSubtitles hash match) first, then
+release similarity with `title` (release group, source family BluRay/WEB/HDTV/DVD, streaming service, resolution,
+edition, FPS mismatch penalty) and provider quality (downloads, rating, trusted uploader, turkcealtyazi quality tier).
+HI is penalised only when the language has a regular subtitle; multi-CD subtitles are penalised; forced-only and
+machine/AI-translated subtitles always come last.
+
+Files are converted to UTF-8 WebVTT once and cached forever under `/app/data/subtitles` (`SUBTITLE_CACHE_DIR`), keyed by
+provider and file id, so a cached file never counts against a provider quota again.
