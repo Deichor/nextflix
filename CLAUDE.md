@@ -14,8 +14,8 @@ isolated from the host machine.
 - Dependency installs (`npm ci`, `go mod download`) happen only during image builds or inside the check containers.
 - Verify changes with the check scripts (they compile in throwaway containers, source mounted read-only). From
   PowerShell call them through WSL (Git Bash rewrites `/mnt/c` paths):
-  - `wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/homeflix-wifi/scripts/check-backend.sh [pkgs]` -> `GO_BUILD=ok`
-  - `wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/homeflix-wifi/scripts/check-frontend.sh [regex]` -> `TSC_EXIT=0`
+  - `wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/nextflix/scripts/check-backend.sh [pkgs]` -> `GO_BUILD=ok`
+  - `wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/nextflix/scripts/check-frontend.sh [regex]` -> `TSC_EXIT=0`
   - `scripts/tidy-backend.sh` runs `go mod tidy` in a container.
 - `scripts/migrate-from-homeflix.sh` is a one-time migration for old installs; only run it when asked.
 

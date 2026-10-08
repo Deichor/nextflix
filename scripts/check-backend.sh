@@ -2,7 +2,7 @@
 # Compiles the Go server inside a throwaway container (source mounted read-only).
 # Usage: check-backend.sh [packages]   (default: ./...)
 # Prints GO_BUILD=ok|failed, then gofmt offenders (GOFMT_FILES=<n>) and VET=ok|failed.
-# From Windows: wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/homeflix-wifi/scripts/check-backend.sh
+# From Windows: wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/nextflix/scripts/check-backend.sh
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKGS="${1:-./...}"
 docker run --rm \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Type-checks the web app inside a throwaway container (source mounted read-only).
 # Usage: check-frontend.sh [REGEX]   OWN_ERRORS counts errors whose file path matches REGEX.
-# From Windows: wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/homeflix-wifi/scripts/check-frontend.sh
+# From Windows: wsl -d Ubuntu-24.04 -- bash /mnt/c/deichor-projects/nextflix/scripts/check-frontend.sh
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 docker run --rm \
   -v "$ROOT/web:/src:ro" \
