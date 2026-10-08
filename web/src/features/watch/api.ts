@@ -23,6 +23,9 @@ export interface ResolvedSource {
   cached?: boolean;
   /** Format of the file; subs: languages of the text subtitles inside (embedded tracks, files next to it) */
   format?: { subs?: string[] };
+  /** Plays from the TorBox cache (source "torbox"), not the swarm */
+  debrid?: boolean;
+  source?: string;
 }
 
 export interface SourceHealth {
@@ -50,6 +53,8 @@ export interface StreamSource {
   ratio?: number;
   /** Release name from the resolve (helps the subtitle search match the release) */
   torrent_title?: string;
+  /** Plays from the TorBox cache */
+  debrid?: boolean;
 }
 
 export interface PlaybackCaps {
@@ -346,10 +351,13 @@ export async function checkUpgrade(
   current: string,
   currentQuality: number,
   signal?: AbortSignal,
+  failed?: string,
 ): Promise<ResolvedSource | null> {
   const q = addCaps(resolveQuery(params));
   q.set('current', current);
   if (currentQuality > 0) q.set('current_q', String(currentQuality));
+  // Why the last switch to an offer failed (logged by the server)
+  if (failed) q.set('failed', failed.slice(0, 160));
   try {
     const res = await fetch(`${getApiUrl()}/api/torrent-stream/upgrade?${q.toString()}`, { signal });
     return res.status === 200 ? await res.json() : null;
@@ -518,11 +526,13 @@ export function releaseTitle(params: ResolveParams, delaySec = 0): void {
   beacon(`${getApiUrl()}/api/torrent-stream/release?${q.toString()}`);
 }
 
-// Drops torrents a closing player used (never one that is playing again by then)
-export function releaseTorrents(hashes: string[]): void {
+// Drops torrents a closing player used (never one that is playing again by then); why: the
+// reason a switch to them failed, for the server log
+export function releaseTorrents(hashes: string[], why?: string): void {
   const list = Array.from(new Set(hashes.map(h => h.toLowerCase()).filter(h => /^[0-9a-f]{40}$/.test(h)))).slice(0, 10);
   if (typeof window === 'undefined' || list.length === 0) return;
-  beacon(`${getApiUrl()}/api/torrent-stream/release?hash=${list.join(',')}`);
+  const reason = why ? `&why=${encodeURIComponent(why.slice(0, 160))}` : '';
+  beacon(`${getApiUrl()}/api/torrent-stream/release?hash=${list.join(',')}${reason}`);
 }
 
 export async function saveProgress(p: StreamProgress, opts: { keepalive?: boolean } = {}): Promise<void> {

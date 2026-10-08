@@ -79,6 +79,8 @@ export interface SubtitleItem {
   score: number;
   /** Embedded track of a big file: read while it plays, its cues grow (fetch with the position) */
   live?: boolean;
+  /** OpenSubtitles' daily download limit is used up: listed last, not picked by itself */
+  quota?: boolean;
 }
 
 export interface SubtitleQuery {
@@ -172,17 +174,52 @@ export function lateSubtitles(
   const arrived = !hasSubtitleLang(shown, lang) && hasSubtitleLang(items, lang);
   if (!arrived || viewerChose) return { items, arrived, pick: null };
   const l = normLang(lang);
-  const pool = items.filter(s => normLang(s.language) === l && !s.forced);
+  const pool = downloadable(items.filter(s => normLang(s.language) === l && !s.forced));
   const best = pool.find(s => s.synced) || pool[0];
   return { items, arrived, pick: best?.id ?? null };
 }
 
-/** Best subtitle of lang in items (not forced, synced first), for a pick the viewer asked for. */
-export function bestSubtitleOf(items: SubtitleItem[], lang: string): string | null {
+/** Items that can be downloaded now: without the ones whose quota is used up or that failed (all of them when none is left). */
+function downloadable(pool: SubtitleItem[], failed?: ReadonlySet<string>): SubtitleItem[] {
+  const now = Date.now();
+  const ok = pool.filter(s => !s.quota && !failed?.has(s.id) && !((failedFiles.get(s.id)?.until ?? 0) > now));
+  return ok.length > 0 ? ok : pool;
+}
+
+/** Best subtitle of lang in items (not forced, downloadable, synced first), for a pick the viewer asked for. */
+export function bestSubtitleOf(items: SubtitleItem[], lang: string, failed?: ReadonlySet<string>): string | null {
   const l = normLang(lang);
   const of = items.filter(s => normLang(s.language) === l);
-  const pool = of.filter(s => !s.forced).length > 0 ? of.filter(s => !s.forced) : of;
+  const pool = downloadable(of.filter(s => !s.forced).length > 0 ? of.filter(s => !s.forced) : of, failed);
   return (pool.find(s => s.synced) || pool[0])?.id ?? null;
+}
+
+// Why a subtitle file could not be loaded: quota = OpenSubtitles' daily download limit,
+// limited = another 429, error = a server or provider error (5xx, network), missing = 404 and the like
+export type SubtitleFailure = 'quota' | 'limited' | 'error' | 'missing';
+
+/**
+ * The subtitle to try after `failedId` could not be loaded: the next one of its language that
+ * was not tried yet, from another provider first. After a 429 (quota or rate limit) that provider
+ * is left out altogether, so no other download of it is wasted. null: nothing left.
+ */
+export function nextSubtitleAfterFailure(
+  items: SubtitleItem[],
+  failedId: string,
+  why: SubtitleFailure,
+  failed: ReadonlySet<string>,
+): string | null {
+  const bad = items.find(s => s.id === failedId);
+  if (!bad) return null;
+  const l = normLang(bad.language);
+  const blocked = why === 'quota' || why === 'limited';
+  const pool = items.filter(s =>
+    s.id !== failedId && !failed.has(s.id) && normLang(s.language) === l && s.forced === bad.forced && !s.quota &&
+    !(blocked && s.source === bad.source));
+  const rank = (s: SubtitleItem) => (s.source === bad.source ? 1 : 0);
+  // Stable: the list's own order (best first) within each group
+  const ordered = pool.map((s, i) => ({ s, i })).sort((a, b) => rank(a.s) - rank(b.s) || a.i - b.i).map(x => x.s);
+  return (ordered.find(s => s.synced && s.source !== bad.source) || ordered[0])?.id ?? null;
 }
 
 export interface Cue {
@@ -192,6 +229,9 @@ export interface Cue {
 }
 
 const cueCache = new Map<string, Promise<Cue[]>>();
+// Subtitle files that could not be loaded, by id: not asked again before `until`
+const failedFiles = new Map<string, { why: SubtitleFailure; until: number }>();
+const FAILED_FILE_MS = 5 * 60 * 1000;
 
 // The server marks a partial live answer with this note (more cues follow while the file plays)
 export const PARTIAL_NOTE = 'NOTE nextflix-partial';
@@ -204,19 +244,32 @@ export function fetchSubtitleCues(id: string): Promise<Cue[]> {
  * Cues of a subtitle. `at` (seconds of the file) is where the viewer is: a live embedded track is read from
  * there on. A partial answer is not cached; ask again (LIVE_CUES_POLL_MS) for the cues read since.
  */
-export function fetchSubtitleFile(id: string, at?: number): Promise<{ cues: Cue[]; partial: boolean }> {
+export function fetchSubtitleFile(id: string, at?: number): Promise<{ cues: Cue[]; partial: boolean; failed?: SubtitleFailure }> {
   const hit = cueCache.get(id);
   if (hit) return hit.then(cues => ({ cues, partial: false }));
+  // A file that failed is not asked again for a while (every seek reloads the cues)
+  const bad = failedFiles.get(id);
+  if (bad && Date.now() < bad.until) return Promise.resolve({ cues: [], partial: false, failed: bad.why });
   const t = at !== undefined && at > 0 ? `&t=${Math.floor(at)}` : '';
   const req = fetch(`${getApiUrl()}/api/subtitles/file?id=${encodeURIComponent(id)}${t}`)
-    .then(res => (res.ok ? res.text() : ''))
-    .then(text => ({ cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE) }))
-    .catch(() => ({ cues: [] as Cue[], partial: false }));
+    .then(async res => {
+      if (res.ok) {
+        const text = await res.text();
+        return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE) };
+      }
+      const body = await res.json().catch(() => null) as { quota?: boolean; reset_at?: string } | null;
+      const why: SubtitleFailure = res.status === 429 ? (body?.quota ? 'quota' : 'limited') : res.status >= 500 ? 'error' : 'missing';
+      const reset = body?.reset_at ? Date.parse(body.reset_at) : NaN;
+      failedFiles.set(id, { why, until: why === 'quota' && reset > Date.now() ? reset : Date.now() + FAILED_FILE_MS });
+      return { cues: [] as Cue[], partial: false, failed: why };
+    })
+    .catch(() => ({ cues: [] as Cue[], partial: false, failed: 'error' as SubtitleFailure }));
   req.then(f => {
     if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve(f.cues));
   });
   return req;
 }
+
 
 const TIME = /(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})/;
 
@@ -271,16 +324,17 @@ export function pickSubtitle(
   items: SubtitleItem[],
   opts: { profileLang: Locale; pref?: PlayerPrefs['sub']; audioLang?: string },
 ): string | null {
+  // A subtitle whose download quota is used up is only taken when nothing else is left
   const best = (lang: string) => {
     const l = normLang(lang);
     const of = items.filter(s => normLang(s.language) === l && !s.forced);
-    const pool = of.length > 0 ? of : items.filter(s => normLang(s.language) === l);
+    const pool = downloadable(of.length > 0 ? of : items.filter(s => normLang(s.language) === l));
     return (pool.find(s => s.synced) || pool[0])?.id ?? null;
   };
   const pref = opts.pref;
   if (pref === 'off') return null;
   if (pref) {
-    if (pref.id && items.some(s => s.id === pref.id)) return pref.id;
+    if (pref.id && items.some(s => s.id === pref.id && !s.quota)) return pref.id;
     return best(pref.lang);
   }
   if (opts.profileLang === 'tr' && normLang(opts.audioLang) !== 'tr') return best('tr');

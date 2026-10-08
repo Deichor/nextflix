@@ -17,6 +17,8 @@ interface AudioSubtitlePanelProps {
   /** null while the list is loading; undefined when subtitles are not available for this file */
   subtitles: SubtitleItem[] | null | undefined;
   subtitleId: string | null;
+  /** Subtitles whose file could not be loaded this session (greyed) */
+  failedSubtitles?: ReadonlySet<string>;
   onSubtitle: (id: string | null) => void;
   delay: number;
   onDelay: (seconds: number) => void;
@@ -86,7 +88,7 @@ function Row({
 // Netflix-style "Audio & Subtitles" panel: two columns, red check on the active row,
 // arrow keys move inside / between the columns, Esc or a click outside closes it.
 export default function AudioSubtitlePanel({
-  open, onClose, anchorRef, audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, onSubtitle, delay, onDelay, subAlt,
+  open, onClose, anchorRef, audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, failedSubtitles, onSubtitle, delay, onDelay, subAlt,
 }: AudioSubtitlePanelProps) {
   const t = useT();
   const f = useFormat();
@@ -96,15 +98,18 @@ export default function AudioSubtitlePanel({
   // Simple view lists one row per language (its best subtitle); versions and timing live in the details view
   const [details, setDetails] = useState(false);
   useEffect(() => { if (!open) setDetails(false); }, [open]);
+  // A subtitle that cannot be downloaded now (quota used up, failed) is the language's row only when nothing else is left
+  const unusable = (s: SubtitleItem) => !!s.quota || !!failedSubtitles?.has(s.id);
   const bestPerLanguage = useMemo(() => {
-    const seen = new Set<string>();
-    return (subtitles || []).filter(s => {
+    const best = new Map<string, SubtitleItem>();
+    for (const s of subtitles || []) {
       const code = normLang(s.language) || s.language;
-      if (seen.has(code)) return false;
-      seen.add(code);
-      return true;
-    });
-  }, [subtitles]);
+      const cur = best.get(code);
+      if (!cur || (unusable(cur) && !unusable(s))) best.set(code, s);
+    }
+    return Array.from(best.values());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subtitles, failedSubtitles]);
   const activeSub = (subtitles || []).find(s => s.id === subtitleId) || null;
   const activeLang = activeSub ? normLang(activeSub.language) || activeSub.language : null;
 
@@ -217,8 +222,9 @@ export default function AudioSubtitlePanel({
             const name = code ? languageName(locale, code) : s.label || s.language;
             const tags = [s.hi ? t('player.subtitlesHi') : '', s.forced ? t('player.subtitlesForced') : ''].filter(Boolean);
             const newGroup = i > 0 && normLang(all[i - 1].language) !== code;
+            const hint = s.quota ? t('player.subQuotaHint') : failedSubtitles?.has(s.id) ? t('player.subFailedHint') : '';
             return (
-              <div key={s.id} className={newGroup ? 'mt-1 border-t border-white/5 pt-1' : ''}>
+              <div key={s.id} className={`${newGroup ? 'mt-1 border-t border-white/5 pt-1' : ''} ${hint ? 'opacity-50' : ''}`} title={hint || undefined}>
                 <Row col="subs" active={s.id === subtitleId} onClick={() => onSubtitle(s.id)}>
                   <span className="flex items-center gap-2">
                     <span className="truncate">{name}{tags.length > 0 && ` (${tags.join(', ')})`}</span>
@@ -231,6 +237,7 @@ export default function AudioSubtitlePanel({
                   <span className="block truncate text-xs font-normal text-[#8c8c8c] md:text-sm">
                     {[sourceLabel(t, s.source), s.release].filter(Boolean).join(' · ')}
                   </span>
+                  {!!hint && <span className="block truncate text-xs font-normal text-[#e5a00d] md:text-sm">{hint}</span>}
                 </Row>
               </div>
             );

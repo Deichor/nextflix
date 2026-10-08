@@ -127,12 +127,7 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
                   >
                     <div className="relative aspect-video rounded overflow-hidden bg-[#2f2f2f]">
                       {img ? (
-                        <img
-                          src={`/tmdb-img/t/p/w780${img}`}
-                          alt={p.title}
-                          loading="lazy"
-                          className="w-full h-full object-cover"
-                        />
+                        <RetryImage src={`/tmdb-img/t/p/w780${img}`} alt={p.title} className="w-full h-full object-cover" />
                       ) : (
                         <div className="w-full h-full flex items-center justify-center text-[#b3b3b3] text-sm px-3 text-center">{p.title}</div>
                       )}
@@ -170,5 +165,23 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
       </section>
       {player}
     </>
+  );
+}
+
+// A card image that tries again a few times (e.g. the server was restarting when the page loaded)
+function RetryImage({ src, alt, className }: { src: string; alt: string; className: string }) {
+  const [attempt, setAttempt] = useState(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  if (attempt > 3) return null;
+  return (
+    <img
+      key={attempt}
+      src={attempt ? `${src}?retry=${attempt}` : src}
+      alt={alt}
+      loading="lazy"
+      className={className}
+      onError={() => { timer.current = setTimeout(() => setAttempt(a => a + 1), 2000 * (attempt + 1)); }}
+    />
   );
 }

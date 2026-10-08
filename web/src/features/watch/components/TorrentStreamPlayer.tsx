@@ -8,6 +8,7 @@ import { getActiveProfileId } from '@/shared/lib/profile';
 import { useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction } from '@/shared/i18n';
 import AudioSubtitlePanel from '@/features/watch/components/AudioSubtitlePanel';
 import SubtitleOverlay from '@/features/watch/components/SubtitleOverlay';
+import SeekThumbnail from '@/features/watch/components/SeekThumbnail';
 import {
   Cue,
   SubtitleItem,
@@ -15,6 +16,8 @@ import {
   fetchSubtitleFile,
   LATE_SUBTITLE_POLL_MS,
   lateSubtitles,
+  nextSubtitleAfterFailure,
+  type SubtitleFailure,
   LIVE_CUES_POLL_MS,
   SUBALT_RETRY_MAX,
   fetchSubtitles,
@@ -64,6 +67,7 @@ import { SwitchPrep, type PreparedStream, type SwitchHost, type SwitchKind, type
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch/bufferHealth';
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
+import { guardedStart } from '@/features/watch/rewindGuard';
 
 // PlayerCore's seamless switch, for the parent
 interface CoreSwitch {
@@ -75,6 +79,8 @@ interface CoreSwitch {
   busy(): boolean;
   /** Drop the running preparation (it resolves 'cancelled') */
   cancel(): void;
+  /** Why the last abandoned preparation was dropped */
+  failure(): string;
 }
 
 interface StreamFile {
@@ -136,6 +142,7 @@ const TOAST_MS = 4000;
 // At most one upgrade per session, and none once quality had to step down.
 const UPGRADE_POLL_MS = 15000;
 const UPGRADE_FOR_MS = 5 * 60 * 1000;
+const UPGRADE_RETRY_MS = 60000;
 // A file whose length does not fit the TMDB runtime is replaced at most this often per item
 const MAX_LENGTH_RETRIES = 2;
 // Sidegrade: a starving source is swapped for an alternative of the same (or higher) quality
@@ -159,8 +166,9 @@ const paramsOf = (m: StreamMeta, maxq?: QualityCap): ResolveParams => ({
   type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, maxq,
 });
 
-const sourceOf = (r: { hash: string; index: number; magnet?: string; file_name?: string; torrent_title?: string; quality?: string; hdr?: boolean; health?: { rate: number; need: number; dead?: boolean } }): StreamSource => ({
+const sourceOf = (r: { hash: string; index: number; magnet?: string; file_name?: string; torrent_title?: string; quality?: string; hdr?: boolean; debrid?: boolean; health?: { rate: number; need: number; dead?: boolean } }): StreamSource => ({
   hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr,
+  debrid: r.debrid,
   ratio: healthRatio(r.health),
 });
 
@@ -268,11 +276,18 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const [itemKey, setItemKey] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const [phase, setPhase] = useState<'resolving' | 'ready' | 'error'>(source || magnet ? 'ready' : 'resolving');
-  const [resolved, setResolved] = useState<{ source?: StreamSource; startAt: number; origin: SourceOrigin }>({
+  // n keys PlayerCore: a new source always mounts a new PlayerCore with that source's props.
+  // (Keyed by attempt, it mounted once with the previous source and start, so a hard switch
+  // started the new source at the session's first start position, usually 0.)
+  const [resolved, setResolvedState] = useState<{ source?: StreamSource; startAt: number; origin: SourceOrigin; n: number }>({
     source,
     startAt: startAt || 0,
     origin: 'given',
+    n: 0,
   });
+  const setResolved = useCallback((r: { source?: StreamSource; startAt: number; origin: SourceOrigin }) => {
+    setResolvedState(prev => ({ ...r, n: prev.n + 1 }));
+  }, []);
   const [resolveError, setResolveError] = useState('');
   const [resolveElapsed, setResolveElapsed] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -292,6 +307,11 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const downgradesRef = useRef(0);
   const downgradeCtrl = useRef<AbortController | null>(null);
   const upgradedRef = useRef(false);
+  // An upgrade whose preparation failed is tried once more after UPGRADE_RETRY_MS; the reason
+  // goes to the server with that poll
+  const upgradeRetriesRef = useRef(0);
+  const upgradeRetryAtRef = useRef(0);
+  const upgradeFailRef = useRef('');
   // Live playback position and video quality class (0 until probed), written by PlayerCore
   const positionRef = useRef(0);
   const qualityRef = useRef(0);
@@ -321,13 +341,16 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     avoidRef.current = [];
     lengthRetriesRef.current = 0;
     pendingStepDownRef.current = null;
+    // A new item starts where it was asked to; the last one's position no longer counts
+    positionRef.current = 0;
   }, [itemKey]);
 
   // Find the source for the current item
   useEffect(() => {
     const retry = retryRef.current;
     retryRef.current = { refresh: false };
-    const startPos = retry.startAt ?? item.startAt;
+    // A retry or switch never starts over at 0 once the item played past REWIND_GUARD_S
+    const startPos = guardedStart(retry.startAt ?? item.startAt ?? 0, positionRef.current);
 
     if (retry.switchTo) {
       setResolved({ source: retry.switchTo, startAt: startPos || 0, origin: 'fresh' });
@@ -386,7 +409,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         }, ctrl.signal, { refresh: retry.refresh, avoid: avoidRef.current });
         if (cancelled) return;
         setResolved({
-          source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: r.health?.keeps_up === false, ratio: healthRatio(r.health) },
+          source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: r.health?.keeps_up === false, ratio: healthRatio(r.health), debrid: r.debrid },
           startAt: startPos || 0,
           origin: r.cached ? 'cached' : 'fresh',
         });
@@ -451,9 +474,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   }, []);
 
   // A source that was prepared for a seamless switch but never played
-  const releaseUnused = useCallback((hash: string) => {
+  const releaseUnused = useCallback((hash: string, why?: string) => {
     const h = hash.toLowerCase();
-    if (h !== currentHashRef.current && !playedRef.current.has(h)) releaseTorrents([h]);
+    if (h !== currentHashRef.current && !playedRef.current.has(h)) releaseTorrents([h], why);
   }, []);
 
   // PlayerCore took over a new source without remounting
@@ -461,6 +484,22 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     lastSwitchRef.current = Date.now();
     setLive({ base: resolvedRef.current, source: next });
   }, []);
+
+  // Dev only: switch like an offer would (`__nfxDebugSwitch({ hash, index, debrid?, kind?, hard? })`):
+  // seamless while the player plays, else (or with hard) the hard switch at the current position
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
+    type Req = { hash: string; index: number; debrid?: boolean; kind?: SwitchKind; hard?: boolean };
+    const w = window as unknown as { __nfxDebugSwitch?: (s: Req) => Promise<SwitchResult | 'hard'> };
+    w.__nfxDebugSwitch = async s => {
+      const next: StreamSource = { hash: s.hash, index: s.index, debrid: s.debrid };
+      const res = s.hard ? 'unavailable' : await (coreSwitchRef.current?.prepare(next, s.kind || 'sidegrade') ?? 'unavailable');
+      if (res !== 'unavailable') return res;
+      hardSwitch(next);
+      return 'hard';
+    };
+    return () => { delete w.__nfxDebugSwitch; };
+  }, [hardSwitch]);
 
   // Called by PlayerCore when playback keeps stalling. Looks for a lower quality of the same
   // title in the background and switches to it at the current position when it keeps up.
@@ -522,7 +561,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         return true;
       }
       if (res !== 'unavailable' || metaRef.current !== m) {
-        releaseUnused(nextHash);
+        releaseUnused(nextHash, res === 'abandoned' ? `sidegrade dropped: ${coreSwitchRef.current?.failure() || 'unknown'}` : undefined);
         // Not ready in time (or broken): not offered again this session
         if (res === 'abandoned') slowRef.current.add(nextHash);
         // The stall that waited for this preparation steps down now
@@ -608,22 +647,39 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       const m = metaRef.current;
-      if (!m || upgradedRef.current || steppedDown() || Date.now() - started > UPGRADE_FOR_MS) return;
+      // A retry after a failed preparation runs even past the polling window
+      const retry = upgradeRetryAtRef.current > 0;
+      if (!m || upgradedRef.current || steppedDown() || (!retry && Date.now() - started > UPGRADE_FOR_MS)) return;
       const quality = qualityRef.current || releaseHeight(src.quality);
       if (quality >= 2160) return;
       // Wait until the probe knows the quality and playback has a position (and no sidegrade loads)
-      if (quality > 0 && positionRef.current > 0 && !coreSwitchRef.current?.busy()) {
+      if (quality > 0 && positionRef.current > 0 && !coreSwitchRef.current?.busy() && Date.now() >= upgradeRetryAtRef.current) {
+        const failed = upgradeFailRef.current;
+        upgradeFailRef.current = '';
         const up = await checkUpgrade(
           { type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime },
-          src.hash, quality, ctrl.signal,
+          src.hash, quality, ctrl.signal, failed,
         );
         if (ctrl.signal.aborted) return;
+        if (retry) upgradeRetryAtRef.current = 0;
         if (up && releaseHeight(up.quality) > quality && !upgradedRef.current && !steppedDown()) {
           upgradedRef.current = true;
           const next = sourceOf(up);
           const res = await (coreSwitchRef.current?.prepare(next, 'upgrade') ?? 'unavailable');
-          // An upgrade whose stream could not get ready in time is not offered again this session
-          if (res === 'abandoned' || res === 'cancelled') releaseUnused(next.hash);
+          if (res === 'abandoned' || res === 'cancelled') {
+            const why = res === 'cancelled' ? 'cancelled' : coreSwitchRef.current?.failure() || 'unknown';
+            // One more try a minute later (the server hears why on that poll); after that the
+            // upgrade is not offered again this session
+            if (upgradeRetriesRef.current < 1 && !ctrl.signal.aborted) {
+              upgradeRetriesRef.current++;
+              upgradedRef.current = false;
+              upgradeFailRef.current = why;
+              upgradeRetryAtRef.current = Date.now() + UPGRADE_RETRY_MS;
+              timer = setTimeout(poll, UPGRADE_RETRY_MS);
+              return;
+            }
+            releaseUnused(next.hash, `upgrade dropped: ${why}`);
+          }
           if (res === 'switched' || res === 'abandoned' || res === 'cancelled' || ctrl.signal.aborted) return;
           if (res === 'busy') {
             upgradedRef.current = false;
@@ -882,7 +938,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     <div ref={containerRef} className="fixed inset-0 z-[100] bg-black flex items-center justify-center select-none">
       {phase === 'ready' && (
         <PlayerCore
-          key={`${itemKey}-${attempt}`}
+          key={resolved.n}
           magnet={item.magnet}
           source={resolved.source}
           startAt={resolved.startAt}
@@ -1126,6 +1182,19 @@ function PlayerCore({
   // The viewer picked a subtitle (or off) themselves; the list the default was picked for
   const subUserPicked = useRef(false);
   const subPickedFor = useRef<SubtitleItem[] | null>(null);
+  // Subtitles whose file could not be loaded (quota, errors): greyed in the panel, never tried again
+  const [failedSubs, setFailedSubs] = useState<ReadonlySet<string>>(() => new Set());
+  const failedSubsRef = useRef(failedSubs);
+  const subsRef = useRef(subs);
+  subsRef.current = subs;
+  // Short notice above the controls (OpenSubtitles' daily limit), once per player
+  const [subNotice, setSubNotice] = useState<MessageKey | ''>('');
+  const quotaNoticeRef = useRef(false);
+  useEffect(() => {
+    if (!subNotice) return;
+    const timer = setTimeout(() => setSubNotice(''), 4000);
+    return () => clearTimeout(timer);
+  }, [subNotice]);
   const subIdRef = useRef(subId);
   subIdRef.current = subId;
   const onSubtitleStateRef = useRef(onSubtitleState);
@@ -1136,8 +1205,9 @@ function PlayerCore({
     let cancelled = false;
     (async () => {
       if (source) {
-        // Make sure TorrServer has the torrent (it may have been dropped since it was saved)
-        if (source.magnet) {
+        // Make sure TorrServer has the torrent (it may have been dropped since it was saved).
+        // A TorBox source plays from TorBox, so TorrServer is left out.
+        if (source.magnet && !source.debrid) {
           try {
             await fetch(`${apiUrl}/api/torrent-stream/files?magnet=${encodeURIComponent(source.magnet)}`);
           } catch {
@@ -1175,7 +1245,11 @@ function PlayerCore({
   exactRef.current = startPoint.exact;
   // Before the seekpoint answers this may run up to one keyframe interval ahead
   const position = offset + current;
-  if (positionRef) positionRef.current = position;
+  // The session's position (the parent's ref outlives this PlayerCore): only a running stream
+  // writes it, so a PlayerCore that is still opening its file never reports 0
+  const ownPosRef = useRef(startAt);
+  const knownPosRef = positionRef ?? ownPosRef;
+  if (stream) knownPosRef.current = position;
   const filePosRef = useRef(0);
   filePosRef.current = position;
 
@@ -1248,7 +1322,9 @@ function PlayerCore({
 
   // Restart the stream at `target` right away. Copied video can only start on a keyframe,
   // so /seekpoint runs in parallel and its answer becomes the offset as soon as it arrives.
-  const restartAt = useCallback((target: number) => {
+  const restartAt = useCallback((requested: number, userAsked = false) => {
+    // Only the viewer sends the stream back to the start (rewindGuard.ts)
+    const target = guardedStart(requested, knownPosRef.current, userAsked);
     const hash = hashRef.current;
     const file = fileRef.current;
     if (!hash || !file) return;
@@ -1295,7 +1371,7 @@ function PlayerCore({
         setStartPoint({ t, exact: true });
       }
     })();
-  }, [apiUrl, beginStall]);
+  }, [apiUrl, beginStall, knownPosRef]);
 
   // 2) Probe the chosen file for duration, video info and audio tracks
   useEffect(() => {
@@ -1462,6 +1538,21 @@ function PlayerCore({
     }));
   }, [subs, duration, audioTracks, audio, locale]);
 
+  // A subtitle file failed (OpenSubtitles' daily limit, a provider error): the next one of the same
+  // language from another provider is shown instead (subtitles.ts nextSubtitleAfterFailure)
+  const subtitleFailed = useCallback((id: string, why: SubtitleFailure) => {
+    const failed = new Set(failedSubsRef.current);
+    failed.add(id);
+    failedSubsRef.current = failed;
+    setFailedSubs(failed);
+    if (why === 'quota' && !quotaNoticeRef.current) {
+      quotaNoticeRef.current = true;
+      setSubNotice('player.subQuotaReached');
+    }
+    const next = nextSubtitleAfterFailure(subsRef.current || [], id, why, failed);
+    if (next && subIdRef.current === id) setSubId(next);
+  }, []);
+
   useEffect(() => {
     if (!subId) { setCues([]); return; }
     let cancelled = false;
@@ -1469,6 +1560,11 @@ function PlayerCore({
     // A live embedded track (big file) is read from the playing position on: ask again while it grows
     const load = () => fetchSubtitleFile(subId, filePosRef.current).then(f => {
       if (cancelled) return;
+      if (f.failed) {
+        setCues([]);
+        subtitleFailed(subId, f.failed);
+        return;
+      }
       if (f.cues.length > 0 || !f.partial) setCues(f.cues);
       if (f.partial) timer = setTimeout(load, LIVE_CUES_POLL_MS);
     });
@@ -1678,12 +1774,12 @@ function PlayerCore({
         setCurrent(rel);
         if (nativeSeekTimer.current) clearTimeout(nativeSeekTimer.current);
         nativeSeekTimer.current = setTimeout(() => {
-          if (videoRef.current?.seeking) restartAt(target);
+          if (videoRef.current?.seeking) restartAt(target, true);
         }, 4000);
         return;
       }
     }
-    restartAt(target);
+    restartAt(target, true);
   }, [duration, offset, stream, ended, restartAt]);
 
   const togglePlay = useCallback(() => {
@@ -1843,6 +1939,8 @@ function PlayerCore({
     swap: p => adoptFnRef.current(p),
   }), [apiUrl]);
 
+  // Why the last preparation was dropped (CoreSwitch.failure)
+  const lastPrepFailRef = useRef('');
   // One preparation at a time; only while the visible stream plays (or is paused) smoothly
   const prepareSwitch = useCallback((next: StreamSource, kind: SwitchKind): Promise<SwitchResult> => {
     if (prepRef.current || finishFadeRef.current) return Promise.resolve('busy');
@@ -1853,11 +1951,18 @@ function PlayerCore({
     }
     const prep = new SwitchPrep(switchHost, next, kind);
     prepRef.current = prep;
-    return prep.promise.finally(() => { if (prepRef.current === prep) prepRef.current = null; });
+    return prep.promise.then(res => {
+      if (res === 'abandoned') {
+        lastPrepFailRef.current = prep.reason || 'unknown';
+        console.warn(`[nextflix] ${kind} to ${prep.hash.slice(0, 8)}:${next.index}${next.debrid ? ' (TorBox)' : ''} dropped: ${prep.reason}`);
+      }
+      return res;
+    }).finally(() => { if (prepRef.current === prep) prepRef.current = null; });
   }, [switchHost]);
 
   const coreSwitch = useMemo<CoreSwitch>(() => ({
     prepare: prepareSwitch,
+    failure: () => lastPrepFailRef.current,
     preparing: () => (prepRef.current ? { kind: prepRef.current.kind, ready: prepRef.current.isReady } : null),
     busy: () => !!prepRef.current || !!finishFadeRef.current,
     cancel: () => prepRef.current?.cancel('cancelled'),
@@ -1908,14 +2013,6 @@ function PlayerCore({
     }, 3000);
     return () => clearInterval(timer);
   }, [recover]);
-
-  // Dev only: prepare a seamless switch from the console / a test (`__nfxDebugSwitch({ hash, index })`)
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'production') return;
-    const w = window as unknown as { __nfxDebugSwitch?: (s: { hash: string; index: number }) => Promise<SwitchResult> };
-    w.__nfxDebugSwitch = s => prepareSwitch({ hash: s.hash, index: s.index }, 'sidegrade');
-    return () => { delete w.__nfxDebugSwitch; };
-  }, [prepareSwitch]);
 
   useEffect(() => {
     if (!switchNote) return;
@@ -2152,6 +2249,11 @@ function PlayerCore({
           <div className="flex items-center gap-1.5 shrink-0" title={badge.tip}>
             <span className={BADGE_CLASS}>{badge.label}</span>
             {badge.hdr && <span className={BADGE_CLASS}>HDR</span>}
+            {shownSource?.debrid && (
+              <span className={BADGE_CLASS} title={t('player.debridBadgeTitle')}>
+                ⚡ {t('player.debridBadge')}
+              </span>
+            )}
           </div>
         )}
         {files.length > 1 && !!file && (
@@ -2160,6 +2262,12 @@ function PlayerCore({
           </button>
         )}
       </div>
+
+      {!!subNotice && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded bg-black/80 border border-white/20 text-white text-sm shadow-lg pointer-events-none" role="status">
+          {t(subNotice)}
+        </div>
+      )}
 
       {/* Quiet note after a seamless upgrade, where the quality badge sits */}
       {!!switchNote && !controlsVisible && (
@@ -2181,6 +2289,7 @@ function PlayerCore({
       {/* Bottom controls */}
       {playable && (
         <div className={`absolute bottom-0 inset-x-0 px-4 md:px-6 pb-4 pt-10 bg-gradient-to-t from-black/90 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
+          <SeekThumbnail apiUrl={apiUrl} hash={hash} index={file?.id} duration={duration} dragTime={seekPreview} position={position} playing={playing && !buffering}>
           <input
             type="range"
             min={0}
@@ -2195,6 +2304,7 @@ function PlayerCore({
             aria-label={t('player.seek')}
             style={{ background: `linear-gradient(to right, #E50914 ${fill(shownTime, duration)}%, rgba(255,255,255,0.3) ${fill(shownTime, duration)}%)` }}
           />
+          </SeekThumbnail>
           <div className="flex items-center gap-3 mt-2">
             <button onClick={togglePlay} className={ctl} title={t('player.playPause')} aria-label={t(playing ? 'player.pause' : 'player.play')}>
               {playing ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
@@ -2253,6 +2363,7 @@ function PlayerCore({
           originalLang={meta?.original_language}
           subtitles={meta?.tmdb_id ? subs : []}
           subtitleId={subId}
+          failedSubtitles={failedSubs}
           onSubtitle={chooseSubtitle}
           delay={subDelay}
           onDelay={setSubDelay}

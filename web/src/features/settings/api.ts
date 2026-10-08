@@ -104,3 +104,78 @@ export async function saveSubtitleSettings(input: SubtitleSettingsInput): Promis
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
+
+// TorBox debrid. The key is write-only: only api_key_set comes back.
+export interface DebridSettings {
+  torbox: { api_key_set: boolean; enabled: boolean; prefer: boolean; add_uncached: boolean };
+}
+
+// Empty or omitted api_key keeps the stored key, null clears it.
+export interface DebridSettingsInput {
+  torbox?: { api_key?: string | null; enabled?: boolean; prefer?: boolean; add_uncached?: boolean };
+}
+
+export interface DebridTestResult {
+  success: boolean;
+  message: string;
+  planName?: string;
+  expiresAt?: string | null;
+  active?: boolean;
+}
+
+function toDebridSettings(data: Partial<DebridSettings> | null): DebridSettings {
+  const tb = data?.torbox;
+  return {
+    torbox: {
+      api_key_set: !!tb?.api_key_set,
+      enabled: tb?.enabled !== false,
+      prefer: tb?.prefer !== false,
+      add_uncached: !!tb?.add_uncached,
+    },
+  };
+}
+
+export async function getDebridSettings(signal?: AbortSignal): Promise<DebridSettings> {
+  const res = await fetch(`${getApiUrl()}/api/settings/debrid`, { signal, cache: 'no-store' });
+  if (!res.ok) throw new Error(await readError(res));
+  return toDebridSettings(await res.json());
+}
+
+export async function saveDebridSettings(input: DebridSettingsInput): Promise<DebridSettings> {
+  const res = await fetch(`${getApiUrl()}/api/settings/debrid`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return toDebridSettings(await res.json());
+}
+
+// Checks a key (empty: the stored one) with TorBox's user/me: plan and expiry.
+export async function testDebrid(apiKey: string): Promise<DebridTestResult> {
+  const res = await fetch(`${getApiUrl()}/api/settings/debrid/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ torbox: { api_key: apiKey } }),
+  });
+  let body: {
+    success?: boolean;
+    error?: string;
+    plan_name?: string;
+    premium_expires_at?: string | null;
+    active?: boolean;
+  } = {};
+  try {
+    body = await res.json();
+  } catch {
+    /* empty body */
+  }
+  const success = res.ok && body.success !== false;
+  return {
+    success,
+    message: success ? '' : body.error || `Test failed (${res.status})`,
+    planName: body.plan_name,
+    expiresAt: body.premium_expires_at ?? null,
+    active: body.active,
+  };
+}

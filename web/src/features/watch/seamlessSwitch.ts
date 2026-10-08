@@ -57,8 +57,11 @@ export interface SwitchHost {
   swap(p: PreparedStream): void;
 }
 
-// The hidden stream starts this far ahead of the visible position (more after it fell behind)
+// The hidden stream starts this far ahead of the visible position (more after it fell behind).
+// A TorBox file needs ~4 s for its seekpoint and ~4.5 s to its first bytes (every ffmpeg seek is
+// a new CDN request), so 8 s were always overtaken before the first frame.
 const LEAD_S = 8;
+const LEAD_DEBRID_S = 20;
 // Ready: this much buffered from the switch point (less once the browser stopped fetching on its own)
 const READY_AHEAD_S = 5;
 const READY_MIN_S = 2;
@@ -121,7 +124,12 @@ export class SwitchPrep {
   private done = false;
   private ctrl = new AbortController();
   private info: { duration: number; tracks: AudioTrackInfo[]; video: VideoInfo | null } | null = null;
-  private stream: { t: number; offset: number; url: string; audio: number } | null = null;
+  // offset < 0: the seekpoint has not answered yet (it runs next to the play request)
+  private stream: { t: number; offset: number; url: string; audio: number; startedAt: number } | null = null;
+  // How far ahead of the visible position the hidden stream starts; grows when it was overtaken
+  private lead: number;
+  // Why the preparation was dropped (for the console and the server log)
+  private why = '';
   // Bumped whenever the hidden stream is dropped, so stale async steps stop
   private gen = 0;
   private ready = false;
@@ -135,6 +143,9 @@ export class SwitchPrep {
   private waitSettle = false;
   private lateRestarts = 0;
   private seekRestarts = 0;
+  // Extra lead after a keyframe came out too close to the visible position
+  private farLead = 0;
+  private farTries = 0;
   private deadline: ReturnType<typeof setTimeout> | null = null;
   private poll: ReturnType<typeof setInterval> | null = null;
   private lifetime: ReturnType<typeof setTimeout> | null = null;
@@ -144,7 +155,8 @@ export class SwitchPrep {
 
   constructor(private host: SwitchHost, readonly source: StreamSource, readonly kind: SwitchKind) {
     this.promise = new Promise(resolve => { this.finish = resolve; });
-    this.lifetime = setTimeout(() => this.abandon(), MAX_PREP_MS);
+    this.lead = source.debrid ? LEAD_DEBRID_S : LEAD_S;
+    this.lifetime = setTimeout(() => this.abandon('abandoned', 'not switched within 5 minutes'), MAX_PREP_MS);
     this.run();
   }
 
@@ -157,8 +169,13 @@ export class SwitchPrep {
     return this.ready;
   }
 
+  /** Why an abandoned preparation was dropped ('' otherwise) */
+  get reason() {
+    return this.why;
+  }
+
   cancel(result: 'abandoned' | 'cancelled' = 'abandoned') {
-    this.abandon(result);
+    this.abandon(result, result === 'cancelled' ? 'cancelled by the player' : 'dropped by the player');
   }
 
   // The visible stream restarts or seeks to target: drop the hidden stream unless it still lies ahead
@@ -169,11 +186,11 @@ export class SwitchPrep {
     const s = this.stream;
     // A hidden video already playing for the swap no longer lines up
     if (el && s && !force && !this.handover) {
-      const start = s.offset + Math.max(0, el.currentTime);
-      if (start > target + 1 && start - target < LEAD_S * (2 + this.lateRestarts)) return;
+      const start = (s.offset >= 0 ? s.offset : s.t) + Math.max(0, el.currentTime);
+      if (start > target + 1 && start - target < this.lead * 2) return;
     }
     if (++this.seekRestarts > MAX_SEEK_RESTARTS) {
-      this.abandon();
+      this.abandon('abandoned', `${MAX_SEEK_RESTARTS} seeks during the preparation`);
       return;
     }
     this.dropStream();
@@ -186,8 +203,9 @@ export class SwitchPrep {
     const src = this.source;
     const hash = this.hash;
     try {
-      // TorrServer may have dropped the torrent since the server offered it
-      if (src.magnet) {
+      // TorrServer may have dropped the torrent since the server offered it (a TorBox source
+      // plays from TorBox and never goes through TorrServer)
+      if (src.magnet && !src.debrid) {
         await fetchJson(`${apiUrl}/api/torrent-stream/files?magnet=${encodeURIComponent(src.magnet)}`, this.ctrl.signal, 30000).catch(() => null);
       }
       if (this.done) return;
@@ -199,7 +217,9 @@ export class SwitchPrep {
       const dur = Number(data?.duration) || 0;
       const cur = this.host.duration();
       if (!ok || data.duration_mismatch || dur <= 0 || (cur > 0 && Math.abs(dur - cur) > DURATION_TOLERANCE_S)) {
-        this.abandon();
+        this.abandon('abandoned', !ok ? `probe failed (${data?.error || 'no answer'})`
+          : data.duration_mismatch ? 'duration does not fit the title'
+            : `length ${dur.toFixed(1)} s vs ${cur.toFixed(1)} s playing`);
         return;
       }
       this.info = {
@@ -207,8 +227,8 @@ export class SwitchPrep {
         tracks: Array.isArray(data.audio_tracks) ? data.audio_tracks : [],
         video: data.width > 0 ? { codec: data.video_codec || '', width: data.width, height: data.height || 0, hdr: !!data.hdr, direct: !!data.direct } : null,
       };
-    } catch {
-      this.abandon();
+    } catch (e) {
+      this.abandon('abandoned', `probe failed (${(e as Error)?.name === 'AbortError' ? 'timeout' : 'network'})`);
       return;
     }
     this.armDeadline();
@@ -220,7 +240,9 @@ export class SwitchPrep {
 
   private armDeadline() {
     if (this.deadline) clearTimeout(this.deadline);
-    this.deadline = setTimeout(() => { if (!this.ready) this.abandon(); }, READY_TIMEOUT_MS);
+    this.deadline = setTimeout(() => {
+      if (!this.ready) this.abandon('abandoned', `not ready within ${READY_TIMEOUT_MS / 1000} s`);
+    }, READY_TIMEOUT_MS);
   }
 
   private async startStream() {
@@ -229,48 +251,27 @@ export class SwitchPrep {
     const el = this.host.hidden();
     if (this.done || !info || !v || !el) return;
     const gen = ++this.gen;
-    let lead = LEAD_S * (1 + this.lateRestarts);
+    let lead = this.lead + this.farLead;
     if (this.kind === 'sidegrade') {
       // The visible stream may be draining: switch inside what it still has, with a smaller ready margin
       const ahead = this.host.bufferedAhead();
       lead = Math.min(lead, Math.max(MIN_LEAD_S, ahead - SIDE_MARGIN_S));
       this.readyAhead = ahead < LEAD_S + READY_AHEAD_S ? READY_MIN_S : READY_AHEAD_S;
     }
-    let target = this.host.offset() + v.currentTime + lead;
+    const visiblePos = () => this.host.offset() + v.currentTime;
+    const target = visiblePos() + lead;
+    if (target > info.duration - NEAR_END_S) {
+      this.abandon('abandoned', 'too close to the end');
+      return;
+    }
     const audio = info.tracks.length > 0
       ? matchAudioTrack(info.tracks, this.host.currentAudio(), () => this.host.defaultAudio(info.tracks))
       : 0;
-    let q = '';
-    let offset = -1;
-    // The t the play URL asks for (target moves on after the last try)
-    let reqT = target;
-    // Copied video starts on the keyframe before target; with long GOPs that can be close to
-    // (or behind) the visible position, so ask again further ahead
-    for (let i = 0; i < 3; i++) {
-      if (target > info.duration - NEAR_END_S) {
-        this.abandon();
-        return;
-      }
-      reqT = target;
-      q = `hash=${this.hash}&index=${this.source.index}&t=${target.toFixed(3)}&audio=${audio}${capsQuery()}`;
-      offset = -1;
-      try {
-        const { ok, data } = await fetchJson(`${this.host.apiUrl}/api/torrent-stream/seekpoint?${q}`, this.ctrl.signal, 15000);
-        if (ok && typeof data.t === 'number' && data.t >= 0 && data.t <= target + 1) offset = data.t;
-      } catch {
-        /* handled below */
-      }
-      if (this.done || gen !== this.gen) return;
-      // Without the real start the frames can't be lined up
-      if (offset < 0) {
-        this.abandon();
-        return;
-      }
-      if (offset >= this.host.offset() + v.currentTime + lead / 2) break;
-      target += lead;
-    }
+    const q = `hash=${this.hash}&index=${this.source.index}&t=${target.toFixed(3)}&audio=${audio}${capsQuery()}`;
     const url = `${this.host.apiUrl}/api/torrent-stream/play?${q}`;
-    this.stream = { t: reqT, offset, url, audio };
+    // The play request starts at once; its real start (seekpoint) is asked next to it, since
+    // waiting for one before the other costs seconds on a TorBox file
+    this.stream = { t: target, offset: -1, url, audio, startedAt: Date.now() };
     this.ready = false;
     this.suspended = false;
     this.seekingHidden = false;
@@ -280,13 +281,41 @@ export class SwitchPrep {
     const onCheck = () => this.check();
     const onSuspend = () => { this.suspended = true; this.check(); };
     const onSeeked = () => { this.seekingHidden = false; this.check(); };
-    const onError = () => { if (el.getAttribute('src')) this.abandon(); };
+    const onError = () => { if (el.getAttribute('src')) this.abandon('abandoned', `hidden stream error ${el.error?.code ?? ''}`.trim()); };
     const events: [string, () => void][] = [
       ['progress', onCheck], ['loadeddata', onCheck], ['canplay', onCheck], ['canplaythrough', onCheck],
       ['suspend', onSuspend], ['seeked', onSeeked], ['error', onError],
     ];
     events.forEach(([n, f]) => el.addEventListener(n, f));
     this.unlisten = () => events.forEach(([n, f]) => el.removeEventListener(n, f));
+
+    let offset = -1;
+    try {
+      const { ok, data } = await fetchJson(`${this.host.apiUrl}/api/torrent-stream/seekpoint?${q}`, this.ctrl.signal, 15000);
+      if (ok && typeof data.t === 'number' && data.t >= 0 && data.t <= target + 1) offset = data.t;
+    } catch {
+      /* handled below */
+    }
+    if (this.done || gen !== this.gen || !this.stream) return;
+    // Without the real start the frames can't be lined up
+    if (offset < 0) {
+      this.abandon('abandoned', 'seekpoint failed');
+      return;
+    }
+    // Copied video starts on the keyframe before target; with long GOPs that can be close to
+    // (or behind) the visible position, so start again further ahead
+    if (offset < visiblePos() + lead / 2) {
+      if (++this.farTries > 2) {
+        this.abandon('abandoned', 'keyframe too close to the visible position');
+        return;
+      }
+      this.farLead += lead;
+      this.dropStream();
+      this.startStream();
+      return;
+    }
+    this.stream.offset = offset;
+    this.check();
   }
 
   // Drop the hidden stream (seek, fell behind) but keep the probe
@@ -319,7 +348,8 @@ export class SwitchPrep {
       return;
     }
     const s = this.stream;
-    if (!s) return;
+    // Nothing lines up before the seekpoint answered
+    if (!s || s.offset < 0) return;
     if (!this.ready) {
       // The visible stream stalled first: a hidden stream that already holds this moment takes over now
       if (el.readyState >= 2) {
@@ -348,9 +378,13 @@ export class SwitchPrep {
 
   private restartLate() {
     if (++this.lateRestarts > MAX_LATE_RESTARTS) {
-      this.abandon();
+      this.abandon('abandoned', `overtaken ${MAX_LATE_RESTARTS} times (last lead ${Math.round(this.lead)} s)`);
       return;
     }
+    // Start further ahead: at least as far as this try ran without getting ready
+    const took = this.stream ? (Date.now() - this.stream.startedAt) / 1000 : 0;
+    const step = this.source.debrid ? LEAD_DEBRID_S : LEAD_S;
+    this.lead = Math.max(this.lead + step, Math.ceil(took + READY_AHEAD_S + 2));
     this.dropStream();
     this.startStream();
   }
@@ -406,7 +440,7 @@ export class SwitchPrep {
     const el = this.host.hidden();
     const s = this.stream;
     if (!v || !el || !s || !this.host.stalled()) return false;
-    if (this.seekingHidden || !this.host.offsetExact()) return true;
+    if (this.seekingHidden || !this.host.offsetExact() || s.offset < 0) return true;
     const rel = this.host.offset() + v.currentTime - s.offset;
     if (!covers(el, rel, 1.5)) return true;
     if (Math.abs(el.currentTime - rel) > 0.08) this.seekHidden(el, rel);
@@ -432,7 +466,7 @@ export class SwitchPrep {
     const fail = () => {
       if (gen !== this.gen || this.done) return;
       this.stopHandover();
-      this.abandon();
+      this.abandon('abandoned', 'the hidden video did not play at the handover');
     };
     el.play().catch(fail);
     const timer = setInterval(() => {
@@ -474,9 +508,10 @@ export class SwitchPrep {
     this.finish('switched');
   }
 
-  private abandon(result: 'abandoned' | 'cancelled' = 'abandoned') {
+  private abandon(result: 'abandoned' | 'cancelled' = 'abandoned', why = '') {
     if (this.done) return;
     this.done = true;
+    this.why = why;
     this.cleanup();
     const el = this.host.hidden();
     if (el && el.getAttribute('src')) {

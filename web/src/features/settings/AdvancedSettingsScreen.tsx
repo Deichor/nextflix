@@ -6,6 +6,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import PageShell from '@/features/shell/PageShell';
 import { useT } from '@/shared/i18n';
 import IndexerCard from '@/features/settings/components/IndexerCard';
+import DebridCard from '@/features/settings/components/DebridCard';
 import SubtitlesSection from '@/features/settings/SubtitlesSection';
 
 export default function AdvancedSettingsScreen() {
@@ -27,6 +28,7 @@ export default function AdvancedSettingsScreen() {
 
         <div className="space-y-6">
           <IndexerCard />
+          <DebridCard />
           <SubtitlesSection />
         </div>
       </div>
