@@ -353,6 +353,37 @@ export async function resolveSource(
   return res.json();
 }
 
+// How a saved source (Continue Watching, a resumed episode) plays: from TorBox when it has the
+// release cached, from its swarm when that keeps up at `t`, else 'resolve' (search again without
+// it). null when the server could not tell (old server, network): play the saved source as is.
+export interface ReuseAnswer {
+  action: 'play' | 'resolve';
+  reason?: string;
+  source?: ResolvedSource;
+}
+
+export async function reuseSource(
+  params: ResolveParams,
+  saved: { hash: string; index: number; magnet?: string },
+  t: number,
+  signal?: AbortSignal,
+): Promise<ReuseAnswer | null> {
+  const q = addCaps(resolveQuery(params));
+  q.set('hash', saved.hash.toLowerCase());
+  q.set('index', String(saved.index));
+  if (saved.magnet) q.set('magnet', saved.magnet);
+  if (t > 0) q.set('t', String(Math.round(t)));
+  try {
+    const res = await fetch(`${getApiUrl()}/api/torrent-stream/reuse?${q.toString()}`, { signal });
+    if (!res.ok) return null;
+    const a = (await res.json()) as ReuseAnswer;
+    return a?.action === 'resolve' || (a?.action === 'play' && a.source?.hash) ? a : null;
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw e;
+    return null;
+  }
+}
+
 // A better source than the playing one (`current` hash of `currentQuality` lines) once the
 // server has warmed one up that keeps up, else null. The server may start a background search.
 export async function checkUpgrade(

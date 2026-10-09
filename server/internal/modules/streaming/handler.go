@@ -30,6 +30,7 @@ func (h handler) files(c *gin.Context) {
 		return
 	}
 	h.s.touch(tsHashFromMagnet(magnet))
+	h.s.adoptSaved(tsHashFromMagnet(magnet))
 	// A TorBox source is listed from what is known: TorrServer never loads it (debrid.go)
 	var debridStat tsTorrentStat
 	if ok, err := h.s.debridStat(magnet, &debridStat); ok && err == nil {
@@ -82,6 +83,7 @@ func (h handler) probe(c *gin.Context) {
 		return
 	}
 	h.s.touch(hash)
+	h.s.adoptSaved(hash) // a saved TorBox source after a restart plays from TorBox
 	// The player reads the header right before it plays: background work of other torrents waits
 	h.s.probeBegin(hash)
 	p, err := h.s.probeFile(c.Request.Context(), hash, index)

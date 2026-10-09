@@ -5,6 +5,7 @@
 import { capsQuery, runtimeCheckQuery, type StreamMeta, type StreamSource } from '@/features/watch/api';
 import { normLang, type AudioTrackInfo } from '@/features/watch/subtitles';
 import { bufferedEnd } from '@/features/watch/bufferHealth';
+import { lengthsMatch, timeScale } from '@/features/watch/switchLength';
 
 // subtitles: a release that carries the profile's subtitle, picked by the viewer
 export type SwitchKind = 'upgrade' | 'sidegrade' | 'subtitles';
@@ -77,8 +78,7 @@ const MAX_SEEK_RESTARTS = 4;
 const SWITCH_WINDOW_S = 0.05;
 // The visible video passed the hidden frame by more than this: catch up inside the buffer or restart
 const LATE_S = 0.25;
-// Files whose lengths differ by more are different cuts; the same position would not match
-const DURATION_TOLERANCE_S = 3;
+// Other lengths: see switchLength.ts (same title within max(30 s, 1 %), mapped by scale)
 const NEAR_END_S = 30;
 // Whatever happens (long pause, a hidden seek that never finishes), a preparation ends by then
 const MAX_PREP_MS = 5 * 60 * 1000;
@@ -124,6 +124,8 @@ export class SwitchPrep {
   private done = false;
   private ctrl = new AbortController();
   private info: { duration: number; tracks: AudioTrackInfo[]; video: VideoInfo | null } | null = null;
+  // New-file seconds per playing-file second (1 unless the lengths differ by more than 10 s)
+  private scale = 1;
   // offset < 0: the seekpoint has not answered yet (it runs next to the play request)
   private stream: { t: number; offset: number; url: string; audio: number; startedAt: number } | null = null;
   // How far ahead of the visible position the hidden stream starts; grows when it was overtaken
@@ -200,7 +202,7 @@ export class SwitchPrep {
     const s = this.stream;
     // A hidden video already playing for the swap no longer lines up
     if (el && s && !force && !this.handover) {
-      const start = (s.offset >= 0 ? s.offset : s.t) + Math.max(0, el.currentTime);
+      const start = ((s.offset >= 0 ? s.offset : s.t) + Math.max(0, el.currentTime)) / this.scale;
       if (start > target + 1 && start - target < this.lead * 2) return;
     }
     if (++this.seekRestarts > MAX_SEEK_RESTARTS) {
@@ -230,12 +232,13 @@ export class SwitchPrep {
       if (this.done) return;
       const dur = Number(data?.duration) || 0;
       const cur = this.host.duration();
-      if (!ok || data.duration_mismatch || dur <= 0 || (cur > 0 && Math.abs(dur - cur) > DURATION_TOLERANCE_S)) {
+      if (!ok || data.duration_mismatch || dur <= 0 || !lengthsMatch(cur, dur)) {
         this.abandon('abandoned', !ok ? `probe failed (${data?.error || 'no answer'})`
           : data.duration_mismatch ? 'duration does not fit the title'
             : `length ${dur.toFixed(1)} s vs ${cur.toFixed(1)} s playing`);
         return;
       }
+      this.scale = timeScale(cur, dur);
       this.info = {
         duration: dur,
         tracks: Array.isArray(data.audio_tracks) ? data.audio_tracks : [],
@@ -273,7 +276,8 @@ export class SwitchPrep {
       this.readyAhead = ahead < LEAD_S + READY_AHEAD_S ? READY_MIN_S : READY_AHEAD_S;
     }
     const visiblePos = () => this.host.offset() + v.currentTime;
-    const target = visiblePos() + lead;
+    // In the new file's time (the same moment when the lengths differ a little)
+    const target = (visiblePos() + lead) * this.scale;
     if (target > info.duration - NEAR_END_S) {
       this.abandon('abandoned', 'too close to the end');
       return;
@@ -318,7 +322,7 @@ export class SwitchPrep {
     }
     // Copied video starts on the keyframe before target; with long GOPs that can be close to
     // (or behind) the visible position, so start again further ahead
-    if (offset < visiblePos() + lead / 2) {
+    if (offset < (visiblePos() + lead / 2) * this.scale) {
       if (++this.farTries > 2) {
         this.abandon('abandoned', 'keyframe too close to the visible position');
         return;
@@ -384,7 +388,7 @@ export class SwitchPrep {
       if (!this.ready && this.host.offsetExact()) {
         const pos = this.host.offset() + v.currentTime;
         const end = Math.max(0, bufferedEnd(el.buffered, el.currentTime));
-        if (pos > s.offset + end + LATE_S) this.restartLate();
+        if (pos > (s.offset + end) / this.scale + LATE_S) this.restartLate();
       }
       return;
     }
@@ -431,7 +435,7 @@ export class SwitchPrep {
     const el = this.host.hidden();
     const s = this.stream;
     if (this.done || this.handover || !this.ready || !s || !v || !el || this.seekingHidden || !this.host.offsetExact()) return;
-    const pos = this.host.offset() + (mediaTime ?? v.currentTime);
+    const pos = (this.host.offset() + (mediaTime ?? v.currentTime)) * this.scale;
     const rel = pos - s.offset;
     if (this.takeOverStall()) return;
     if (v.paused) return;
@@ -456,7 +460,7 @@ export class SwitchPrep {
     const s = this.stream;
     if (!v || !el || !s || !this.host.stalled()) return false;
     if (this.seekingHidden || !this.host.offsetExact() || s.offset < 0) return true;
-    const rel = this.host.offset() + v.currentTime - s.offset;
+    const rel = (this.host.offset() + v.currentTime) * this.scale - s.offset;
     if (!covers(el, rel, 1.5)) return true;
     if (Math.abs(el.currentTime - rel) > 0.08) this.seekHidden(el, rel);
     else this.swap();

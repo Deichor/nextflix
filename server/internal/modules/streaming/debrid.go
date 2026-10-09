@@ -93,6 +93,8 @@ type tsDebrid struct {
 	downWhy   string
 	added     map[string]bool // hashes sent with "add uncached"
 	addTimes  []time.Time
+	// hash -> last look for a cached TorBox source naming it (adoptSaved, reuse.go)
+	adoptTried map[string]time.Time
 
 	cache     tsProxyCache // chunks of the file proxy (debrid_proxy.go)
 	proxyOnce sync.Once
@@ -108,7 +110,7 @@ func newDebrid(s *Service, base string) *tsDebrid {
 		checks: map[string]tsDebridCheck{}, sources: map[string]tsDebridSource{}, torrents: map[string]int64{},
 		links: map[string]*tsDebridLink{}, calls: map[string]*tsDebridCall{}, remaps: map[string]int{},
 		broken: map[string]time.Time{}, warmed: map[string]time.Time{},
-		added: map[string]bool{},
+		added: map[string]bool{}, adoptTried: map[string]time.Time{},
 	}
 }
 
@@ -721,6 +723,7 @@ type DebridFile struct {
 
 // DebridFiles lists the files of a debrid source's torrent (subtitle files next to the video).
 func (s *Service) DebridFiles(hash string) ([]DebridFile, bool) {
+	s.adoptSaved(strings.ToLower(hash))
 	src, ok := s.debrid.hashSource(hash)
 	if !ok {
 		return nil, false
@@ -740,7 +743,9 @@ func (s *Service) DebridFiles(hash string) ([]DebridFile, bool) {
 
 // DebridFileURL is the URL the subtitle reads use for a debrid file ("" for other files).
 func (s *Service) DebridFileURL(hash string, index int) string {
-	u, ok := s.debridURL(strings.ToLower(hash), index)
+	hash = strings.ToLower(hash)
+	s.adoptSaved(hash)
+	u, ok := s.debridURL(hash, index)
 	if !ok {
 		return ""
 	}

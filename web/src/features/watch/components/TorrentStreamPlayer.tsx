@@ -39,6 +39,7 @@ import {
   StreamSource,
   SeasonInfo,
   resolveSource,
+  reuseSource,
   prefetchResolve,
   findProgress,
   getTitleProgress,
@@ -135,6 +136,9 @@ type SourceOrigin = 'given' | 'saved' | 'cached' | 'fresh';
 const STALL_MS = 12000;
 // The first start may wait for peers, so it gets more time
 const FIRST_START_MS = 30000;
+// A torrent without a first frame this long after it opened hands over to a faster source
+// (sidegrade, else a fresh resolve without it) instead of restarting the same swarm
+const SLOW_START_MS = 12000;
 const MAX_RECOVERIES = 3;
 // A failed source is resolved again (without it) this many times per item before an error shows
 const MAX_AUTO_REFRESH = 3;
@@ -325,7 +329,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const [unreleased, setUnreleased] = useState<Availability | null>(null);
   const [itemKey, setItemKey] = useState(0);
   const [attempt, setAttempt] = useState(0);
-  const [phase, setPhase] = useState<'resolving' | 'ready' | 'error'>(source || magnet ? 'ready' : 'resolving');
+  // A saved source with title info is checked by the server first (reuseSource), so it starts resolving
+  const [phase, setPhase] = useState<'resolving' | 'ready' | 'error'>((source && !meta) || (magnet && !source) ? 'ready' : 'resolving');
   // n keys PlayerCore: a new source always mounts a new PlayerCore with that source's props.
   // (Keyed by attempt, it mounted once with the previous source and start, so a hard switch
   // started the new source at the session's first start position, usually 0.)
@@ -345,8 +350,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const [seasons, setSeasons] = useState<SeasonInfo[]>(seasonsProp || []);
   const [fullscreen, setFullscreen] = useState(false);
   // Set right before bumping `attempt`: resolve again skipping caches (or play switchTo), resuming at startAt.
-  // wrongLength: the last file did not have the title's length.
-  const retryRef = useRef<{ refresh: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }>({ refresh: false });
+  // wrongLength: the last file did not have the title's length. fresh: resolve (with avoid) even though
+  // a saved or given source exists, without dropping the server's cached source.
+  const retryRef = useRef<{ refresh: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }>({ refresh: false });
   const autoRefreshesRef = useRef(0);
   // A recovery chain runs (restart, fallback, resolve without the failed source): one stable
   // overlay until frames run again, over the last frame when one was shown (frameRef)
@@ -416,7 +422,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       setPhase('ready');
       return;
     }
-    if ((item.source || item.magnet) && !retry.refresh) {
+    // A given source without title info (legacy magnet mode) plays as it is; a saved one with title
+    // info goes through the server's reuse check below
+    if ((item.source || item.magnet) && !retry.refresh && !retry.fresh && (!item.meta || !item.source)) {
       setResolved({ source: item.source, startAt: startPos || 0, origin: 'given' });
       setPhase('ready');
       return;
@@ -439,22 +447,39 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const tick = setInterval(() => setResolveElapsed(Date.now() - t0), 250);
     (async () => {
       try {
+        let start = startPos || 0;
         // Reuse the torrent saved with earlier progress instead of searching again
-        const pid = getActiveProfileId();
-        if (pid && !retry.refresh) {
-          const entries = await getTitleProgress(pid, m.media_type, m.tmdb_id);
+        let saved: StreamSource | undefined;
+        let origin: SourceOrigin = 'given';
+        if (!retry.refresh && !retry.fresh) {
+          const pid = getActiveProfileId();
+          if (item.source) {
+            saved = item.source;
+          } else if (pid) {
+            const entries = await getTitleProgress(pid, m.media_type, m.tmdb_id);
+            if (cancelled) return;
+            const p = m.media_type === 'tv' ? findProgress(entries, m.season || 0, m.episode || 0) : findProgress(entries);
+            if (p?.hash) {
+              saved = { hash: p.hash, index: p.file_index, magnet: p.magnet || undefined };
+              origin = 'saved';
+              start = item.startAt ?? (isFinished(p) ? 0 : Math.max(0, p.position - 5));
+            }
+          }
+        }
+        if (saved) {
+          // The same TorBox / swarm decision as resolve: TorBox when it has the release cached, the
+          // torrent when its swarm keeps up at the resume position, else a fresh resolve without it
+          const a = await reuseSource(paramsOf(m, capRef.current), saved, start, ctrl.signal);
           if (cancelled) return;
-          const saved = m.media_type === 'tv' ? findProgress(entries, m.season || 0, m.episode || 0) : findProgress(entries);
-          if (saved?.hash) {
-            const start = item.startAt ?? (isFinished(saved) ? 0 : Math.max(0, saved.position - 5));
-            setResolved({
-              source: { hash: saved.hash, index: saved.file_index, magnet: saved.magnet || undefined },
-              startAt: start,
-              origin: 'saved',
-            });
+          if (!a || a.action === 'play') {
+            const src = a?.source ? { ...sourceOf(a.source), starving: a.source.health?.keeps_up === false } : saved;
+            setResolved({ source: src, startAt: start, origin });
             setPhase('ready');
             return;
           }
+          const h = saved.hash.toLowerCase();
+          console.info(`[nextflix] saved source ${h.slice(0, 8)} not reused (${a.reason || 'slow'}): resolving again`);
+          if (!avoidRef.current.includes(h)) avoidRef.current = [...avoidRef.current, h];
         }
         const r = await resolveSource({
           type: m.media_type,
@@ -470,7 +495,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         if (cancelled) return;
         setResolved({
           source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: r.health?.keeps_up === false, ratio: healthRatio(r.health), debrid: r.debrid, cinema: r.cinema },
-          startAt: startPos || 0,
+          startAt: start,
           origin: r.cached ? 'cached' : 'fresh',
         });
         setPhase('ready');
@@ -531,7 +556,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     }
     const failed = resolved.source?.hash?.toLowerCase();
     if (auto && !reused && failed && !avoidRef.current.includes(failed)) avoidRef.current = [...avoidRef.current, failed];
-    retryRef.current = { refresh: !!item.meta, startAt: position };
+    // A source that failed before its first frame reports 0: it resumes where it was to start
+    retryRef.current = { refresh: !!item.meta, startAt: position > 0 ? position : resolvedRef.current.startAt };
     setAttempt(a => a + 1);
     return true;
   }, [resolved.origin, resolved.source, item.meta]);
@@ -555,7 +581,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const hardSwitch = useCallback((next: StreamSource) => {
     lastSwitchRef.current = Date.now();
     pendingStepDownRef.current = null;
-    retryRef.current = { refresh: false, startAt: positionRef.current, switchTo: next };
+    // Before the first frame of a resume the position is still the start the source opened at
+    const at = positionRef.current > 0 ? positionRef.current : resolvedRef.current.startAt;
+    retryRef.current = { refresh: false, startAt: at, switchTo: next };
     setAttempt(a => a + 1);
   }, []);
 
@@ -646,6 +674,17 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         slowRef.current.add(src.hash.toLowerCase());
         return true;
       }
+      // A TorBox source that keeps up but could not be lined up seamlessly: switch with the loading
+      // screen rather than stepping down a resolution
+      if (res === 'abandoned' && next.debrid && up.health?.keeps_up !== false && metaRef.current === m &&
+          coreSwitchRef.current?.failure() !== 'dropped by the player') {
+        console.info(`[nextflix] sidegrade to ${nextHash.slice(0, 8)} (TorBox) switches with a restart: ${coreSwitchRef.current?.failure() || 'unknown'}`);
+        pendingStepDownRef.current = null;
+        slowRef.current.add(src.hash.toLowerCase());
+        hardSwitch(next);
+        setToast('player.switchedFaster');
+        return true;
+      }
       if (res !== 'unavailable' || metaRef.current !== m) {
         releaseUnused(nextHash, res === 'abandoned' ? `sidegrade dropped: ${coreSwitchRef.current?.failure() || 'unknown'}` : undefined);
         // Not ready in time (or broken): not offered again this session
@@ -673,6 +712,25 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     }
     trySidegrade(quality).then(switched => { if (!switched) stepDown(quality); });
   }, [trySidegrade, stepDown]);
+
+  // A torrent showed no frame SLOW_START_MS after it opened (a swarm far below the bitrate): a
+  // sidegrade that keeps up, else resolve again without it at the same position (a TorBox or
+  // faster release). False when out of tries (the usual restarts go on).
+  const slowStart = useCallback((position: number) => {
+    const m = metaRef.current;
+    const src = playingSource;
+    if (!m || !src || src.debrid || autoRefreshesRef.current >= MAX_AUTO_REFRESH) return false;
+    const h = src.hash.toLowerCase();
+    slowRef.current.add(h);
+    trySidegrade(qualityRef.current).then(switched => {
+      if (switched || metaRef.current !== m) return;
+      autoRefreshesRef.current++;
+      if (!avoidRef.current.includes(h)) avoidRef.current = [...avoidRef.current, h];
+      retryRef.current = { refresh: false, fresh: true, startAt: position > 0 ? position : resolvedRef.current.startAt };
+      setAttempt(a => a + 1);
+    });
+    return true;
+  }, [playingSource, trySidegrade]);
 
   // Buffer health of the playing stream, once a second while it plays (PlayerCore)
   const proactiveRef = useRef({ next: 0, delay: PROACTIVE_POLL_MS });
@@ -706,8 +764,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     let stopped = false;
     const poll = async () => {
       if (stopped || Date.now() - started > SIDEGRADE_FOR_MS) return;
-      // Before the first frame only when it started at 0, so a resume position is never lost
-      if ((positionRef.current > 0 || !resolved.startAt) && await trySidegrade(qualityRef.current)) return;
+      // Also before the first frame: a switch then starts at the resume position (hardSwitch)
+      if (await trySidegrade(qualityRef.current)) return;
       if (!stopped) timer = setTimeout(poll, SIDEGRADE_POLL_MS);
     };
     timer = setTimeout(poll, SIDEGRADE_FIRST_MS);
@@ -715,7 +773,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, [phase, playingSource, resolved.startAt, trySidegrade]);
+  }, [phase, playingSource, trySidegrade]);
 
   // A step down that is still searching belongs to the item it started for
   useEffect(() => () => { downgradeCtrl.current?.abort(); downgradeCtrl.current = null; }, [itemKey]);
@@ -727,7 +785,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const src = playingSource;
     const steppedDown = () => downgradesRef.current > 0 || !!capRef.current || triedCapsRef.current.length > 0;
     if (phase !== 'ready' || !src || !metaRef.current || !playbackCaps().hevc) return;
-    if (upgradedRef.current || steppedDown() || releaseHeight(src.quality) >= 2160) return;
+    // After a step down (a slow swarm) only a TorBox source comes back up: it plays at line speed
+    if (upgradedRef.current || releaseHeight(src.quality) >= 2160) return;
     const ctrl = new AbortController();
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -737,7 +796,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       const m = metaRef.current;
       // A retry after a failed preparation runs even past the polling window
       const retry = upgradeRetryAtRef.current > 0;
-      if (!m || upgradedRef.current || steppedDown() || (!retry && Date.now() - started > UPGRADE_FOR_MS)) return;
+      if (!m || upgradedRef.current || (!retry && Date.now() - started > UPGRADE_FOR_MS)) return;
       const quality = qualityRef.current || releaseHeight(src.quality);
       if (quality >= 2160) return;
       // Wait until the probe knows the quality and playback has a position (and no sidegrade loads)
@@ -754,12 +813,18 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         );
         if (ctrl.signal.aborted) return;
         if (retry) upgradeRetryAtRef.current = 0;
-        if (up && releaseHeight(up.quality) > quality && !upgradedRef.current && !steppedDown()) {
+        if (up && releaseHeight(up.quality) > quality && !upgradedRef.current && (!steppedDown() || up.debrid)) {
+          const wasDown = steppedDown();
           upgradedRef.current = true;
           const next = sourceOf(up);
           const offered = secs();
           const res = await (coreSwitchRef.current?.prepare(next, 'upgrade') ?? 'unavailable');
           const stats = coreSwitchRef.current?.stats() || '';
+          // Back up from a step down: later resolves are no longer capped
+          if (wasDown && (res === 'switched' || res === 'unavailable')) {
+            capRef.current = undefined;
+            triedCapsRef.current = [];
+          }
           if (res === 'switched') {
             upgradeNoteRef.current = `upgraded to ${next.hash.slice(0, 8)}${next.debrid ? ' (TorBox)' : ''} ${secs()} after the start (offered at ${offered}; ${stats})`;
             console.info(`[nextflix] ${upgradeNoteRef.current}`);
@@ -1075,6 +1140,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           onRecovering={onRecovering}
           onRecovered={onRecovered}
           onStruggling={item.meta ? struggling : undefined}
+          onSlowStart={item.meta ? slowStart : undefined}
           onBufferHealth={item.meta ? onBufferHealth : undefined}
           onWrongLength={item.meta ? replaceWrongLength : undefined}
           switchRef={coreSwitchRef}
@@ -1197,6 +1263,8 @@ interface PlayerCoreProps {
   onRecovered?: () => void;
   /** Playback keeps stalling; quality is the source's resolution class (2160/1080/720/480, 0 when unknown) */
   onStruggling?: (quality: number) => void;
+  /** No frame SLOW_START_MS after a torrent source opened; returns false when the parent has nothing else to try */
+  onSlowStart?: (position: number) => boolean;
   /** The probe says this file is not the whole title; returns true when the parent looks for another */
   onWrongLength?: (hash: string) => boolean;
   /** Receives the live playback position */
@@ -1236,7 +1304,7 @@ const SEEK_COMMIT_MS = 650;
 // what is already buffered happen natively; anything else restarts the stream.
 function PlayerCore({
   magnet, source, startAt, meta, title, subtitle, nextLabel, onNext, onPrefetchNext, onSourceFailed, recovering = false, frameShown = false,
-  freezeFrame, onRecovering, onRecovered, onStruggling, onWrongLength,
+  freezeFrame, onRecovering, onRecovered, onStruggling, onSlowStart, onWrongLength,
   onBufferHealth, positionRef, qualityRef, switchRef, onSwitched, onSubtitleState, subAlt, wantSubLangRef, onClose, fullscreen,
   toggleFullscreen, touchUi = false, canFullscreen = true, onRotate,
 }: PlayerCoreProps) {
@@ -1500,6 +1568,25 @@ function PlayerCore({
   }, [struggling]);
 
   useEffect(() => () => { if (longStallTimer.current) clearTimeout(longStallTimer.current); }, []);
+
+  // A torrent that shows no frame SLOW_START_MS after it opened hands over at once (sidegrade or a
+  // fresh resolve) instead of restarting the same swarm (30 s, 60 s, 90 s: minutes of a spinner).
+  // TorBox sources start at line speed and keep the usual restarts.
+  const onSlowStartRef = useRef(onSlowStart);
+  onSlowStartRef.current = onSlowStart;
+  useEffect(() => {
+    if (!source || source.debrid || !onSlowStartRef.current) return;
+    const timer = setTimeout(() => {
+      if (everPlayed.current || viewerPausedAtRef.current > 0) return;
+      console.info(`[nextflix] restart: no frame ${SLOW_START_MS / 1000} s after the start: trying another source`);
+      freezeFrameRef.current?.(videoRef.current);
+      onRecoveringRef.current?.();
+      if (!onSlowStartRef.current?.(stateRef.current.position)) onRecoveredRef.current?.();
+    }, SLOW_START_MS);
+    return () => clearTimeout(timer);
+    // PlayerCore is keyed by its source: counted once from its mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Restart the stream at `target` right away. Copied video can only start on a keyframe,
   // so /seekpoint runs in parallel and its answer becomes the offset as soon as it arrives.

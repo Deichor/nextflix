@@ -60,6 +60,10 @@ func ListEmbeddedSubs(ctx context.Context, torrServerURL, hash string, fileIndex
 	out, err := exec.CommandContext(pctx, "ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
 		"-select_streams", "s", torrFileURL(torrServerURL, hash, fileIndex)).Output()
 	if err != nil {
+		if pctx.Err() != nil {
+			// Killed at the time limit (a slow swarm): asked again on the next list, not cached as failed
+			return nil, fmt.Errorf("ffprobe failed: %w", context.DeadlineExceeded)
+		}
 		return nil, fmt.Errorf("ffprobe failed: %w", err)
 	}
 	subs, err := parseProbe(out)

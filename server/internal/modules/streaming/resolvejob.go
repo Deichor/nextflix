@@ -221,7 +221,14 @@ func (h handler) resolve(c *gin.Context) {
 		return
 	}
 	refresh := c.Query("refresh") == "1" || c.Query("refresh") == "true"
-	if res, ok := s.cachedFor(key, q); ok && !refresh {
+	res, ok := s.cachedFor(key, q)
+	if ok && !refresh && tsHashIn(res.Hash, q.avoid) {
+		// The player left the cached torrent (too slow, broken): search without it
+		log.Printf("resolve %q: the cached %s is avoided, searching again", q.title, tsShortHash(res.Hash))
+		s.forgetSource(key)
+		ok = false
+	}
+	if ok && !refresh {
 		// Play is about to open it: the title is held, and released with the player
 		w := s.holdWarm(key)
 		s.markIntent(w) // a player asks: the title never gives way to another one's playback
@@ -336,6 +343,17 @@ func (s *Service) prefetchStart(key string, q tsResolveQuery, w *tsWarm) string 
 	default:
 		return "busy"
 	}
+}
+
+// tsHashIn reports whether hash is one of hashes (lower case).
+func tsHashIn(hash string, hashes []string) bool {
+	hash = strings.ToLower(hash)
+	for _, h := range hashes {
+		if h == hash {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) cachedOrRunning(key string, q tsResolveQuery) bool {

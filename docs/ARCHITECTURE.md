@@ -594,6 +594,41 @@ speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `pl
 - Live check: `go test -tags live -run TestLiveTorBox -v ./internal/modules/streaming/` with `TORBOX_API_KEY` (and
   ffmpeg) checks the account read-only with the public-domain Big Buck Bunny torrent.
 
+### Saved sources (`reuse.go`)
+
+Continue Watching and a resumed episode play the torrent saved with the progress (`stream_progress.hash`,
+`file_index`) without a search, but not without the debrid decision. Before, the players opened it straight away,
+and since debrid sources are only known in memory (registered by a resolve), a resume after a server restart read a
+TorBox-cached release from its swarm (Game of Thrones S01E01 2160p, 2026-10-09: 0.71 MB/s for 3.2 MB/s needed, no
+TorBox log line, the player restarted the same swarm for 3 minutes; TorBox had the file cached). Now both players ask
+`GET /torrent-stream/reuse` first (old servers: 404, the saved source plays as before):
+
+- TorBox on and the hash cached (`checkcached`, the shared 30 min answer cache): the file is found in TorBox's list
+  (the title's cached TorBox source, else the movie / episode by name like resolve, else the saved index when it is a
+  video), registered, its link fetched, and it plays from TorBox (`debrid: true`, TorBox index). The header is read
+  ahead (`debridRewarm`).
+- Not cached (or TorBox off, paused, unknown): the torrent is added (stat, ≤ 10 s for metadata) and its swarm is
+  measured for up to 8 s where playback resumes (the pieces the player reads next; the probe runs next to it). Keeps
+  up (≥ 1.3× size / runtime) or unmeasured: it plays with that health (the start buffer uses it). Starving, dead or
+  without metadata: `resolve` (the player resolves again with that hash in `avoid`, which picks a TorBox or faster
+  release; the torrent is dropped).
+- A saved source that a step down picked (its hash is a cached source of a `|max…` key of this title) gives way to
+  the title's uncapped cached source for these caps: after a slow swarm stepped down to 1080p, progress saved the
+  1080p and every resume played it.
+- Without the endpoint (an old client), `files`, `probe` and the subtitle reads adopt a hash that a cached source
+  (`stream_sources`) names as TorBox (`adoptSaved`, looked up at most every 10 minutes per hash), so it plays from
+  TorBox too. The subtitle reads (moviehash range reads, embedded tracks) go through `fileURL`, so they read the
+  proxy whenever the file is a TorBox source; an embedded-track ffprobe killed at its time limit on a slow swarm
+  counts as temporary (listed again on the next call, not cached as failed). Subtitle lists never hold up the play
+  stream (they answer after their wait with what is there).
+- Measured (web, headless Chrome, test server on `nextflix_default` after a restart, Night of the Living Dead 1968
+  resumed at 20:00 from Continue Watching): a saved TorBox-cached 1080p OFT (a strong swarm too) played from the swarm
+  with the first frame after 5.8 s, now from TorBox after 6.5 s (2.4 s of it the reuse check: `checkcached`, the
+  TorBox torrent and its link). A saved torrent without a swarm: with the old server (the player's 12 s hand-over
+  already on) the first frame came after 29.5 s; now `reuse` answers `resolve` after 10.4 s and the first frame comes
+  after 12.3 s at 20:02 (without the hand-over the old player restarted the same swarm after 30, 60 and 90 s). GoT S01E01 4K took 3+ minutes from its swarm; TorBox has that file cached (`checkcached`), so the
+  resume now plays it from TorBox.
+
 ### Films in cinemas with a home release (`homerelease.go`)
 
 TMDB's digital dates lag the real ones: a film it lists as only in cinemas can already have WEB-DL releases (The
@@ -811,16 +846,24 @@ it; and any other episode or capability variant of the same movie / show: same t
 The player (`web/src/features/watch/components/TorrentStreamPlayer.tsx`) polls `upgrade` 5 s after the start, then every
 10 s during the first 5 minutes while a source below 2160p plays on an HEVC client (a poll that has to wait logs why
 in the console: quality unknown, no position yet, another switch loads, retry pause). At most one upgrade per session
-(a dropped preparation is tried once more after 60 s, 15 s for a TorBox source, see below), never after a step down.
+(a dropped preparation is tried once more after 60 s, 15 s for a TorBox source, see below). After a step down only a
+TorBox offer is taken (it plays at line speed, and the step down came from a slow swarm); taking it lifts the cap
+again (GoT S01E01: the TorBox 4K comes back after the step down to 1080p).
 A finished upgrade is logged (`[nextflix] upgraded to <hash> (TorBox) 26 s after the start (offered at 5 s; ready
 in 4.1 s, lead 20 s)`) and the release of the replaced torrent carries it as `why=` (`player: dropping …` in the
 server log), so a slow switch shows its cause (late offer, slow preparation, overtaken / keyframe / seek restarts).
 When playback stalls (two stalls within 60 s or one over 8 s) it first asks `sidegrade` for a faster source of the
 same quality (at most every 2 minutes; a source resolve measured as starving is checked 8 s after it is ready, then
-every 15 s during the first 3 minutes, before the first frame too when playback started at 0), else it re-resolves
-with `maxq=1080`, then `720`. A probe that reports `duration_mismatch` re-resolves with the file avoided, at most twice.
-While a sidegrade loads in the hidden slot (below), a stall does not step down: the step down waits for that
-preparation and runs only if it fails.
+every 15 s during the first 3 minutes, before the first frame too; a switch before the first frame starts at the
+resume position), else it re-resolves with `maxq=1080`, then `720`. A probe that reports `duration_mismatch`
+re-resolves with the file avoided, at most twice. While a sidegrade loads in the hidden slot (below), a stall does not
+step down: the step down waits for that preparation and runs only if it fails. A TorBox sidegrade that keeps up but
+could not be lined up seamlessly is switched to with a restart (loading screen) instead of stepping down.
+
+Slow start (web and TV): a torrent source (not TorBox) that shows no frame 12 s after it opened (`SLOW_START_MS`, the
+probe included) hands over at once: a sidegrade that keeps up, else the title is resolved again with that torrent in
+`avoid` (no `refresh`, so a TorBox source in the source cache is kept; a cached source that is in `avoid` is not
+answered, resolve searches again). The first start used to wait 30 s per restart of the same swarm (30 + 60 + 90 s).
 
 Recovery chain (web `TorrentStreamPlayer.tsx`; the TV engine has the same restarts, chain and pause keep-alive,
 without the kept frame): a stream that breaks before its first frame (an
@@ -899,7 +942,9 @@ before the cut; a stop there would jump to the cut). Another codec family (H.264
 `changeType` the TV never shows a frame of it (the clock stops at the cut and seeks on either side never finish), so
 such an upgrade restarts on the new source at once when it arrives within the first 90 s of playback (a short
 loading screen beats the lower quality for the whole title), later it waits for the next seek, which restarts anyway.
-The TV polls `upgrade` 5 s after the start, then every 10 s. A source of another length (> 3 s) is not spliced,
+The TV polls `upgrade` 5 s after the start, then every 10 s. A source of another length (outside max(30 s, 1 %), see
+`switchLength.ts` below) is not taken; another cut more than 10 s off is not spliced (a restart onto it maps the
+position by the length ratio),
 and a switch with a restart never starts at 0 from a position past 30 s: a file that does not reach the position
 (a pack's wrong file) sends the player back to the source it came from.
 
@@ -915,8 +960,12 @@ slot. An upgrade or sidegrade offered while the current stream plays (or is paus
 one preparation at a time:
 
 1. `files` (re-adds the torrent; not for a TorBox source, which never goes through TorrServer), then the same
-   `probe` the player runs before playing. A failed probe, `duration_mismatch`, or a length more than 3 s off the
-   playing file ends it silently.
+   `probe` the player runs before playing. A failed probe, `duration_mismatch`, or a length more than max(30 s, 1 %)
+   off the playing file ends it silently (`switchLength.ts`, ported to the TV). Releases of one title differ a little
+   (Game of Thrones S01E01: WEB-DL 3695.1 s, BluRay 3702.1 s; a 3 s limit dropped the TorBox 4K sidegrade and the
+   player stepped down to 1080p). Up to 10 s apart the same time is the same moment; further apart every position of
+   the preparation is mapped by the length ratio. `switchLength.test.mjs` checks the rule (`node
+   --experimental-strip-types --test` in a node:22 container).
 2. The new stream is requested about 8 s ahead of the visible position (20 s for a TorBox source: its `seekpoint`
    takes ~4 s and its play stream ~4.5 s to the first bytes, since every ffmpeg seek is a new CDN request; with 8 s
    the visible video always got there first), with the audio track of the current track's language (same channel

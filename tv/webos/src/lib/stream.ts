@@ -367,6 +367,37 @@ export async function resolveSource(
   }
 }
 
+/**
+ * How a saved source (Continue Watching, a resumed episode) plays: from TorBox when it has the release
+ * cached, from its swarm when that keeps up at `t`, else 'resolve' (search again without it). null when
+ * the server could not tell (old server, network): the saved source plays as it is.
+ */
+export interface ReuseAnswer {
+  action: 'play' | 'resolve';
+  reason?: string;
+  source?: ResolvedSource;
+}
+
+export async function reuseSource(
+  params: ResolveParams,
+  saved: { hash: string; index: number; magnet?: string },
+  t: number,
+  signal?: AbortSignal,
+): Promise<ReuseAnswer | null> {
+  const q = addCaps(resolveQuery(params));
+  q.set('hash', saved.hash.toLowerCase());
+  q.set('index', String(saved.index));
+  if (saved.magnet) q.set('magnet', saved.magnet);
+  if (t > 0) q.set('t', String(Math.round(t)));
+  try {
+    const a = await getJson<ReuseAnswer>(`/api/torrent-stream/reuse?${q.toString()}`, { signal });
+    return a && (a.action === 'resolve' || (a.action === 'play' && a.source && a.source.hash)) ? a : null;
+  } catch (e: any) {
+    if (e && e.name === 'AbortError') throw e;
+    return null;
+  }
+}
+
 export interface SideOpts {
   /** Buffer verdict: the server then treats the current source as starving at any point of playback */
   state?: 'draining' | 'critical';

@@ -4,7 +4,7 @@ import { getProfileId } from '../lib/profile';
 import { seasonEpisodes, tvSeasons, isPlaceholderEpisodeName, type SeasonInfo } from '../lib/catalog';
 import {
   StreamError, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
-  keepSourceAlive, playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, runtimeCheckQuery,
+  keepSourceAlive, playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, reuseSource, runtimeCheckQuery,
   saveProgress, sourceOf, titleProgress, writePlayerPrefs,
   type Availability, type PlayRequest, type QualityCap, type ResolveParams, type ResolvedSource, type StreamMeta, type StreamSource, restrictToSafeAudio,
 } from '../lib/stream';
@@ -15,6 +15,7 @@ import {
 } from '../lib/subtitles';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from './bufferHealth';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuffer';
+import { lengthsMatch, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
@@ -92,6 +93,8 @@ export interface PlayerState {
 
 const STALL_MS = 12000;
 const FIRST_START_MS = 30000;
+// A torrent without a first frame this long after it opened hands over to a faster source (slowStart)
+const SLOW_START_MS = 12000;
 const MAX_RECOVERIES = 3;
 // A failed source is resolved again (without it) this many times per item before an error shows
 const MAX_AUTO_REFRESH = 3;
@@ -269,7 +272,7 @@ export class PlayerEngine {
     this.given = req.source;
     this.seasons = req.seasons || [];
     this.state = {
-      phase: req.source ? 'ready' : 'resolving',
+      phase: 'resolving', // a saved source is checked by the server first (reuseSource)
       resolveElapsed: 0,
       stage: 'player.findingSource',
       error: null,
@@ -348,11 +351,11 @@ export class PlayerEngine {
 
   // ---- item: resolve the source ----
 
-  private async startItem(retry: { refresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }) {
+  /** fresh: resolve (with avoid) even though a saved or given source exists, keeping the server's cached source. */
+  private async startItem(retry: { refresh?: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }) {
     this.cancelResolve();
     const startPos = retry.startAt ?? this.startAt;
     if (retry.switchTo) return this.openSource(retry.switchTo, startPos || 0, 'fresh');
-    if (this.given && !retry.refresh) return this.openSource(this.given, startPos || 0, 'given');
 
     this.stopStream();
     this.session++;
@@ -372,22 +375,42 @@ export class PlayerEngine {
 
     const m = this.meta;
     try {
+      let start = startPos || 0;
       // Reuse the torrent saved with earlier progress instead of searching again
-      if (this.pid && !retry.refresh) {
-        const entries = await titleProgress(this.pid, m.media_type, m.tmdb_id);
+      let saved: StreamSource | undefined;
+      let origin: Origin = 'given';
+      if (!retry.refresh && !retry.fresh) {
+        if (this.given) {
+          saved = this.given;
+        } else if (this.pid) {
+          const entries = await titleProgress(this.pid, m.media_type, m.tmdb_id);
+          if (ctrl.signal.aborted) return;
+          const p = m.media_type === 'tv' ? findProgress(entries, m.season || 0, m.episode || 0) : findProgress(entries);
+          if (p?.hash) {
+            saved = { hash: p.hash, index: p.file_index, magnet: p.magnet || undefined };
+            origin = 'saved';
+            start = this.startAt ?? (isFinished(p) ? 0 : Math.max(0, p.position - 5));
+          }
+        }
+      }
+      if (saved) {
+        // The same TorBox / swarm decision as resolve: TorBox when it has the release cached, the
+        // torrent when its swarm keeps up at the resume position, else a fresh resolve without it
+        const a = await reuseSource(paramsOf(m, this.cap), saved, start, ctrl.signal);
         if (ctrl.signal.aborted) return;
-        const saved = m.media_type === 'tv' ? findProgress(entries, m.season || 0, m.episode || 0) : findProgress(entries);
-        if (saved?.hash) {
-          const start = this.startAt ?? (isFinished(saved) ? 0 : Math.max(0, saved.position - 5));
+        if (!a || a.action === 'play') {
           this.cancelResolve();
-          this.openSource({ hash: saved.hash, index: saved.file_index, magnet: saved.magnet || undefined }, start, 'saved');
+          this.openSource(a && a.source ? sourceOf(a.source) : saved, start, origin);
           return;
         }
+        const h = saved.hash.toLowerCase();
+        console.info(`[restart] saved source ${h.slice(0, 8)} not reused (${a.reason || 'slow'}): resolving again`);
+        if (this.avoid.indexOf(h) < 0) this.avoid = [...this.avoid, h];
       }
       const r = await resolveSource(paramsOf(m, this.cap), ctrl.signal, { refresh: retry.refresh, avoid: this.avoid });
       if (ctrl.signal.aborted) return;
       this.cancelResolve();
-      this.openSource(sourceOf(r), startPos || 0, r.cached ? 'cached' : 'fresh');
+      this.openSource(sourceOf(r), start, r.cached ? 'cached' : 'fresh');
     } catch (e: any) {
       if (ctrl.signal.aborted || e?.name === 'AbortError') return;
       this.cancelResolve();
@@ -426,6 +449,8 @@ export class PlayerEngine {
     const prev = this.source && this.source.hash.toLowerCase() !== src.hash.toLowerCase() ? { src: this.source, origin: this.origin, duration: this.state.duration } : null;
     this.stopStream();
     const session = ++this.session;
+    // Counted from the open: a slow probe (the header from a weak swarm) counts too
+    if (!src.debrid) this.pollTimers.push(setTimeout(() => this.slowStart(session), SLOW_START_MS));
     this.source = src;
     this.origin = origin;
     const h = src.hash.toLowerCase();
@@ -478,6 +503,10 @@ export class PlayerEngine {
     const duration = Number(probe?.duration) || 0;
     const tracks: TrackInfo[] = Array.isArray(probe?.audio_tracks) ? probe.audio_tracks : [];
     this.serverSplit = probe?.split === true;
+    // Another cut of the title (a WEB-DL vs a BluRay): the same moment, mapped by the lengths
+    if (reason !== 'open' && reason !== 'revert' && prev && prev.duration > 0 && duration > 0 && lengthsMatch(prev.duration, duration)) {
+      startAt *= timeScale(prev.duration, duration);
+    }
     // A switch never starts over: a file that does not reach the position (a pack's wrong file, another
     // cut) sends the player back to the source it came from (its torrent is kept 60 s after its stream)
     if (reason !== 'open' && reason !== 'revert' && prev && startAt > 30 && duration > 0 &&
@@ -511,6 +540,25 @@ export class PlayerEngine {
     this.restartAt(startAt > 0 && (duration <= 0 || startAt < duration - 10) ? startAt : 0, reason);
     this.scheduleUpgrade(session);
     if (src.starving) this.scheduleSidegrade(session, startAt);
+  }
+
+  /**
+   * A torrent without a first frame SLOW_START_MS after it opened: a sidegrade that keeps up, else resolve
+   * again without it (a TorBox or faster release) at the same position, instead of restarting the same
+   * swarm for minutes. TorBox sources keep the usual restarts.
+   */
+  private async slowStart(session: number) {
+    const src = this.source;
+    if (this.stale(session) || this.everPlayed || this.state.fatal || !src || src.debrid || this.autoRefreshes >= MAX_AUTO_REFRESH) return;
+    const pos = this.positionNow() || this.state.position;
+    const h = this.current;
+    console.info(`[restart] no frame ${SLOW_START_MS / 1000} s after the start of ${h.slice(0, 8)}: trying another source`);
+    this.slow.add(h);
+    if (await this.trySidegrade(this.videoHeight, 'restart')) return;
+    if (this.stale(session) || this.everPlayed) return;
+    this.autoRefreshes++;
+    if (this.avoid.indexOf(h) < 0) this.avoid = [...this.avoid, h];
+    this.startItem({ fresh: true, startAt: pos });
   }
 
   private videoHeight = 0;
@@ -1045,16 +1093,22 @@ export class PlayerEngine {
   private scheduleUpgrade(session: number) {
     const src = this.source;
     const steppedDown = () => this.downgrades > 0 || !!this.cap || this.triedCaps.length > 0;
-    if (!src || !playbackCaps().hevc || this.upgraded || steppedDown() || releaseHeight(src.quality) >= 2160) return;
+    // After a step down (a slow swarm) only a TorBox source comes back up: it plays at line speed
+    if (!src || !playbackCaps().hevc || this.upgraded || releaseHeight(src.quality) >= 2160) return;
     const started = Date.now();
     const poll = async () => {
-      if (this.stale(session) || this.upgraded || steppedDown() || Date.now() - started > UPGRADE_FOR_MS) return;
+      if (this.stale(session) || this.upgraded || Date.now() - started > UPGRADE_FOR_MS) return;
       const quality = this.videoHeight || releaseHeight(src.quality);
       if (quality >= 2160) return;
       if (quality > 0 && this.positionNow() > 0 && this.everPlayed) {
         const up = await checkUpgrade(paramsOf(this.meta), src.hash, quality);
         if (this.stale(session)) return;
-        if (up && releaseHeight(up.quality) > quality && !this.upgraded && !steppedDown()) {
+        if (up && releaseHeight(up.quality) > quality && !this.upgraded && (!steppedDown() || up.debrid)) {
+          // Back up from a step down: later resolves are no longer capped
+          if (steppedDown()) {
+            this.cap = undefined;
+            this.triedCaps = [];
+          }
           const secs = () => `${Math.round((Date.now() - started) / 1000)} s after the start`;
           const toast: MessageKey = up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher';
           console.info(`[upgrade] ${up.hash.slice(0, 8)}${up.debrid ? ' (TorBox)' : ''} offered ${secs()}`);
@@ -1187,7 +1241,8 @@ export class PlayerEngine {
       }
       if (!live()) return false;
       const duration = Number(probe?.duration) || 0;
-      if (probe?.duration_mismatch || duration <= 0 || (this.state.duration > 0 && Math.abs(duration - this.state.duration) > 3)) {
+      // Spliced only where the same time is the same moment (within 10 s); a cut further off restarts on it
+      if (probe?.duration_mismatch || duration <= 0 || !lengthsMatch(this.state.duration, duration) || timeScale(this.state.duration, duration) !== 1) {
         console.info(`[splice] ${reason}: ${h.slice(0, 8)} has another length (${duration.toFixed(0)} s)`);
         return false;
       }

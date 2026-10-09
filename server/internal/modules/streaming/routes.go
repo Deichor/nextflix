@@ -10,6 +10,7 @@ func Register(api *gin.RouterGroup, s *Service) {
 	api.GET("/torrent-stream/seekpoint", h.seekPoint)
 	api.POST("/torrent-stream/keepalive", h.keepAlive)
 	api.GET("/torrent-stream/resolve", h.resolve)
+	api.GET("/torrent-stream/reuse", h.reuse)
 	api.POST("/torrent-stream/prefetch", h.prefetch)
 	api.GET("/torrent-stream/upgrade", h.upgrade)
 	api.GET("/torrent-stream/sidegrade", h.sidegrade)

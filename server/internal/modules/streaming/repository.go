@@ -37,6 +37,14 @@ func loadSource(db *gorm.DB, key string) (*StreamSource, error) {
 	return &rows[0], nil
 }
 
+// loadSourcesByHash returns the cached sources whose result names hash (a lower-case hex
+// info hash, so it is safe in the pattern).
+func loadSourcesByHash(db *gorm.DB, hash string) ([]StreamSource, error) {
+	var rows []StreamSource
+	err := db.Where("result LIKE ?", `%"hash":"`+hash+`"%`).Limit(20).Find(&rows).Error
+	return rows, err
+}
+
 func saveSource(db *gorm.DB, src *StreamSource) error {
 	return db.Clauses(clause.OnConflict{UpdateAll: true}).Create(src).Error
 }
