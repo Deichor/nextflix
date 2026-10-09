@@ -14,6 +14,7 @@ func Register(api *gin.RouterGroup, s *Service) {
 
 	api.GET("/catalog/discover", s.discover)
 	api.GET("/catalog/suggest", s.suggest)
+	api.GET("/catalog/:type/:id/similar", s.similar)
 
 	api.GET("/tmdb/search", s.search)
 	api.GET("/tmdb/suggestions", s.suggestions)

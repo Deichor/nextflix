@@ -75,6 +75,10 @@ type Catalog interface {
 	Logo(lang, mediaType string, id int) (string, error)
 }
 
+// SimilarSource returns the "More Like This" list of a title (the catalog matcher, wired in
+// main.go); ok is false when it is not ready in time or failed.
+type SimilarSource func(lang, mediaType string, id int) (items []Item, ok bool)
+
 // ExploreQuery is one TMDB discover list. Zero fields are not sent.
 type ExploreQuery struct {
 	MediaType     string // "movie" or "tv"

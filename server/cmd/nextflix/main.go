@@ -96,6 +96,7 @@ func run() error {
 	catalogSvc.SetRatings(searchRatings(ratingsSvc))
 	ratingsSvc.OnChange(catalogSvc.InvalidateTaste)
 	catalogSvc.SetLocalSignals(localSignals(profilesSvc, progressSvc, ratingsSvc))
+	recommendationsSvc.SetSimilar(similarTitles(catalogSvc))
 
 	imagesSvc := images.NewService(images.Config{
 		Dir:       envOr("IMAGE_CACHE_DIR", "/app/data/img-cache"),
@@ -157,6 +158,31 @@ func run() error {
 	}
 	log.Println("Server stopped")
 	return nil
+}
+
+// similarTitles feeds the catalog's "More Like This" lists into the "Because you ..." rows. A list
+// that is not ready within 6 s falls back to TMDB's lists for that request.
+func similarTitles(svc *catalog.Service) recommendations.SimilarSource {
+	return func(lang, mediaType string, id int) ([]recommendations.Item, bool) {
+		items, ok := svc.SimilarWithin(lang, mediaType, id, 6*time.Second)
+		if !ok {
+			return nil, false
+		}
+		out := make([]recommendations.Item, 0, len(items))
+		for _, it := range items {
+			r := recommendations.Item{ID: it.ID, MediaType: it.MediaType, Title: it.Title, Overview: it.Overview,
+				PosterPath: it.PosterPath, BackdropPath: it.BackdropPath, VoteAverage: it.VoteAverage,
+				GenreIDs: it.GenreIDs, OriginalLanguage: it.OriginalLanguage, Popularity: it.Popularity,
+				VoteCount: it.VoteCount, Adult: it.Adult}
+			if it.MediaType == "tv" {
+				r.FirstAirDate = it.ReleaseDate
+			} else {
+				r.ReleaseDate = it.ReleaseDate
+			}
+			out = append(out, r)
+		}
+		return out, true
+	}
 }
 
 // watchHistory feeds the titles a profile has played into the surprise picks.

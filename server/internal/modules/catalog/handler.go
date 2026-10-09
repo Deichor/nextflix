@@ -227,7 +227,8 @@ func (s *Service) movieImages(c *gin.Context) {
 	c.JSON(http.StatusOK, images)
 }
 
-// GET /api/tmdb/:id/related?type=movie|tv&limit=&year=
+// GET /api/tmdb/:id/related?type=movie|tv&limit= – the "More Like This" list of /api/catalog/:type/:id/similar
+// (kept for installed TV apps; year is ignored).
 func (s *Service) related(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -247,12 +248,8 @@ func (s *Service) related(c *gin.Context) {
 	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 50 {
 		limit = l
 	}
-	year := 0
-	if y, err := strconv.Atoi(c.Query("year")); err == nil && y > 1800 && y <= 2100 {
-		year = y
-	}
 
-	results, err := s.client(c).GetRelatedMedia(id, mediaType, limit, year)
+	results, err := s.similarFor(c, mediaType, id, limit)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get related media", err)
 		return

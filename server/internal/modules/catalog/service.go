@@ -30,11 +30,13 @@ type Service struct {
 	local    localCache // watch and rating signals of every profile (browse ranking)
 
 	homeRelease HomeReleaseFinder // nil = TMDB dates only
+
+	sim *simState // "More Like This" lists
 }
 
 func NewService(tm *tmdb.Client) *Service {
 	return &Service{tm: tm, seasons: map[string]seasonEntry{}, searches: map[string]searchEntry{},
-		index: newEmptyIndex()}
+		index: newEmptyIndex(), sim: newSimState(newTMDBSim(tm))}
 }
 
 // Season returns a TMDB season with its episodes in lang ("en" or "tr"), cached for 6 hours.

@@ -9,6 +9,7 @@ import (
 
 const (
 	cacheTTL    = 30 * time.Minute
+	partialTTL  = 2 * time.Minute // some seeds used TMDB's lists because the matcher was not ready
 	fetchers    = 6
 	cacheMaxLen = 200
 )
@@ -21,6 +22,7 @@ type cached struct {
 type Service struct {
 	ratings RatingsSource
 	catalog Catalog
+	similar SimilarSource // nil = TMDB's lists for every seed
 	now     func() time.Time
 
 	mu       sync.Mutex
@@ -38,9 +40,10 @@ type cacheKey struct {
 }
 
 type call struct {
-	done chan struct{}
-	resp *Response
-	err  error
+	done    chan struct{}
+	resp    *Response
+	err     error
+	partial bool
 }
 
 func NewService(ratings RatingsSource, catalog Catalog) *Service {
@@ -58,6 +61,10 @@ func NewService(ratings RatingsSource, catalog Catalog) *Service {
 		},
 	}
 }
+
+// SetSimilar makes the positive seeds' rows use the matcher's list instead of TMDB's
+// recommendations and similar lists. Called once at startup.
+func (s *Service) SetSimilar(src SimilarSource) { s.similar = src }
 
 // Invalidate drops a profile's cached rows and surprise pools in every language (called when its ratings change).
 func (s *Service) Invalidate(profileID uint) {
@@ -91,7 +98,7 @@ func (s *Service) For(profileID uint, lang string) (*Response, error) {
 	gen := s.gen[profileID]
 	s.mu.Unlock()
 
-	cl.resp, cl.err = s.compute(profileID, lang)
+	cl.resp, cl.partial, cl.err = s.compute(profileID, lang)
 
 	s.mu.Lock()
 	delete(s.inflight, key)
@@ -99,23 +106,29 @@ func (s *Service) For(profileID uint, lang string) (*Response, error) {
 		if len(s.cache) >= cacheMaxLen {
 			s.cache = map[cacheKey]cached{}
 		}
-		s.cache[key] = cached{resp: cl.resp, expires: s.now().Add(cacheTTL)}
+		ttl := cacheTTL
+		if cl.partial {
+			ttl = partialTTL
+		}
+		s.cache[key] = cached{resp: cl.resp, expires: s.now().Add(ttl)}
 	}
 	s.mu.Unlock()
 	close(cl.done)
 	return cl.resp, cl.err
 }
 
-func (s *Service) compute(profileID uint, lang string) (*Response, error) {
+// compute builds the rows; partial reports that some seeds fell back to TMDB's lists.
+func (s *Service) compute(profileID uint, lang string) (resp *Response, partial bool, err error) {
 	signals, err := s.ratings.Signals(profileID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	seeds, dislikes := pickSeeds(signals, s.now())
 
 	var rows []Row
 	if len(seeds) > 0 {
 		in := s.fetch(lang, signals, seeds, dislikes)
+		partial = in.partial
 		rows = buildRows(score(in), seeds)
 	}
 	if len(rows) == 0 {
@@ -125,7 +138,7 @@ func (s *Service) compute(profileID uint, lang string) (*Response, error) {
 		}
 		rows = trendingRows(trending, signals)
 	}
-	return &Response{Rows: normalize(rows)}, nil
+	return &Response{Rows: normalize(rows)}, partial, nil
 }
 
 // fetch loads the related lists of all seeds and dislikes and the genres of rated titles in parallel.
@@ -150,9 +163,21 @@ func (s *Service) fetch(lang string, signals []Signal, seeds, dislikes []seed) s
 		}()
 	}
 
-	for _, sd := range append(append([]seed{}, seeds...), dislikes...) {
+	for i, sd := range append(append([]seed{}, seeds...), dislikes...) {
 		k := keyOf(sd.MediaType, sd.TmdbID)
+		positive := i < len(seeds)
 		run(func() {
+			if positive && s.similar != nil {
+				if items, ok := s.similar(lang, k.mediaType, k.id); ok && len(items) > 0 {
+					mu.Lock()
+					in.related[k] = relatedLists{items, nil}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				in.partial = true
+				mu.Unlock()
+			}
 			recs, similar, err := s.catalog.Related(lang, k.mediaType, k.id)
 			if err != nil {
 				log.Printf("recommendations: related %s %d: %v", k.mediaType, k.id, err)

@@ -148,6 +148,7 @@ type scoreInput struct {
 	dislikes []seed
 	related  map[titleKey]relatedLists
 	genres   map[titleKey][]int
+	partial  bool // a seed used TMDB's lists instead of the matcher's
 }
 
 // score builds the ranked candidate pool. Rated titles, adult titles, titles without a poster

@@ -275,3 +275,49 @@ func TestCacheIsPerLanguage(t *testing.T) {
 		t.Fatal("invalidate should drop every language")
 	}
 }
+
+func TestSeedRowsUseTheMatcher(t *testing.T) {
+	f, signals := scenario()
+	s := newTestService(f, signals)
+	var asked []int
+	var mu sync.Mutex
+	s.SetSimilar(func(lang, mediaType string, id int) ([]Item, bool) {
+		mu.Lock()
+		asked = append(asked, id)
+		mu.Unlock()
+		if id == loved {
+			return movies(700, 10, 28), true
+		}
+		return nil, false // not ready: TMDB's lists
+	})
+	resp, err := s.For(1, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lovedRow *Row
+	for i := range resp.Rows {
+		if resp.Rows[i].ID == "because-movie-1" {
+			lovedRow = &resp.Rows[i]
+		}
+	}
+	if lovedRow == nil || lovedRow.Items[0].ID != 700 || contains(lovedRow.Items, 100) {
+		t.Fatalf("loved row should be the matcher's list: %+v", lovedRow)
+	}
+	for _, id := range asked {
+		if id == disliked {
+			t.Error("the matcher was asked for a disliked title")
+		}
+	}
+	// The liked title fell back to TMDB's lists, so the rows are kept only briefly
+	for _, r := range resp.Rows {
+		if r.ID == "because-movie-2" && !contains(r.Items, 201) {
+			t.Errorf("liked row without TMDB fallback: %v", ids(r.Items))
+		}
+	}
+	s.mu.Lock()
+	c := s.cache[cacheKey{1, "en"}]
+	s.mu.Unlock()
+	if ttl := time.Until(c.expires); ttl <= 0 || ttl > partialTTL {
+		t.Errorf("partial rows cached for %v, want up to %v", ttl, partialTTL)
+	}
+}
