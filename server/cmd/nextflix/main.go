@@ -86,6 +86,7 @@ func run() error {
 
 	recommendationsSvc := recommendations.NewService(ratingSignals(ratingsSvc), recommendations.NewTMDBCatalog(tm))
 	ratingsSvc.OnChange(recommendationsSvc.Invalidate)
+	recommendationsSvc.SetHistory(watchHistory(progressSvc))
 
 	top10Svc := top10.NewService(db, top10.NewTMDBSearcher(tm), top10.Config{Localizer: top10.NewTMDBLocalizer(tm)})
 	top10Svc.Start(ctx)
@@ -116,6 +117,7 @@ func run() error {
 	if err := streamingSvc.EnsureSettings(); err != nil {
 		log.Printf("seed indexer settings: %v", err)
 	}
+	streamingSvc.StartInstant(ctx, instantFeed(top10Svc, tm))
 
 	subtitlesSvc := subtitles.NewService(db, subtitles.Config{
 		TorrServerURL:   cfg.TorrServerURL,
@@ -149,6 +151,22 @@ func run() error {
 	}
 	log.Println("Server stopped")
 	return nil
+}
+
+// watchHistory feeds the titles a profile has played into the surprise picks.
+func watchHistory(svc *progress.Service) recommendations.HistoryFunc {
+	return func(profileID uint) ([]recommendations.Watched, error) {
+		rows, err := svc.History(profileID)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]recommendations.Watched, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, recommendations.Watched{MediaType: r.MediaType, TmdbID: r.TmdbID, Title: r.Title,
+				Finished: r.Finished, UpdatedAt: r.UpdatedAt})
+		}
+		return out, nil
+	}
 }
 
 // ratingSignals feeds a profile's ratings and favorites into the recommendations module.
@@ -194,6 +212,51 @@ func (a catalogAvailability) Availability(mediaType string, tmdbID, season, epis
 		return *s
 	}
 	return streaming.TitleAvailability{Status: v.Status, ReleaseDate: deref(v.ReleaseDate), DigitalDate: deref(v.DigitalDate)}
+}
+
+// instantFeed lists the titles the instant-play hints check before anyone asks: the Top 10
+// (Turkey and global) and TMDB's trending movies and shows of the week.
+func instantFeed(t *top10.Service, tm *tmdb.Client) streaming.InstantFeed {
+	return func() []streaming.InstantItem {
+		var out []streaming.InstantItem
+		seen := map[string]bool{}
+		add := func(typ string, id int, title, date string) {
+			k := fmt.Sprintf("%s:%d", typ, id)
+			if id <= 0 || seen[k] {
+				return
+			}
+			seen[k] = true
+			year := 0
+			if len(date) >= 4 {
+				fmt.Sscanf(date[:4], "%d", &year)
+			}
+			out = append(out, streaming.InstantItem{Type: typ, TmdbID: id, Title: title, Year: year})
+		}
+		for _, region := range []string{"TR", top10.Global} {
+			for _, typ := range []string{"movie", "tv"} {
+				if l, ok := t.Get(region, typ); ok {
+					for _, it := range l.Items {
+						add(typ, it.TmdbID, it.Title, it.ReleaseDate+it.FirstAirDate)
+					}
+				}
+			}
+		}
+		if m, err := tm.GetUpcomingMovies(); err == nil && m != nil {
+			for i, it := range m.TrendingWeekly {
+				if i < 10 {
+					add("movie", it.ID, it.Title, it.ReleaseDate)
+				}
+			}
+		}
+		if tv, err := tm.GetUpcomingTVSeries(); err == nil && tv != nil {
+			for i, it := range tv.TrendingWeekly {
+				if i < 10 {
+					add("tv", it.ID, it.Name, it.FirstAirDate)
+				}
+			}
+		}
+		return out
+	}
 }
 
 func envOr(key, def string) string {

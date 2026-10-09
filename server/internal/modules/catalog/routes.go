@@ -12,6 +12,8 @@ func Register(api *gin.RouterGroup, s *Service) {
 	api.GET("/tmdb-movie/:id", s.details)
 	api.GET("/availability", s.availability)
 
+	api.GET("/catalog/discover", s.discover)
+
 	api.GET("/tmdb/search", s.search)
 	api.GET("/tmdb/suggestions", s.suggestions)
 

@@ -22,10 +22,13 @@ type Service struct {
 	seasons  map[string]seasonEntry
 
 	releaseDatesCache releaseDatesCache
+
+	searchMu sync.Mutex
+	searches map[string]searchEntry
 }
 
 func NewService(tm *tmdb.Client) *Service {
-	return &Service{tm: tm, seasons: map[string]seasonEntry{}}
+	return &Service{tm: tm, seasons: map[string]seasonEntry{}, searches: map[string]searchEntry{}}
 }
 
 // Season returns a TMDB season with its episodes in lang ("en" or "tr"), cached for 6 hours.

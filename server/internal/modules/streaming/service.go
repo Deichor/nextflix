@@ -37,7 +37,8 @@ type Service struct {
 	imdbTitles   sync.Map // IMDb id -> tsIMDbTitle
 	seasonEps    sync.Map // TMDB tv id -> tsSeasonEpsEntry (episodes per season)
 	bitsearch    *bitsearch
-	debrid       *tsDebrid // TorBox (debrid.go)
+	debrid       *tsDebrid  // TorBox (debrid.go)
+	instant      *tsInstant // instant-play hints (instant.go)
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
@@ -109,6 +110,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		pauseSettle:   tsReleaseSettle,
 	}
 	s.debrid = newDebrid(s, cfg.TorBoxURL)
+	s.instant = newInstant(s)
 	if cfg.BitsearchURL != "" {
 		s.bitsearch = newBitsearch(cfg.BitsearchURL, cfg.FlareSolverrURL)
 	}

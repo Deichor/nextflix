@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 
 	"nextflix/internal/platform/tmdb"
 )
@@ -104,12 +105,12 @@ func (c tmdbCatalog) Trending(lang string) ([]Item, error) {
 				out = append(out, Item{ID: r.ID, MediaType: "movie", Title: r.Title, Overview: r.Overview,
 					PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, VoteAverage: r.VoteAverage,
 					ReleaseDate: r.ReleaseDate, GenreIDs: r.GenreIDs, Popularity: r.Popularity,
-					VoteCount: r.VoteCount, Adult: r.Adult})
+					VoteCount: r.VoteCount, Adult: r.Adult, OriginalLanguage: r.OriginalLanguage})
 			case "tv":
 				out = append(out, Item{ID: r.ID, MediaType: "tv", Title: r.Name, Overview: r.Overview,
 					PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, VoteAverage: r.VoteAverage,
 					FirstAirDate: r.FirstAirDate, GenreIDs: r.GenreIDs, Popularity: r.Popularity,
-					VoteCount: r.VoteCount, Adult: r.Adult})
+					VoteCount: r.VoteCount, Adult: r.Adult, OriginalLanguage: r.OriginalLanguage})
 			}
 		}
 		return out, nil
@@ -122,7 +123,7 @@ func fromMovies(ms []tmdb.Movie) []Item {
 		out = append(out, Item{ID: m.ID, MediaType: "movie", Title: m.Title, Overview: m.Overview,
 			PosterPath: m.PosterPath, BackdropPath: m.BackdropPath, VoteAverage: m.VoteAverage,
 			ReleaseDate: m.ReleaseDate, GenreIDs: m.GenreIDs, Popularity: m.Popularity,
-			VoteCount: m.VoteCount, Adult: m.Adult})
+			VoteCount: m.VoteCount, Adult: m.Adult, OriginalLanguage: m.OriginalLanguage})
 	}
 	return out
 }
@@ -133,7 +134,7 @@ func fromTVs(ts []tmdb.TV) []Item {
 		out = append(out, Item{ID: t.ID, MediaType: "tv", Title: t.Name, Overview: t.Overview,
 			PosterPath: t.PosterPath, BackdropPath: t.BackdropPath, VoteAverage: t.VoteAverage,
 			FirstAirDate: t.FirstAirDate, GenreIDs: t.GenreIDs, Popularity: t.Popularity,
-			VoteCount: t.VoteCount, Adult: t.Adult})
+			VoteCount: t.VoteCount, Adult: t.Adult, OriginalLanguage: t.OriginalLanguage})
 	}
 	return out
 }
@@ -171,4 +172,67 @@ func (c tmdbCatalog) fillTrending(lang string, items []trendingResult) {
 			tmdb.FillText(lang, title, &r.Overview, original, r.OriginalLanguage, e.Title, e.Overview)
 		}
 	}
+}
+
+// Discover lists the most popular titles of a genre plus well-rated ones (TMDB discover, 24 h cache).
+func (c tmdbCatalog) Discover(lang, mediaType string, genre int) ([]Item, error) {
+	tm := c.tm.WithLang(lang)
+	base := url.Values{"include_adult": {"false"}, "with_genres": {strconv.Itoa(genre)}}
+	queries := []url.Values{
+		{"sort_by": {"popularity.desc"}, "vote_count.gte": {"100"}},
+		{"sort_by": {"vote_average.desc"}, "vote_count.gte": {"1000"}},
+	}
+	var out []Item
+	var errs []error
+	for _, q := range queries {
+		for k, v := range base {
+			q[k] = v
+		}
+		if mediaType == "tv" {
+			res, err := tm.DiscoverTVPage(q)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			out = append(out, fromTVs(res.Results)...)
+		} else {
+			res, err := tm.DiscoverMoviePage(q)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			out = append(out, fromMovies(res.Results)...)
+		}
+	}
+	if len(errs) == len(queries) {
+		return nil, errors.Join(errs...)
+	}
+	return out, nil
+}
+
+func (c tmdbCatalog) Logo(lang, mediaType string, id int) (string, error) {
+	tm := c.tm.WithLang(lang)
+	var images *tmdb.Images
+	var err error
+	if mediaType == "tv" {
+		images, err = tm.GetTVImages(id)
+	} else {
+		images, err = tm.GetMovieImages(id)
+	}
+	if err != nil {
+		return "", err
+	}
+	return pickLogo(images.Logos, tm.Lang()), nil
+}
+
+// pickLogo prefers a logo in lang, then English, then a language-less one.
+func pickLogo(logos []tmdb.Image, lang string) string {
+	for _, want := range []string{lang, tmdb.LangEN, ""} {
+		for _, l := range logos {
+			if l.ISO6391 == want && l.FilePath != "" {
+				return l.FilePath
+			}
+		}
+	}
+	return ""
 }

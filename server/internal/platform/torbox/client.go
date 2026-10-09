@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -93,7 +94,7 @@ func New(base, key string, hc *http.Client) *Client {
 // costs one request, not all), short dial / TLS / header timeouts, no overall timeout (bodies
 // may be long streams; callers bound them with their context).
 func NewHTTPClient() *http.Client {
-	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := &lastGoodDialer{d: &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}, last: map[string]string{}}
 	return &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
@@ -101,7 +102,7 @@ func NewHTTPClient() *http.Client {
 		ResponseHeaderTimeout: 15 * time.Second,
 		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{}, // no HTTP/2
 		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
 	}}
 }
 
@@ -460,4 +461,34 @@ func (c *Client) RequestDL(ctx context.Context, torrentID, fileID int64) (string
 func isLoopback(host string) bool {
 	ip := net.ParseIP(host)
 	return host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+// lastGoodDialer remembers the address each host:port last connected to and dials it when
+// the name does not resolve (Docker's DNS fails now and then: "server misbehaving", i/o timeouts).
+// TLS still verifies the certificate against the host name.
+type lastGoodDialer struct {
+	d    *net.Dialer
+	mu   sync.Mutex
+	last map[string]string // "host:port" -> "ip:port"
+}
+
+func (l *lastGoodDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := l.d.DialContext(ctx, network, addr)
+	if err == nil {
+		l.mu.Lock()
+		l.last[addr] = conn.RemoteAddr().String()
+		l.mu.Unlock()
+		return conn, nil
+	}
+	var dnsErr *net.DNSError
+	if !errors.As(err, &dnsErr) {
+		return nil, err
+	}
+	l.mu.Lock()
+	ip, ok := l.last[addr]
+	l.mu.Unlock()
+	if !ok || ctx.Err() != nil {
+		return nil, err
+	}
+	return l.d.DialContext(ctx, network, ip)
 }

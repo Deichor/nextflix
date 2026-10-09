@@ -2,6 +2,7 @@ package recommendations
 
 import (
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -26,6 +27,8 @@ type Service struct {
 	cache    map[cacheKey]cached
 	gen      map[uint]uint64 // per profile, bumped on invalidation; stale computations are not cached
 	inflight map[cacheKey]*call
+
+	surprise surpriseState
 }
 
 // cacheKey: rows are kept per profile and content language.
@@ -48,10 +51,15 @@ func NewService(ratings RatingsSource, catalog Catalog) *Service {
 		cache:    map[cacheKey]cached{},
 		gen:      map[uint]uint64{},
 		inflight: map[cacheKey]*call{},
+		surprise: surpriseState{
+			pools:  map[cacheKey]surprisePool{},
+			recent: map[uint][]titleKey{},
+			rnd:    rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0x9e3779b97f4a7c15)),
+		},
 	}
 }
 
-// Invalidate drops a profile's cached rows in every language (called when its ratings change).
+// Invalidate drops a profile's cached rows and surprise pools in every language (called when its ratings change).
 func (s *Service) Invalidate(profileID uint) {
 	s.mu.Lock()
 	for k := range s.cache {
@@ -61,6 +69,7 @@ func (s *Service) Invalidate(profileID uint) {
 	}
 	s.gen[profileID]++
 	s.mu.Unlock()
+	s.invalidateSurprise(profileID)
 }
 
 // For returns the recommendation rows of a profile with titles in lang ("en" or "tr"),

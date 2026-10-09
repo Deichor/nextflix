@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -34,7 +32,6 @@ const (
 	tsDebridCheckTimeout  = 2500 * time.Millisecond
 	tsDebridLinkFresh     = 2 * time.Hour // TorBox links open for 3 h
 	tsDebridLinkTimeout   = 15 * time.Second
-	tsDebridStall         = 20 * time.Second // an upstream read without bytes this long is resumed
 	tsDebridSettingsFresh = 10 * time.Second
 	tsDebridAddPerHour    = 20 // "add uncached" torrents sent to TorBox per hour
 
@@ -90,11 +87,14 @@ type tsDebrid struct {
 	links     map[string]*tsDebridLink  // "hash:index" -> download link
 	calls     map[string]*tsDebridCall  // running link requests
 	remaps    map[string]int            // "hash:index" -> TorrServer file id (fallback)
+	broken    map[string]time.Time      // "hash:index" -> when its CDN reads gave up (plays from TorrServer for a while)
+	warmed    map[string]time.Time      // "hash:index" -> last keep-alive read
 	downUntil time.Time
 	downWhy   string
 	added     map[string]bool // hashes sent with "add uncached"
 	addTimes  []time.Time
 
+	cache     tsProxyCache // chunks of the file proxy (debrid_proxy.go)
 	proxyOnce sync.Once
 	proxyBase string
 	proxyErr  error
@@ -105,6 +105,7 @@ func newDebrid(s *Service, base string) *tsDebrid {
 		s: s, base: base, hc: torbox.NewHTTPClient(),
 		checks: map[string]tsDebridCheck{}, sources: map[string]tsDebridSource{}, torrents: map[string]int64{},
 		links: map[string]*tsDebridLink{}, calls: map[string]*tsDebridCall{}, remaps: map[string]int{},
+		broken: map[string]time.Time{}, warmed: map[string]time.Time{},
 		added: map[string]bool{},
 	}
 }
@@ -557,12 +558,15 @@ func (s *Service) debridURL(hash string, index int) (string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tsDebridLinkTimeout)
 	defer cancel()
-	if _, err := d.link(ctx, src.hash, index, false); err == nil {
-		if base, err := d.proxy(); err == nil {
-			return fmt.Sprintf("%s/f/%s/%d", base, src.hash, index), true
+	// A file whose CDN reads gave up a moment ago plays from the swarm (the player restarts on it)
+	if !d.isBroken(src.hash, index) {
+		if _, err := d.link(ctx, src.hash, index, false); err == nil {
+			if base, err := d.proxy(); err == nil {
+				return fmt.Sprintf("%s/f/%s/%d", base, src.hash, index), true
+			}
+		} else if !errors.Is(err, errDebridPaused) {
+			log.Printf("torbox: %s:%d plays from the swarm: %v", tsShortHash(src.hash), index, err)
 		}
-	} else if !errors.Is(err, errDebridPaused) {
-		log.Printf("torbox: %s:%d plays from the swarm: %v", tsShortHash(src.hash), index, err)
 	}
 	return fmt.Sprintf("%s/stream?link=%s&index=%d&play", s.torrServerURL(), src.hash, d.torrServerIndex(src)), true
 }
@@ -739,226 +743,4 @@ func (s *Service) DebridFileURL(hash string, index int) string {
 		return ""
 	}
 	return u
-}
-
-// proxy starts the loopback file proxy once and returns its base URL.
-func (d *tsDebrid) proxy() (string, error) {
-	d.proxyOnce.Do(func() {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			d.proxyErr = err
-			log.Printf("torbox: file proxy: %v", err)
-			return
-		}
-		srv := &http.Server{Handler: http.HandlerFunc(d.serveFile), ReadHeaderTimeout: 10 * time.Second}
-		go func() { _ = srv.Serve(ln) }()
-		d.proxyBase = "http://" + ln.Addr().String()
-	})
-	return d.proxyBase, d.proxyErr
-}
-
-// serveFile answers GET/HEAD /f/<hash>/<index> (single byte ranges) from TorBox's link.
-// A refused link (401/403/404/410) is requested again; a reset, cut or stalled upstream
-// read is resumed at the next byte on a new connection, so the reader sees one stream.
-func (d *tsDebrid) serveFile(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 3 || parts[0] != "f" || !tsHashPattern.MatchString(parts[1]) {
-		http.NotFound(w, r)
-		return
-	}
-	hash := strings.ToLower(parts[1])
-	index, err := strconv.Atoi(parts[2])
-	if err != nil || index < 0 {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	ctx := r.Context()
-	clientRange := r.Header.Get("Range")
-	if strings.Contains(clientRange, ",") {
-		clientRange = "" // multiple ranges: the whole file
-	}
-	var cur, end int64 = 0, -1 // next byte to send, last byte (-1 = unknown yet)
-	sent := false
-	force := false
-	refreshes, fails := 0, 0
-	buf := make([]byte, 256<<10)
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if fails > 6 || refreshes > 2 {
-			if !sent {
-				http.Error(w, "TorBox file unavailable", http.StatusBadGateway)
-			}
-			return
-		}
-		link, err := d.link(ctx, hash, index, force)
-		force = false
-		if err != nil {
-			if !sent {
-				http.Error(w, "TorBox file unavailable", http.StatusBadGateway)
-			}
-			return
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.url, nil)
-		if err != nil {
-			fails = 99
-			continue
-		}
-		req.Header.Set("User-Agent", torbox.UserAgent)
-		switch {
-		case sent:
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", cur, end))
-		case clientRange != "":
-			req.Header.Set("Range", clientRange)
-		}
-		if fails > 0 {
-			req.Close = true // a new connection after a reset
-		}
-		resp, err := d.hc.Do(req)
-		if err != nil {
-			fails++
-			tsDebridBackoff(ctx, fails)
-			continue
-		}
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden ||
-			resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
-			resp.Body.Close()
-			log.Printf("torbox: link of %s:%d refused (%d), requesting a new one", tsShortHash(hash), index, resp.StatusCode)
-			refreshes++
-			force = true
-			continue
-		case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && !sent:
-			if cr := resp.Header.Get("Content-Range"); cr != "" {
-				w.Header().Set("Content-Range", cr)
-			}
-			resp.Body.Close()
-			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-			return
-		case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
-			resp.Body.Close()
-			fails++
-			tsDebridBackoff(ctx, fails)
-			continue
-		case resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent:
-			resp.Body.Close()
-			if !sent {
-				http.Error(w, "TorBox answered "+strconv.Itoa(resp.StatusCode), http.StatusBadGateway)
-			}
-			return
-		}
-		start, last, total, ok := tsContentRange(resp)
-		if !sent {
-			if !ok {
-				resp.Body.Close()
-				fails++
-				continue
-			}
-			h := w.Header()
-			h.Set("Accept-Ranges", "bytes")
-			ct := resp.Header.Get("Content-Type")
-			if ct == "" {
-				ct = "application/octet-stream"
-			}
-			h.Set("Content-Type", ct)
-			h.Set("Content-Length", strconv.FormatInt(last-start+1, 10))
-			status := http.StatusOK
-			if clientRange != "" && resp.StatusCode == http.StatusPartialContent {
-				status = http.StatusPartialContent
-				h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, last, total))
-			} else if clientRange != "" && start != 0 {
-				resp.Body.Close()
-				fails = 99 // a 200 for a range we cannot serve from the middle
-				continue
-			}
-			w.WriteHeader(status)
-			sent = true
-			cur, end = start, last
-			if r.Method == http.MethodHead || last < start {
-				resp.Body.Close()
-				return
-			}
-		} else if resp.StatusCode != http.StatusPartialContent || !ok || start != cur {
-			// A resumed read must continue at the next byte
-			resp.Body.Close()
-			fails++
-			tsDebridBackoff(ctx, fails)
-			continue
-		}
-		n, werr, done := tsDebridCopy(w, resp.Body, buf, end-cur+1)
-		resp.Body.Close()
-		cur += n
-		if werr != nil || done || cur > end {
-			return // the reader left, or everything was sent
-		}
-		if n > 0 {
-			fails = 0
-		}
-		fails++
-		log.Printf("torbox: read of %s:%d cut at %d of %d, resuming", tsShortHash(hash), index, cur, end+1)
-		tsDebridBackoff(ctx, fails)
-	}
-}
-
-// tsContentRange reads the byte range of an upstream answer: Content-Range of a 206, the
-// whole body of a 200.
-func tsContentRange(resp *http.Response) (start, last, total int64, ok bool) {
-	if resp.StatusCode == http.StatusOK {
-		if resp.ContentLength < 0 {
-			return 0, 0, 0, false
-		}
-		return 0, resp.ContentLength - 1, resp.ContentLength, true
-	}
-	cr := strings.TrimSpace(resp.Header.Get("Content-Range"))
-	var t string
-	if _, err := fmt.Sscanf(cr, "bytes %d-%d/%s", &start, &last, &t); err != nil {
-		return 0, 0, 0, false
-	}
-	total, err := strconv.ParseInt(t, 10, 64)
-	if err != nil {
-		total = last + 1 // "*": unknown size
-	}
-	return start, last, total, last >= start
-}
-
-// tsDebridCopy copies up to max bytes; a read that delivers nothing for tsDebridStall ends
-// the copy (the caller resumes). done: the upstream body ended where it should.
-func tsDebridCopy(w http.ResponseWriter, body io.ReadCloser, buf []byte, max int64) (n int64, werr error, done bool) {
-	stall := time.AfterFunc(tsDebridStall, func() { body.Close() })
-	defer stall.Stop()
-	flusher, _ := w.(http.Flusher)
-	for n < max {
-		want := int64(len(buf))
-		if max-n < want {
-			want = max - n
-		}
-		k, rerr := body.Read(buf[:want])
-		if k > 0 {
-			stall.Reset(tsDebridStall)
-			if _, err := w.Write(buf[:k]); err != nil {
-				return n, err, false
-			}
-			n += int64(k)
-			if flusher != nil && n%(4<<20) < int64(k) {
-				flusher.Flush()
-			}
-		}
-		if rerr != nil {
-			return n, nil, n >= max
-		}
-	}
-	return n, nil, true
-}
-
-func tsDebridBackoff(ctx context.Context, fails int) {
-	d := time.Duration(min(fails, 5)) * 300 * time.Millisecond
-	select {
-	case <-time.After(d):
-	case <-ctx.Done():
-	}
 }

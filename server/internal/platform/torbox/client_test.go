@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func hashN(i int) string { return fmt.Sprintf("%040x", i+1) }
@@ -148,4 +150,36 @@ func TestRequestDLRejectsOddLinks(t *testing.T) {
 		}
 		srv.Close()
 	}
+}
+
+func TestDialerFallsBackToTheLastGoodAddress(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	noDNS := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		return nil, errors.New("dns down")
+	}}
+	l := &lastGoodDialer{d: &net.Dialer{Timeout: time.Second, Resolver: noDNS}, last: map[string]string{}}
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	addr := net.JoinHostPort("cdn.example.invalid", port)
+	if _, err := l.DialContext(context.Background(), "tcp", addr); err == nil {
+		t.Fatal("dialed an unknown name without DNS")
+	}
+	l.last[addr] = ln.Addr().String() // an earlier connection succeeded
+	c, err := l.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		t.Fatalf("fallback: %v", err)
+	}
+	c.Close()
 }

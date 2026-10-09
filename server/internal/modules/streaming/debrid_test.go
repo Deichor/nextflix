@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -39,9 +40,12 @@ type fakeTorBox struct {
 	failAPI   int              // non-zero: every API call answers this status
 	gen       int              // links of older generations are refused (403)
 	cutNext   bool             // the next CDN read is cut after 1 MB
+	ranges    []string         // Range headers of the CDN reads
+	delay     time.Duration    // before every CDN answer (first-byte latency)
 	malformed bool             // checkcached answers garbage
 
 	checks, creates, lists, dls, cdnReads atomic.Int32
+	cdnOpen, cdnPeak                      atomic.Int32 // CDN reads running, most at once
 	onlyCached                            atomic.Bool
 }
 
@@ -142,16 +146,23 @@ func (f *fakeTorBox) serve(w http.ResponseWriter, r *http.Request) {
 // cdn serves the content with single ranges; old link generations get 403.
 func (f *fakeTorBox) cdn(w http.ResponseWriter, r *http.Request) {
 	f.cdnReads.Add(1)
+	if n := f.cdnOpen.Add(1); n > f.cdnPeak.Load() {
+		f.cdnPeak.Store(n)
+	}
+	defer f.cdnOpen.Add(-1)
 	gen, _ := strconv.Atoi(strings.Split(strings.TrimPrefix(r.URL.Path, "/cdn/"), "/")[0])
 	f.mu.Lock()
 	expired := gen < f.gen
 	cut := f.cutNext
 	f.cutNext = false
+	f.ranges = append(f.ranges, r.Header.Get("Range"))
+	delay := f.delay
 	f.mu.Unlock()
 	if expired || r.Header.Get("User-Agent") != torbox.UserAgent {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
+	time.Sleep(delay)
 	size := int64(len(f.content))
 	start, end := int64(0), size-1
 	status := http.StatusOK

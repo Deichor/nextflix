@@ -4,16 +4,17 @@ import "time"
 
 // Item is a recommended movie or TV show. Movies carry release_date, TV shows first_air_date.
 type Item struct {
-	ID           int     `json:"id"`
-	MediaType    string  `json:"media_type"`
-	Title        string  `json:"title"`
-	Overview     string  `json:"overview"`
-	PosterPath   string  `json:"poster_path"`
-	BackdropPath string  `json:"backdrop_path"`
-	VoteAverage  float64 `json:"vote_average"`
-	ReleaseDate  string  `json:"release_date,omitempty"`
-	FirstAirDate string  `json:"first_air_date,omitempty"`
-	GenreIDs     []int   `json:"genre_ids"`
+	ID               int     `json:"id"`
+	MediaType        string  `json:"media_type"`
+	Title            string  `json:"title"`
+	Overview         string  `json:"overview"`
+	PosterPath       string  `json:"poster_path"`
+	BackdropPath     string  `json:"backdrop_path"`
+	VoteAverage      float64 `json:"vote_average"`
+	ReleaseDate      string  `json:"release_date,omitempty"`
+	FirstAirDate     string  `json:"first_air_date,omitempty"`
+	GenreIDs         []int   `json:"genre_ids"`
+	OriginalLanguage string  `json:"original_language,omitempty"`
 
 	Popularity float64 `json:"-"`
 	VoteCount  int     `json:"-"`
@@ -68,6 +69,10 @@ type Catalog interface {
 	Related(lang, mediaType string, id int) (recs, similar []Item, err error)
 	Genres(mediaType string, id int) ([]int, error)
 	Trending(lang string) ([]Item, error)
+	// Discover returns popular and acclaimed titles of one TMDB genre (mediaType "movie" or "tv").
+	Discover(lang, mediaType string, genre int) ([]Item, error)
+	// Logo returns the file path of a title logo in lang (else English, else language-less) or "".
+	Logo(lang, mediaType string, id int) (string, error)
 }
 
 type titleKey struct {
@@ -76,3 +81,22 @@ type titleKey struct {
 }
 
 func keyOf(mediaType string, id int) titleKey { return titleKey{mediaType, id} }
+
+// Watched is a title from a profile's watch history (filled from the progress module in main.go).
+type Watched struct {
+	MediaType string
+	TmdbID    int
+	Title     string
+	Finished  bool
+	UpdatedAt time.Time
+}
+
+// HistorySource returns the titles a profile has played, newest first.
+type HistorySource interface {
+	History(profileID uint) ([]Watched, error)
+}
+
+// HistoryFunc adapts a function to HistorySource.
+type HistoryFunc func(profileID uint) ([]Watched, error)
+
+func (f HistoryFunc) History(profileID uint) ([]Watched, error) { return f(profileID) }
