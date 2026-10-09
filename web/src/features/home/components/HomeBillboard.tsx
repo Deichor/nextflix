@@ -121,10 +121,11 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
           />
           <button
             onClick={() => openInfo(item)}
-            className="flex flex-1 sm:flex-none min-h-11 md:min-h-0 items-center justify-center gap-2 px-5 py-2 md:px-7 md:py-2.5 rounded bg-[#6d6d6e]/70 hover:bg-[#6d6d6e]/50 text-white font-bold text-sm md:text-lg transition-colors"
+            className="flex flex-1 sm:flex-none min-h-11 md:min-h-0 items-center justify-center gap-2 whitespace-nowrap px-4 sm:px-5 py-2 md:px-7 md:py-2.5 rounded bg-[#6d6d6e]/70 hover:bg-[#6d6d6e]/50 text-white font-bold text-sm md:text-lg transition-colors"
           >
             <Info className="w-5 h-5 md:w-6 md:h-6" />
-            <span>{t('detail.moreInfo')}</span>
+            <span className="sm:hidden">{t('detail.moreInfoShort')}</span>
+            <span className="hidden sm:inline">{t('detail.moreInfo')}</span>
           </button>
           <div className="flex items-center gap-2">
             <RatingButtons

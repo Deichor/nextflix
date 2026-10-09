@@ -173,6 +173,7 @@ export const tr: Messages = {
   'detail.play': 'Oynat',
   'detail.resume': 'Devam Et',
   'detail.moreInfo': 'Daha Fazla Bilgi',
+  'detail.moreInfoShort': 'Bilgi',
   'detail.trailer': 'Fragman',
   'detail.episodes': 'Bölümler',
   'detail.season': '{n}. Sezon',
@@ -505,4 +506,10 @@ export const tr: Messages = {
 
   'search.didYouMean': 'Bunu mu demek istediniz: {title}?',
   'search.suggestions': 'Öneriler',
+
+  'cinema.watchAnyway': 'Sinema kaydını yine de izle',
+  'cinema.confirm': 'Sinema kayıtlarının görüntü ve ses kalitesi düşüktür.',
+  'cinema.play': 'Yine de oynat',
+  'cinema.badge': 'Sinema kaydı',
+  'cinema.badgeTitle': 'Sinema salonunda çekilmiş kayıt: görüntü ve ses kalitesi düşük',
 };

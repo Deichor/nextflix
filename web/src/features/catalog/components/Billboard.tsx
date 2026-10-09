@@ -104,7 +104,8 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
               className="flex min-h-11 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded bg-[rgba(109,109,110,0.7)] px-5 py-2 text-sm font-bold text-white transition-colors hover:bg-[rgba(109,109,110,0.4)] sm:flex-none md:min-h-0 md:px-7 md:py-2.5 md:text-lg"
             >
               <Info className="h-5 w-5 md:h-7 md:w-7" />
-              {t('detail.moreInfo')}
+              <span className="sm:hidden">{t('detail.moreInfoShort')}</span>
+              <span className="hidden sm:inline">{t('detail.moreInfo')}</span>
             </button>
             <RatingButtons
               size="md"

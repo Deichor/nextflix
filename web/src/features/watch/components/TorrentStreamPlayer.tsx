@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare, ChevronsLeft, ChevronsRight, RotateCwSquare } from 'lucide-react';
+import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare, ChevronsLeft, ChevronsRight, RotateCwSquare, Clapperboard } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import { getActiveProfileId } from '@/shared/lib/profile';
 import { useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction } from '@/shared/i18n';
@@ -187,11 +187,12 @@ const RECOVERED_MS = 15000;
 // Resolve request of a title / episode (optionally capped after a step down)
 const paramsOf = (m: StreamMeta, maxq?: QualityCap): ResolveParams => ({
   type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, maxq,
+  cinema: m.cinema,
 });
 
-const sourceOf = (r: { hash: string; index: number; magnet?: string; file_name?: string; torrent_title?: string; quality?: string; hdr?: boolean; debrid?: boolean; health?: { rate: number; need: number; dead?: boolean } }): StreamSource => ({
+const sourceOf = (r: { hash: string; index: number; magnet?: string; file_name?: string; torrent_title?: string; quality?: string; hdr?: boolean; debrid?: boolean; cinema?: boolean; health?: { rate: number; need: number; dead?: boolean } }): StreamSource => ({
   hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr,
-  debrid: r.debrid,
+  debrid: r.debrid, cinema: r.cinema,
   ratio: healthRatio(r.health),
 });
 
@@ -464,10 +465,11 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           episode: m.episode,
           runtime: m.runtime,
           maxq: capRef.current,
+          cinema: m.cinema,
         }, ctrl.signal, { refresh: retry.refresh, avoid: avoidRef.current });
         if (cancelled) return;
         setResolved({
-          source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: r.health?.keeps_up === false, ratio: healthRatio(r.health), debrid: r.debrid },
+          source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: r.health?.keeps_up === false, ratio: healthRatio(r.health), debrid: r.debrid, cinema: r.cinema },
           startAt: startPos || 0,
           origin: r.cached ? 'cached' : 'fresh',
         });
@@ -596,7 +598,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const ctrl = new AbortController();
     downgradeCtrl.current = ctrl;
     const current = playingSource;
-    resolveSource({ type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, maxq: cap }, ctrl.signal, { avoid: avoidRef.current })
+    resolveSource({ type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, maxq: cap, cinema: m.cinema }, ctrl.signal, { avoid: avoidRef.current })
       .then(r => {
         if (ctrl.signal.aborted) return;
         capRef.current = cap;
@@ -747,7 +749,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         const failed = upgradeFailRef.current;
         upgradeFailRef.current = '';
         const up = await checkUpgrade(
-          { type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime },
+          { type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, cinema: m.cinema },
           src.hash, quality, ctrl.signal, failed,
         );
         if (ctrl.signal.aborted) return;
@@ -2684,6 +2686,12 @@ function PlayerCore({
               <span className={`${BADGE_CLASS} inline-flex items-center gap-1 !text-[#e5e5e5]`} title={t('player.debridBadgeTitle')}>
                 <svg viewBox="0 0 24 24" aria-hidden className="fill-current h-[1.1em] w-[1.1em]"><path d="M13.5 2 4 13.5h6.5L9 22l10-12h-6.5z" /></svg>
                 {t('player.debridBadge')}
+              </span>
+            )}
+            {shownSource?.cinema && (
+              <span className={`${BADGE_CLASS} inline-flex items-center gap-1 !text-[#e5e5e5]`} title={t('cinema.badgeTitle')}>
+                <Clapperboard aria-hidden className="h-[1.1em] w-[1.1em]" />
+                {t('cinema.badge')}
               </span>
             )}
           </div>

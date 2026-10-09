@@ -2,6 +2,7 @@
 
 import { contentLang, getApiUrl } from '@/shared/lib/api';
 import { pickLogo, tmdbImage } from '@/shared/lib/image';
+import { getActiveProfileId } from '@/shared/lib/profile';
 import { en, type MessageKey, type TFunction } from '@/shared/i18n';
 
 export type NfMediaType = 'movie' | 'tv';
@@ -244,9 +245,10 @@ export async function fetchProviderTv(providerId: number, sortBy = 'popularity.d
   return fromTmdbList(d?.results, 'tv');
 }
 
-export async function fetchRelated(id: number, type: NfMediaType, limit = 12, year?: number): Promise<NfTitle[]> {
-  const y = year ? `&year=${year}` : '';
-  const d = await getJson<any>(`/api/tmdb/${id}/related?type=${type}&limit=${limit}${y}`);
+/** "More Like This": the server's matcher (collection first, then ranked matches for the profile). */
+export async function fetchRelated(id: number, type: NfMediaType, limit = 12, _year?: number): Promise<NfTitle[]> {
+  const pid = getActiveProfileId();
+  const d = await getJson<any>(`/api/catalog/${type}/${id}/similar?limit=${limit}${pid ? `&profile_id=${pid}` : ''}`);
   return fromTmdbList(d?.results, type);
 }
 

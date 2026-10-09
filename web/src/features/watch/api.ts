@@ -26,6 +26,8 @@ export interface ResolvedSource {
   /** Plays from the TorBox cache (source "torbox"), not the swarm */
   debrid?: boolean;
   source?: string;
+  /** A cinema recording (asked for with cinema: true) */
+  cinema?: boolean;
 }
 
 export interface SourceHealth {
@@ -55,6 +57,8 @@ export interface StreamSource {
   torrent_title?: string;
   /** Plays from the TorBox cache */
   debrid?: boolean;
+  /** A cinema recording of a film still in cinemas */
+  cinema?: boolean;
 }
 
 export interface PlaybackCaps {
@@ -141,6 +145,8 @@ export interface StreamMeta {
   runtime?: number;
   /** TMDB original_language (ISO 639-1); picks the original audio track by default */
   original_language?: string;
+  /** Play a cinema recording of a film that is only in cinemas (resolve with cinema=1) */
+  cinema?: boolean;
 }
 
 export interface StreamProgress {
@@ -311,6 +317,8 @@ export type ResolveParams = {
   /** TMDB runtime in minutes, used when the server has no TMDB runtime */
   runtime?: number;
   maxq?: QualityCap;
+  /** A cinema recording of a film only in cinemas (the viewer asked for it) */
+  cinema?: boolean;
 };
 
 function resolveQuery(params: ResolveParams): URLSearchParams {
@@ -325,6 +333,7 @@ function resolveQuery(params: ResolveParams): URLSearchParams {
   const screen = screenQualityCap();
   const maxq = params.maxq && screen ? Math.min(params.maxq, screen) : params.maxq || screen;
   if (maxq) q.set('maxq', String(maxq));
+  if (params.cinema) q.set('cinema', '1');
   return q;
 }
 

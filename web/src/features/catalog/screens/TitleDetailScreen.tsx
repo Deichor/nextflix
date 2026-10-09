@@ -10,6 +10,7 @@ import InstantChip from '@/shared/ui/InstantChip';
 import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
 import WatchButton, { formatRemaining, useAvailability } from '@/features/watch/components/WatchButton';
 import SeasonEpisodes from '@/features/watch/components/SeasonEpisodes';
+import CinemaRecordingButton from '@/features/watch/components/CinemaRecordingButton';
 import { useActiveProfile } from '@/shared/lib/profile';
 import {
   PlayRequest,
@@ -504,6 +505,10 @@ const TMDBMoviePage: React.FC = () => {
               </a>
             )}
           </div>
+
+          {mediaDetails.media_type === 'movie' && availability?.status === 'in_theaters' && (
+            <CinemaRecordingButton className="mt-3" onPlay={() => openPlayer({ meta: { ...buildMeta(), cinema: true } })} />
+          )}
 
           {!!resumeInfo && resumeInfo.percent > 0 && (
             <div className="mt-4 flex items-center gap-3">

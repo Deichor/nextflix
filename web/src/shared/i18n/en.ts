@@ -185,6 +185,7 @@ export const en = {
   'detail.play': 'Play',
   'detail.resume': 'Resume',
   'detail.moreInfo': 'More Info',
+  'detail.moreInfoShort': 'Info',
   'detail.trailer': 'Trailer',
   'detail.episodes': 'Episodes',
   'detail.season': 'Season {n}',
@@ -521,6 +522,12 @@ export const en = {
   // Search corrections and completions
   'search.didYouMean': 'Did you mean {title}?',
   'search.suggestions': 'Suggestions',
+
+  'cinema.watchAnyway': 'Watch the cinema recording anyway',
+  'cinema.confirm': 'Cinema recordings have low picture and sound quality.',
+  'cinema.play': 'Play it',
+  'cinema.badge': 'Cinema recording',
+  'cinema.badgeTitle': 'A recording made in a cinema: low picture and sound quality',
 } satisfies Record<string, Message>;
 
 export type MessageKey = keyof typeof en;
