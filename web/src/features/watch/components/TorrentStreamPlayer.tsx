@@ -2506,7 +2506,7 @@ function PlayerCore({
     >
       {/* Both slots stack in their own layer under the overlays; the hidden one never touches player state */}
       <div
-        className={`absolute inset-0 isolate${touchUi ? ' touch-none' : ''}`}
+        className={`absolute inset-0 isolate ${touchUi ? 'touch-none' : ''}`}
         onClick={touchUi ? undefined : () => {
           // The click that closed the panel should not also pause
           if (Date.now() - panelClosedAt.current < 400) return;
