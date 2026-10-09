@@ -339,6 +339,11 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 		if movie {
 			if d, err := s.cfg.TMDB.GetMovieDetails(id); err == nil && d != nil {
 				t.title, t.year = d.Title, tsDateYear(d.ReleaseDate)
+				for _, c := range d.Credits.Crew {
+					if n := tsNormalize(c.Name); c.Job == "Director" && len(n) > 0 {
+						t.directors = append(t.directors, n)
+					}
+				}
 			}
 		} else if d, err := s.cfg.TMDB.GetTVDetails(id); err == nil && d != nil {
 			t.title = d.Name
@@ -366,14 +371,18 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 
 // tsTMDBTitle is what englishTitle keeps per tmdb id (year 0: unknown, the client's stays).
 type tsTMDBTitle struct {
-	title string
-	year  int
+	title     string
+	year      int
+	directors [][]string // normalized names (movies)
 }
 
 func tsApplyTMDBTitle(q *tsResolveQuery, t tsTMDBTitle) {
 	q.title = t.title
-	if t.year > 0 && q.mediaType == "movie" {
-		q.year = t.year
+	if q.mediaType == "movie" {
+		if t.year > 0 {
+			q.year = t.year
+		}
+		q.directors = t.directors
 	}
 }
 

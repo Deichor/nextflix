@@ -203,6 +203,10 @@ func (h handler) resolve(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if c.Query("dry") == "1" {
+		s.dryResolve(c, q)
+		return
+	}
 	key := tsResolveKey(q)
 	// cached=1 only reports a known source; it never searches, joins a swarm or holds the title
 	if c.Query("cached") == "1" {

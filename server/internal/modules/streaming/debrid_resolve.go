@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
-	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,13 +18,12 @@ import (
 // Resolve with TorBox (see debrid.go): the best ranked hashes are checked against TorBox's
 // cache; with "prefer TorBox" a cached release moves to the top of its resolution. A cached
 // candidate is checked without TorrServer: its file comes from TorBox's file list, the
-// duration probe reads the HTTPS link, and a short read stands in for the swarm health.
+// duration probe reads the HTTPS link, and a short parallel read (debrid_rate.go) stands in
+// for the swarm health.
 
 const (
-	tsDebridBonus     = 5.0             // above the best uncached release of the resolution
-	tsDebridGateWait  = 5 * time.Second // lower ranked checks wait this long for the TorBox one
-	tsDebridSpeedTime = 1500 * time.Millisecond
-	tsDebridSpeedMax  = 32 * tsMB
+	tsDebridBonus    = 5.0             // above the best uncached release of the resolution
+	tsDebridGateWait = 5 * time.Second // lower ranked checks wait this long for the TorBox one
 )
 
 var errDebridPicked = errors.New("a TorBox source of this resolution was picked")
@@ -264,7 +261,9 @@ func (s *Service) checkDebrid(ctx context.Context, c tsCandidate, q tsResolveQue
 	// The header probe and a short read of the middle (the line speed TorBox gives) together
 	need := tsNeedRate(file.Length, q.runtime, q.mediaType)
 	healthCh := make(chan *tsHealth, 1)
-	go func() { healthCh <- s.debridSpeed(ctx, hash, file.ID, file.Length, need, c.raw.Seeders) }()
+	go func() {
+		healthCh <- s.debridHealth(ctx, hash, file.ID, file.Length, tsMidOffset(file.Length, 0), need, c.raw.Seeders)
+	}()
 	duration, verified, err := s.checkDuration(ctx, c, q, hash, file.ID, nil, nil)
 	health := <-healthCh
 	if err != nil {
@@ -283,54 +282,8 @@ func (s *Service) checkDebrid(ctx context.Context, c tsCandidate, q tsResolveQue
 			tsUnfitNote(res.unfit))
 	}
 	res.Health = health
-	log.Printf("resolve %q: %q plays from TorBox: %s in %s", q.title, c.raw.Title, health, time.Since(started).Round(time.Millisecond))
+	log.Printf("resolve %q: %q plays from TorBox: %s in %s%s", q.title, c.raw.Title, health, time.Since(started).Round(time.Millisecond),
+		tsHealthSeries(health))
 	s.noteChecked(q, res)
 	return res, nil
-}
-
-// debridSpeed reads up to tsDebridSpeedMax from the middle of the file for at most
-// tsDebridSpeedTime (after the first byte) and returns the rate as the source's health
-// (nil when nothing arrived).
-func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size, need int64, seeders int) *tsHealth {
-	base, err := s.debrid.proxy()
-	if err != nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, tsDebridSpeedTime+8*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/f/%s/%d", base, hash, index), nil)
-	if err != nil {
-		return nil
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", tsMidOffset(size, 0)))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	buf := make([]byte, 256<<10)
-	var read int64
-	var first time.Time
-	for read < tsDebridSpeedMax {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 && first.IsZero() {
-			first = time.Now()
-		}
-		read += int64(n)
-		if rerr != nil || (!first.IsZero() && time.Since(first) >= tsDebridSpeedTime) {
-			if rerr != nil && rerr != io.EOF && read == 0 {
-				return nil
-			}
-			break
-		}
-	}
-	if first.IsZero() || read == 0 {
-		return nil
-	}
-	took := time.Since(first)
-	if took < 50*time.Millisecond {
-		took = 50 * time.Millisecond
-	}
-	rate := int64(float64(read) / took.Seconds())
-	return newHealth(rate, need, 0, seeders)
 }

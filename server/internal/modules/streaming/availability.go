@@ -8,10 +8,14 @@ import (
 )
 
 // Resolve does not search for titles that are not out yet: an unaired episode has no
-// source, and a film that is only in cinemas would only turn up cinema recordings.
+// source, and a film that is only in cinemas would only turn up cinema recordings. The
+// catalog already counts a film in cinemas whose home release is on the indexers as
+// available (homerelease.go).
 
 const (
-	tsAvailabilityWait = 4 * time.Second // a slower lookup counts as unknown
+	// A slower lookup counts as unknown. It covers TMDB (cached 6 h) and, for a film in cinemas,
+	// the search for a home release (tsHomeWait).
+	tsAvailabilityWait = 4*time.Second + tsHomeWait
 
 	// HTTP 425 Too Early: the title exists, but cannot be streamed yet
 	statusTooEarly = 425

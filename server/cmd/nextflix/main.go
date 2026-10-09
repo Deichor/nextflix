@@ -92,6 +92,10 @@ func run() error {
 	top10Svc.Start(ctx)
 
 	catalogSvc := catalog.NewService(tm)
+	catalogSvc.StartSearchIndex(ctx, envOr("SEARCH_INDEX_DIR", "/app/data"))
+	catalogSvc.SetRatings(searchRatings(ratingsSvc))
+	ratingsSvc.OnChange(catalogSvc.InvalidateTaste)
+	catalogSvc.SetLocalSignals(localSignals(profilesSvc, progressSvc, ratingsSvc))
 
 	imagesSvc := images.NewService(images.Config{
 		Dir:       envOr("IMAGE_CACHE_DIR", "/app/data/img-cache"),
@@ -117,6 +121,8 @@ func run() error {
 	if err := streamingSvc.EnsureSettings(); err != nil {
 		log.Printf("seed indexer settings: %v", err)
 	}
+	// A film in cinemas whose home release is on the indexers counts as available
+	catalogSvc.SetHomeReleaseFinder(streamingSvc)
 	streamingSvc.StartInstant(ctx, instantFeed(top10Svc, tm))
 
 	subtitlesSvc := subtitles.NewService(db, subtitles.Config{
@@ -164,6 +170,55 @@ func watchHistory(svc *progress.Service) recommendations.HistoryFunc {
 		for _, r := range rows {
 			out = append(out, recommendations.Watched{MediaType: r.MediaType, TmdbID: r.TmdbID, Title: r.Title,
 				Finished: r.Finished, UpdatedAt: r.UpdatedAt})
+		}
+		return out, nil
+	}
+}
+
+// searchRatings feeds a profile's ratings into the search ranking (genre taste).
+func searchRatings(svc *ratings.Service) catalog.RatingsSource {
+	return func(profileID uint) ([]catalog.RatedTitle, error) {
+		rows, err := svc.List(profileID, ratings.Filter{})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]catalog.RatedTitle, 0, len(rows))
+		for _, r := range rows {
+			t := catalog.RatedTitle{MediaType: r.MediaType, TmdbID: r.TmdbID, Favorite: r.Favorite}
+			if r.Rating != nil {
+				t.Rating = *r.Rating
+			}
+			out = append(out, t)
+		}
+		return out, nil
+	}
+}
+
+// localSignals lists what every profile watched and rated, for the browse ranking.
+func localSignals(profileSvc *profiles.Service, progressSvc *progress.Service, ratingSvc *ratings.Service) catalog.LocalSignalsSource {
+	return func() (map[uint][]catalog.LocalTitle, error) {
+		list, err := profileSvc.List()
+		if err != nil {
+			return nil, err
+		}
+		out := map[uint][]catalog.LocalTitle{}
+		for _, p := range list {
+			watched, err := progressSvc.History(p.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, w := range watched {
+				out[p.ID] = append(out[p.ID], catalog.LocalTitle{MediaType: w.MediaType, TmdbID: w.TmdbID, Watched: true, Finished: w.Finished})
+			}
+			rows, err := ratingSvc.List(p.ID, ratings.Filter{})
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range rows {
+				if r.Rating != nil {
+					out[p.ID] = append(out[p.ID], catalog.LocalTitle{MediaType: r.MediaType, TmdbID: r.TmdbID, Rating: *r.Rating})
+				}
+			}
 		}
 		return out, nil
 	}

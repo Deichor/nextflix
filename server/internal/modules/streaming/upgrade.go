@@ -418,7 +418,12 @@ func (s *Service) keepWarming(ctx context.Context, q tsResolveQuery, r tsResolve
 			if !s.warmSlot(ctx, r.Hash, "upgrade warm-up") {
 				return nil
 			}
-			h := s.measureWarm(ctx, r.Hash, r.Index, tsMidOffset(r.Size, round), need, tsWarmWindowTop, tsWarmHooks{})
+			var h *tsHealth
+			if r.Debrid && s.debridStreams(r.Hash) {
+				h = s.debridHealth(ctx, r.Hash, r.Index, r.Size, tsMidOffset(r.Size, round), need, r.Seeders)
+			} else {
+				h = s.measureWarm(ctx, r.Hash, r.Index, tsMidOffset(r.Size, round), need, tsWarmWindowTop, tsWarmHooks{})
+			}
 			<-s.warmRounds
 			if h == nil {
 				continue

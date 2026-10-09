@@ -906,7 +906,8 @@ func (h handler) release(c *gin.Context) {
 		}
 	}
 	if len(hashes) > 0 {
-		// why=<reason>: the player left these torrents after a switch to them failed
+		// why=<reason>: why the player left these torrents (a switch to them failed, or how the
+		// upgrade that replaced them went)
 		if why := tsPlayerReason(c.Query("why")); why != "" {
 			log.Printf("player: dropping %s: %s", tsShortHash(hashes[0]), why)
 		}

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,6 +111,8 @@ type tsResolveQuery struct {
 	extraQueries []string
 	// IMDb id of tmdbID ("" = unknown): movies are also searched by it
 	imdbID string
+	// Movie directors (TMDB, normalized names; nil = unknown), see tsDisclaimed
+	directors [][]string
 	// TV: episodes per season (TMDB, [0] = season 1; nil = unknown) and the absolute number
 	// of season/episode (0 = unknown), see episodes.go
 	seasonEps []int
@@ -164,8 +167,11 @@ var (
 	tsHDRPattern    = regexp.MustCompile(`\bhdr(10)?\b|\bdv\b|dolby.?vision`)
 	tsHDR10Pattern  = regexp.MustCompile(`\bhdr(10)?\b|hdr10plus|\bhlg\b`) // HDR10, HDR10+, HLG: a base layer browsers show correctly
 	tsDVPattern     = regexp.MustCompile(`\bdv\b|\bdovi\b|dolby.?vision`)
-	// Bonus material and compilations, matched on the tokens after the title
-	tsExtrasPattern = regexp.MustCompile(`\b(greatest moments|making of|inside the episodes?|behind the scenes|recaps?|samples?|featurettes?|bloopers|deleted scenes|trailers?|teasers?)\b`)
+	// Bonus material and compilations, matched on the normalized name (see tsExtrasName)
+	tsExtrasPattern = regexp.MustCompile(`\b(greatest moments|making of|inside the episodes?|behind the scenes|recaps?|samples?|featurettes?|bloopers|deleted scenes|trailers?|teasers?|extras?|bonus|interviews?|documentary|prologue|promo)\b`)
+	// The same in Cyrillic names (tsNormalize drops other scripts): trailer, teaser, making-of,
+	// bonus, interview, sample, promo, prologue
+	tsExtrasCyrillic = regexp.MustCompile(`трейлер|тизер|фильм о фильме|о съ[её]мках|бонус|интервью|с[еэ]мпл|промо|пролог`)
 
 	tsAccentReplacer = strings.NewReplacer(
 		"à", "a", "á", "a", "â", "a", "ä", "a", "ã", "a", "å", "a",
@@ -302,6 +308,73 @@ func tsMatchTitle(release, title []string) ([]string, bool) {
 	return nil, false
 }
 
+// tsInTitle reports whether the normalized phrase is part of q's title or one of its names.
+func tsInTitle(phrase string, q tsResolveQuery) bool {
+	for _, name := range append([]string{q.title}, q.names...) {
+		if strings.Contains(" "+strings.Join(tsNormalize(name), " ")+" ", " "+phrase+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// tsExtrasName: the name (raw, and its normalized tokens) carries a bonus-material word
+// ("Making of", "Featurette", "Trailer", "Трейлер", ...) that the title itself does not.
+func tsExtrasName(name string, tokens []string, q tsResolveQuery) bool {
+	if m := tsExtrasCyrillic.FindString(strings.ToLower(name)); m != "" {
+		inTitle := false
+		for _, n := range append([]string{q.title}, q.names...) {
+			inTitle = inTitle || strings.Contains(strings.ToLower(n), m)
+		}
+		if !inTitle {
+			return true
+		}
+	}
+	for _, m := range tsExtrasPattern.FindAllString(strings.Join(tokens, " "), -1) {
+		if !tsInTitle(m, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// tsDisclaimerFiller are words of "NOT the ... film" that name nobody
+var tsDisclaimerFiller = map[string]bool{"the": true, "a": true, "an": true, "same": true, "original": true,
+	"real": true, "actual": true, "official": true, "other": true, "famous": true, "new": true, "big": true}
+
+// tsDisclaimed: the name says it is not some film ("... (NOT The Chris Nolan FILM)"), so it is
+// a namesake's release. It is only kept when the words between "not" and "film" / "movie" name
+// someone and q's directors are known and not among them (then q is that namesake).
+func tsDisclaimed(tokens []string, q tsResolveQuery) bool {
+	for i, t := range tokens {
+		if t != "not" {
+			continue
+		}
+		for j := i + 1; j < len(tokens) && j <= i+7; j++ {
+			if tokens[j] != "film" && tokens[j] != "movie" {
+				continue
+			}
+			if tsInTitle(strings.Join(tokens[i:j+1], " "), q) {
+				break // "This Is Not a Film"
+			}
+			named := false
+			for _, w := range tokens[i+1 : j] {
+				named = named || !tsDisclaimerFiller[w]
+			}
+			if !named || len(q.directors) == 0 {
+				return true
+			}
+			for _, d := range q.directors {
+				if len(d) > 0 && slices.Contains(tokens[i+1:j], d[len(d)-1]) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
 // tsScore ranks one Jackett result; ok=false means it is rejected.
 // Order of importance: source tier (cinema leaks last), resolution, codec/HDR fit for the client,
 // then within a tier audio / HDR / bitrate for what the client can use, and seeders (see
@@ -324,8 +397,10 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 			return c, false
 		}
 	}
-	// Specials and compilations ("Greatest Moments", "Inside the Episode") are not the title
-	if tsExtrasPattern.MatchString(strings.Join(rest, " ")) {
+	// Specials, compilations and bonus material ("Greatest Moments", "The Making of an Epic")
+	// are not the title, and neither is a namesake ("... (NOT The Chris Nolan FILM)"). The
+	// whole name counts: an IMDb id match is scored with the name's own title.
+	if all := tsNormalize(r.Title); tsExtrasName(r.Title, all, q) || tsDisclaimed(all, q) {
 		return c, false
 	}
 

@@ -39,6 +39,7 @@ type Service struct {
 	bitsearch    *bitsearch
 	debrid       *tsDebrid  // TorBox (debrid.go)
 	instant      *tsInstant // instant-play hints (instant.go)
+	home         *tsHome    // home releases of films in cinemas (homerelease.go)
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
@@ -111,6 +112,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 	}
 	s.debrid = newDebrid(s, cfg.TorBoxURL)
 	s.instant = newInstant(s)
+	s.home = newHome()
 	if cfg.BitsearchURL != "" {
 		s.bitsearch = newBitsearch(cfg.BitsearchURL, cfg.FlareSolverrURL)
 	}

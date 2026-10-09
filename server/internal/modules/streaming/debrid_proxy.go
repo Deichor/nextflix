@@ -331,6 +331,7 @@ func (d *tsDebrid) readChunk(resp *http.Response, c *tsProxyChunk) int {
 		k, err := resp.Body.Read(c.buf[n:min(size, n+256<<10)])
 		if k > 0 {
 			stall.Reset(tsProxyStall)
+			d.line.fetched(k, time.Now())
 			n += k
 			got += k
 			pc.mu.Lock()

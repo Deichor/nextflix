@@ -11,9 +11,10 @@ import (
 // (candidate checks that keep running, upgrade warm-ups, spare measurements, late candidate
 // checks and their probes) waits while another torrent starts: the player's probe runs, or
 // its play stream is younger than tsStartQuiet (up to tsStartQuietMax while it has not sent
-// its first bytes yet). Work before the answer (resolve, prefetch on the detail page) never
-// waits for that; any work of a title that gives way to another title's playback does
-// (priority.go).
+// its first bytes yet). Work on a TorBox file does not wait for a starting TorBox stream (CDN
+// reads take nothing from a swarm), only for a starting torrent. Work before the answer
+// (resolve, prefetch on the detail page) never waits for that; any work of a title that
+// gives way to another title's playback does (priority.go).
 
 // Vars so tests can shorten them.
 var (
@@ -47,12 +48,21 @@ func tsInBackground(ctx context.Context) bool {
 // or its play stream started less than tsStartQuiet ago (tsStartQuietMax while no byte has
 // been sent yet). "" = none.
 func (s *Service) startingStream(except string) string {
+	if all := s.startingStreams(except); len(all) > 0 {
+		return all[0]
+	}
+	return ""
+}
+
+// startingStreams lists every torrent other than except that is starting (see startingStream).
+func (s *Service) startingStreams(except string) []string {
 	now := time.Now()
 	s.warmMu.Lock()
 	defer s.warmMu.Unlock()
+	var out []string
 	for h, n := range s.starting {
 		if h != except && n > 0 {
-			return h
+			out = append(out, h)
 		}
 	}
 	for h, at := range s.playStart {
@@ -60,10 +70,10 @@ func (s *Service) startingStream(except string) string {
 			continue
 		}
 		if age := now.Sub(at); age < tsStartQuiet || (!s.playFlowing[h] && age < tsStartQuietMax) {
-			return h
+			out = append(out, h)
 		}
 	}
-	return ""
+	return out
 }
 
 // yieldReason returns the torrent that work on hash under ctx waits for and why: background
@@ -74,8 +84,12 @@ func (s *Service) yieldReason(ctx context.Context, hash string) (string, string)
 		return other, "plays"
 	}
 	if tsInBackground(ctx) {
-		if other := s.startingStream(hash); other != "" {
-			return other, "starts"
+		// A TorBox read beside a starting TorBox stream competes with no swarm: it goes on
+		debrid := hash != "" && s.debridStreams(hash)
+		for _, other := range s.startingStreams(hash) {
+			if !debrid || !s.debridStreams(other) {
+				return other, "starts"
+			}
 		}
 	}
 	return "", ""

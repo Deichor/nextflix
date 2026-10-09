@@ -98,6 +98,8 @@ type tsDebrid struct {
 	proxyOnce sync.Once
 	proxyBase string
 	proxyErr  error
+
+	line tsDebridLine // rates TorBox delivered lately (debrid_rate.go)
 }
 
 func newDebrid(s *Service, base string) *tsDebrid {
