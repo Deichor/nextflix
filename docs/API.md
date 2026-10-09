@@ -137,28 +137,35 @@ A profile without any `like`/`love`/favorite (or when TMDB returns nothing) gets
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/recommendations/surprise?profile_id=N[&exclude=movie-27205,tv-1396]` | 200 `{title, reason}`: one title the profile is likely to enjoy, different on every call (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#surprise-me)). `exclude` lists `<media_type>-<tmdb_id>` (or `:`) keys the client showed lately; the server also skips the profile's last 20 picks, rated / favorited titles and titles with any watch progress. 400 without a profile, 404 `{error}` when nothing is left (TMDB unreachable), `Cache-Control: no-store`. Titles follow `X-Lang` |
+| GET | `/api/recommendations/surprise?profile_id=N[&exclude=movie-27205,tv-1396]` | 200 `{title, reason}`: one title the profile is likely to enjoy, different on every call (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#surprise-me)). `exclude` lists `<media_type>-<tmdb_id>` (or `:`) keys the client showed lately; the server also skips the profile's last 30 picks, rated / favorited titles and titles with any watch progress. 400 without a profile, 404 `{error}` when nothing is left (TMDB unreachable), `Cache-Control: no-store`. Titles follow `X-Lang` |
 
 `title` is an Item (above, plus `original_language`) with `logo_path` (`""` when TMDB has no logo; profile language,
-then English, then language-less). `reason`:
+then English, then language-less). `reason` always has `kind` and `bucket` (`taste` about half of the presses,
+`adjacent` and `wild` a quarter each):
 
-| `kind` | Fields | Meaning |
-|---|---|---|
-| `because_loved` | `title`, `media_type`, `tmdb_id` | found through a title rated "Love this!" |
-| `because_liked` | `title`, `media_type`, `tmdb_id` | found through a title rated "I like this" |
-| `favorite_like` | `title`, `media_type`, `tmdb_id` | found through a favorite without a rating |
-| `because_watched` | `title`, `media_type`, `tmdb_id` | found through a title from the watch history |
-| `genre` | `genre_id` (TMDB genre id) | from the profile's favorite genres |
-| `trending_pick` | – | trending this week (exploration, or a profile without history) |
+| `kind` | `bucket` | Fields | Meaning |
+|---|---|---|---|
+| `because_loved` | `taste` | `title`, `media_type`, `tmdb_id` | related to a title rated "Love this!" |
+| `because_liked` | `taste` | `title`, `media_type`, `tmdb_id` | related to a title rated "I like this" |
+| `favorite_like` | `taste` | `title`, `media_type`, `tmdb_id` | related to a favorite without a rating |
+| `because_watched` | `taste` | `title`, `media_type`, `tmdb_id` | related to a title from the watch history |
+| `genre` | `taste` | `genre_ids` (1–2 TMDB movie genre ids), `genre_id` (the first) | from a pair of the profile's top genres |
+| `adjacent` | `adjacent` | `genre_id` | a well-rated title of a liked genre that is not like any seed |
+| `wild_card` | `wild` | `language` (original language, only when not English) | acclaimed and outside the profile's taste |
+| `trending_pick` | `taste` | – | trending this week (a profile without history) |
 
-The seed `title` is stored text (the language it was saved in). Clients build the sentence: "Because you loved
-Dune" / "Bayıldığın Dune filmine benzediği için" (`media_type` picks "filmine" / "dizisine").
+Genre ids are movie ids (a TV genre is reported as its movie counterpart, e.g. 10765 → 878). The seed `title` is
+stored text (the language it was saved in). Clients build the sentence: "Because you loved Dune" / "Bayıldığın Dune
+filmine benzediği için" (`media_type` picks "filmine" / "dizisine"), "Because you like drama and crime" / "Dram ve
+suç sevdiğin için", "A new pick in sci-fi" / "Bilim kurguda yeni bir keşif", "Something completely different – a
+highly rated Korean film" / "Bambaşka bir şey – çok beğenilen bir Kore filmi" (anime when `language` is `ja` and the
+title has genre 16; a plain "Something completely different" for English or unknown languages).
 
 ```json
 { "title": { "id": 1408, "media_type": "tv", "title": "Queen of the South", "overview": "...", "poster_path": "/p.jpg",
     "backdrop_path": "/b.jpg", "logo_path": "/l.png", "vote_average": 7.6, "first_air_date": "2016-06-23",
     "genre_ids": [80, 18], "original_language": "en" },
-  "reason": { "kind": "because_loved", "title": "Breaking Bad", "media_type": "tv", "tmdb_id": 1396 } }
+  "reason": { "kind": "because_loved", "bucket": "taste", "title": "Breaking Bad", "media_type": "tv", "tmdb_id": 1396 } }
 ```
 
 ## Top 10 (`modules/top10`)
@@ -203,15 +210,35 @@ the Turkish TMDB details (cached 24 h); ranks are unchanged and titles without a
 | GET | `/api/tmdb/tv/:id/season/:season` |
 | GET | `/api/tmdb/:id/related` |
 | GET | `/api/catalog/discover` (see [Discover](#discover-search-filters)) |
+| GET | `/api/catalog/suggest` (see [Search](#search-ranking-did-you-mean-suggest)) |
 
-All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search not at all). With `X-Lang: tr`,
+All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search pools 15 min). With `X-Lang: tr`,
 `/api/tmdb/movie/:id/images` lists only Turkish, English and language-less images (`include_image_language=tr,en,null`),
 and details videos include English trailers (`include_video_language=tr,en,null`).
+
+### Search (ranking, did you mean, suggest)
+
+- `GET /api/tmdb/search?q=` (default `type=multi`) → 200 `{page: 1, total_pages: 1, total_results, results: [SearchResult],
+  did_you_mean?}`: every result on one page, ordered by our own score (see
+  [ARCHITECTURE.md](ARCHITECTURE.md#search-ranking)); `page > 1` answers `[]`. `did_you_mean` (omitted when empty) is the
+  corrected query whose results were merged in, e.g. `"The Mandalorian"` for `mandoloarien`. `type=movie|tv` still
+  passes TMDB's own answer through (unranked). With `X-User-ID` the profile's genre taste lifts titles slightly.
+- `GET /api/tmdb/suggestions?q=` → the 5 best ranked results (`{results, total_results, did_you_mean}`) for the navbar.
+- `GET /api/catalog/suggest?q=&limit=` (default 8, max 15) → 200 `{query, ready, results: [{title, media_type, id,
+  original_title?}]}`: title completions from the typo index only (no TMDB call, a few ms): titles starting with `q`
+  (articles ignored), titles with a word starting with `q`, then typo-tolerant prefixes; one per title and per text.
+  `title` is the matching name (a learned localized title only in its language, then `original_title` is set).
+  `ready: false` until the index is loaded.
+
+```
+GET /api/tmdb/search?q=mandoloarien  → {"did_you_mean":"The Mandalorian","results":[{"id":82856,"title":"The Mandalorian",...},...]}
+GET /api/catalog/suggest?q=thron     → {"results":[{"title":"Game of Thrones","media_type":"tv","id":1399},{"title":"Thronecast",...},...]}
+```
 
 ### Discover (search filters)
 
 `GET /api/catalog/discover?type=all|movie|tv&genres=16,878&anime=1&q=&page=` → 200
-`{page, total_pages, total_results, results: [SearchResult]}` (the normalized `/api/tmdb/search` shape: TV `name` /
+`{page, total_pages, total_results, results: [SearchResult], did_you_mean?}` (the normalized `/api/tmdb/search` shape: TV `name` /
 `first_air_date` come as `title` / `release_date`, with `media_type`, `genre_ids`, `original_language`, `popularity`).
 
 - `genres`: comma-separated TMDB movie genre ids (TV-only ids are accepted too), combined with **AND**. They are mapped per
@@ -221,11 +248,14 @@ and details videos include English trailers (`include_video_language=tr,en,null`
   returns the other media type.
 - `anime=1`: Animation (16) and `original_language` `ja`, combinable with genres.
 - `type` (default `all`) limits the media type.
-- Without `q`: TMDB `/discover/movie` and `/discover/tv` (`sort_by=popularity.desc`, `vote_count.gte=10`, no adult
-  titles), cached 24 h per language and query. With `type=all` a page holds that page of both lists merged by
-  popularity (up to 40 results); `total_pages` is the larger of the two (max 500). Infinite scroll asks `page=2, 3…`.
-- With `q`: the first 5 TMDB multi-search pages of `q` (people and titles without artwork dropped, cached 15 min per
-  language), filtered by the selection, in TMDB's order, as one page (`total_pages: 1`; `page > 1` answers `[]`).
+- Without `q`: a pool of TMDB `/discover/movie` and `/discover/tv` pages (popularity 1-5, vote count 1-3, rating 1-3 with
+  `vote_count.gte=200`; no adult titles; each page cached 24 h per language) ranked by the browse score (see
+  [ARCHITECTURE.md](ARCHITECTURE.md#browse-ranking); per profile with `X-User-ID`), 40 results per page for `type=all`, 20
+  for one type. After the ranked pages, TMDB's popularity order continues from its page 6 without the pool's titles;
+  `total_pages` = ranked pages + the rest of TMDB's (max 500). Infinite scroll asks `page=2, 3…`.
+- With `q`: the ranked search of `q` (5 TMDB multi-search pages, cached 15 min per language, typo correction as in
+  [Search](#search-ranking-did-you-mean-suggest)), filtered by the selection, as one page (`total_pages: 1`; `page > 1`
+  answers `[]`).
 - Titles without poster and backdrop are dropped. 502 `{error}` when TMDB fails.
 
 ```
@@ -242,7 +272,8 @@ GET /api/catalog/discover?type=tv&genres=27             → 200 {"page":1,"total
 
 ```json
 { "status": "available" | "not_released" | "in_theaters" | "unknown",
-  "release_date": "YYYY-MM-DD" | null, "theatrical_date": "YYYY-MM-DD" | null, "digital_date": "YYYY-MM-DD" | null }
+  "release_date": "YYYY-MM-DD" | null, "theatrical_date": "YYYY-MM-DD" | null, "digital_date": "YYYY-MM-DD" | null,
+  "digital_release_found"?: true }
 ```
 
 400 `{error}` for a bad `media_type`, `tmdb_id`, `season` or `episode`. TMDB failures answer `unknown` (never a
@@ -262,12 +293,19 @@ block). Dates are compared with today's date in Europe/Istanbul.
   premiere older than 120 days without other dates is `available`). Without any release dates the movie's
   `release_date` decides: in the future → `not_released`, else `unknown`. `theatrical_date` is the earliest
   theatrical date, `digital_date` the earliest digital one.
-
+- Movie home release found: TMDB's digital dates lag the real ones, so a movie TMDB lists as `in_theaters`, or
+  `not_released` with a passed (or no) release date or a digital date ahead, is searched on the indexers first
+  (like resolve, no TorrServer; the answer waits up to 4 s for it, the verdict is cached per film 6 h when found,
+  1 h otherwise, see [ARCHITECTURE.md](ARCHITECTURE.md#films-in-cinemas-with-a-home-release-homereleasego)).
+  When home releases (WEB-DL, WEBRip, BluRay, ...; never a cinema recording, bonus material or a namesake) of at
+  least 2 release groups exist the answer is `available` with `digital_release_found: true` and `release_date` =
+  the theatrical date; the other dates stay.
 ```
 GET /api/availability?media_type=tv&tmdb_id=320754&season=1&episode=1      (Money Trap, on 2026-10-08)
 → 200 {"status":"not_released","release_date":"2026-10-16","theatrical_date":null,"digital_date":null}
-GET /api/availability?media_type=movie&tmdb_id=1368337                     (The Odyssey, on 2026-10-08)
-→ 200 {"status":"in_theaters","release_date":"2026-11-17","theatrical_date":"2026-07-15","digital_date":"2026-11-17"}
+GET /api/availability?media_type=movie&tmdb_id=1368337                     (The Odyssey, on 2026-10-09: WEB-DLs out)
+→ 200 {"status":"available","release_date":"2026-07-15","theatrical_date":"2026-07-15","digital_date":"2026-11-17",
+       "digital_release_found":true}
 GET /api/availability?media_type=movie&tmdb_id=27205                       (Inception)
 → 200 {"status":"available","release_date":"2010-12-03","theatrical_date":"2010-07-15","digital_date":"2020-08-13"}
 ```
@@ -291,9 +329,9 @@ GET /api/availability?media_type=movie&tmdb_id=27205                       (Ince
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/torrent-stream/resolve?type=movie&title=&year=` | auto-pick for the Watch button |
-| GET | `/api/torrent-stream/resolve?type=tv&title=&season=&episode=` | → 200 `{magnet, hash, index, file_name, torrent_title, quality, seeders, size, hdr?, health?, duration?, duration_verified, cached?, format?, source?, debrid?}`, 404 `{error: "No playable source found"}`; 425 `{error: "not_released", status: "not_released"\|"in_theaters", release_date, digital_date}` (dates `YYYY-MM-DD` or null) when `tmdb_id` names a title that is not out yet or only in cinemas (see [Availability](#availability)): nothing is searched. `unknown` availability, a lookup slower than 4 s, a cached source or a resolve already running never answer 425. Can take up to ~60 s. `health` = `{rate, peak?, need, active_peers, seeders, keeps_up, dead?}` (bytes/s; `rate` is the rate delivered after the warm-up start burst, `peak` the best 3 s window for comparison). `quality` is the probed video size once the header was read (else the release name). `format` = `{audio?, channels?, atmos?, dv?, dv_only?, hdr10?, hdr10plus?, source?, truncated?, probed?, undecodable?, subs?}` (see [Playback capabilities](#playback-capabilities); `probed` once ffprobe corrected it; `subs`: ISO 639-1 languages of the text subtitles inside the file or next to it in the torrent, from the check). When nothing keeps up the answer comes about 12 s after the checks started (up to 16 s while nothing is measured yet) with the most playable source so far (`health.keeps_up: false`); every alternative keeps measuring for `sidegrade`. Optional: `tmdb_id`, `runtime` (minutes), `hevc=1`, `hdr=1`, `dv=1`, `atmos=1`, `acodecs=`, `maxq=1080\|720`,|720`, `refresh=1` (skip the cache, avoid the cached torrent), `avoid=<hash>,<hash>` (up to 5 torrents that must not be picked again, ranked last), `cached=1` (only answer from the cache, never search) |
+| GET | `/api/torrent-stream/resolve?type=tv&title=&season=&episode=` | → 200 `{magnet, hash, index, file_name, torrent_title, quality, seeders, size, hdr?, health?, duration?, duration_verified, cached?, format?, source?, debrid?}`, 404 `{error: "No playable source found"}`; 425 `{error: "not_released", status: "not_released"\|"in_theaters", release_date, digital_date}` (dates `YYYY-MM-DD` or null) when `tmdb_id` names a title that is not out yet or only in cinemas with no home release on the indexers yet (see [Availability](#availability): a film in cinemas whose WEB-DL is out is `available` and resolves normally): nothing more is searched. `unknown` availability, a lookup slower than 4 s, a cached source or a resolve already running never answer 425. Can take up to ~60 s. `health` = `{rate, peak?, need, active_peers, seeders, keeps_up, dead?}` (bytes/s; `rate` is the rate delivered after the warm-up start burst, `peak` the best 3 s window for comparison). `quality` is the probed video size once the header was read (else the release name). `format` = `{audio?, channels?, atmos?, dv?, dv_only?, hdr10?, hdr10plus?, source?, truncated?, probed?, undecodable?, subs?}` (see [Playback capabilities](#playback-capabilities); `probed` once ffprobe corrected it; `subs`: ISO 639-1 languages of the text subtitles inside the file or next to it in the torrent, from the check). When nothing keeps up the answer comes about 12 s after the checks started (up to 16 s while nothing is measured yet) with the most playable source so far (`health.keeps_up: false`); every alternative keeps measuring for `sidegrade`. Optional: `tmdb_id`, `runtime` (minutes), `hevc=1`, `hdr=1`, `dv=1`, `atmos=1`, `acodecs=`, `maxq=1080\|720`,|720`, `refresh=1` (skip the cache, avoid the cached torrent), `avoid=<hash>,<hash>` (up to 5 torrents that must not be picked again, ranked last), `cached=1` (only answer from the cache, never search), `dry=1` (search and rank only: 200 `{title, year, runtime, results, usable, took_ms, candidates: [{title, seeders, size, quality, source, score, parts}]}` with the ranked candidates (up to 100); no TorrServer, TorBox, source cache or hold; the same 425 gate) |
 | POST | `/api/torrent-stream/prefetch?<same query as resolve>` | 202 `{status: started|ready|running|busy|failed_recently|early|not_released|deferred}`; the intent to watch: starts the resolve job in the background and holds the title warm (a cached source is re-added to TorrServer and its header read). While another title plays (playback priority, `docs/ARCHITECTURE.md`) a detail-page prefetch answers `deferred`: the title is held but nothing is searched or loaded until the last stream ends, then it starts by itself; a next-episode prefetch (`next_pos`) of the playing show is never deferred.|ready\|running\|busy\|failed_recently\|early\|not_released}`; the intent to watch: starts the resolve job in the background and holds the title warm (a cached source is re-added to TorrServer and its header read). Optional `next_pos=&next_dur=` (seconds of the current episode): a next-episode prefetch only runs once 10 min are left (85 % for episodes under 25 min), else `early`. A title that is not out yet (resolve would answer 425) gets `{status: "not_released", availability: "not_released"\|"in_theaters", release_date, digital_date}` and no job is started |
-| POST | `/api/torrent-stream/release?<resolve query>[&delay=<s>]` / `?hash=<h>,<h>` | 202 `{status: released\|scheduled, titles?, hashes?}`; drops a title's warmed torrents from TorrServer (every capability variant of that title / episode) and cancels its background work (resolve job unless a player waits for it, upgrade warm-up, late indexer results). `delay` (≤ 120 s) waits first; any prefetch, resolve or play of the title cancels it. `hash` (≤ 10) drops torrents a closing player used; `why=<reason>` (with `hash`) is logged: the player left them after a switch to them failed. Playing torrents and ones another title holds are never dropped: no torrent a player reads (a `play` stream, `probe` or `seekpoint`), or whose `play` stream ended less than 60 s ago, is dropped by any path (the drop is retried once it is free). A title release while a player reads one of the title's torrents (any capability variant) is checked again 5 s later and ignored if the player still reads it; a `hash` that a player reads is ignored. Made for `navigator.sendBeacon`; 400 without a title or hash |
+| POST | `/api/torrent-stream/release?<resolve query>[&delay=<s>]` / `?hash=<h>,<h>` | 202 `{status: released\|scheduled, titles?, hashes?}`; drops a title's warmed torrents from TorrServer (every capability variant of that title / episode) and cancels its background work (resolve job unless a player waits for it, upgrade warm-up, late indexer results). `delay` (≤ 120 s) waits first; any prefetch, resolve or play of the title cancels it. `hash` (≤ 10) drops torrents a closing player used; `why=<reason>` (with `hash`) is logged: why the player left them (a switch to them failed, or how the upgrade that replaced them went). Playing torrents and ones another title holds are never dropped: no torrent a player reads (a `play` stream, `probe` or `seekpoint`), or whose `play` stream ended less than 60 s ago, is dropped by any path (the drop is retried once it is free). A title release while a player reads one of the title's torrents (any capability variant) is checked again 5 s later and ignored if the player still reads it; a `hash` that a player reads is ignored. Made for `navigator.sendBeacon`; 400 without a title or hash |
 | GET | `/api/torrent-stream/sidegrade?<same query as resolve>&current=<hash>&current_q=[&draining=1][&critical=1][&avoid=<hash>,<hash>]` | 200 resolve result of a different torrent of at least `current_q` that keeps up now (measured within 45 s; a spare the resolve kept warm) and, when `current`'s last measurement kept up too, delivers ≥ 1.5× its rate / need; while `current` starves (or with `critical=1`) also one of a lower resolution that keeps up (the playing resolution or higher first). A spare that does not keep up is never offered. 204 otherwise (then it measures the spares in the background). At most one per title every 2 minutes; spares exist only until 60 s after the pick without playback or 3 minutes into playback (or after their arrival / the last `draining=1` poll, whichever is later). `draining=1`: the player's buffer drains; when no spare is left to measure, the server searches for alternatives in the background (at most every 3 min per title, capped at the playing resolution, without `current` and `avoid`; its checks wait while a stream starts) and a pick that finished good (never the search's "best so far" cap answer) is offered on a later poll under the same rules. `critical=1` (buffer under 6 s, implies `draining`): a lower resolution that keeps up is fine too. `avoid=` (≤ 5): torrents the player found slow, never offered (spares among them are dropped). 400 for an invalid `current` |
 | GET | `/api/torrent-stream/subalt?<same query as resolve>&current=<hash>[&current_q=][&lang=tr][&avoid=]` | 200 resolve result (with `format.subs`) of another release of the title whose subtitles include `lang` (default: the profile's, `X-Lang`): checked for the same client caps, kept up when measured (within 30 min), of a fitting length, of the playing resolution, a higher one or one step lower (not below 720p unless playing below; no 4K without `hevc=1`; `maxq` holds). 204 otherwise; then the server scans up to 3 untried candidates' headers in the background (one scan server-wide, at most every 10 min per title) and answers 204 with `Retry-After: 30` while it runs. The player calls it when the playing file has no subtitle in the profile's language; the cached source is not changed. 400 for an invalid `current` |
 | GET | `/api/torrent-stream/upgrade?<same query as resolve>&current=<hash>&current_q=<2160\|1080\|720\|480>` | 200 resolve result of a higher resolution than the playing `current` once its swarm keeps up (delivered rate ≥ 1.3× its bitrate from a finished measurement, duration verified; resolutions are the probed ones, and for the cached source the server's probed resolution wins over `current_q`); 204 otherwise (also for requests without `hevc=1`, with `maxq`, or `current_q=2160`). Without a running background warm-up it starts one upgrade search for the title (at most every 10 min); `failed=<reason>`: the player's last switch to an offered upgrade failed (logged; it tries once more); 400 for an invalid `current` |

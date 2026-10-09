@@ -29,7 +29,7 @@ docs/                       this folder
 | `httpserver` | gin engine, logging/recovery, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check, `ProfileID(c)` from `X-User-ID`, `GET /api/health`, `http.Server` with graceful shutdown |
 | `cache` | go-redis v8 wrapper; a nil `*Cache` is valid and behaves as "no cache" |
 | `tmdb` | TMDB HTTP client (v4 token as Bearer, on `upstream`), types, 24 h in-memory cache shared by catalog, providers and notifications; expired entries are kept 7 days and served when TMDB fails (see [DPI resilience](#dpi-resilience)) |
-| `upstream` | Resilient HTTP client for TMDB API, image CDN and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |
+| `upstream` | Resilient HTTP client for TMDB API, image CDN, the TMDB export files (search typo index) and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |
 | `torbox` | TorBox debrid API client (`checkcached` in batches of 100, `createtorrent`, `mylist`, `requestdl`, `user/me`), Bearer key plus a `Nextflix/1.0` User-Agent (Cloudflare refuses default ones), HTTP/1.1 with short dial / TLS / header timeouts; the key never reaches an error message (see [Debrid](#debrid-torbox)) |
 
 ### Modules (`server/internal/modules/…`)
@@ -41,7 +41,7 @@ docs/                       this folder
 | `ratings` | Per-profile ratings (`dislike`/`like`/`love`) and Favorites (replaces My List), one-time My List migration, change hook; see [Ratings and Favorites](#ratings-and-favorites) | `title_ratings`, `rating_migrations` (`my_list_items` is kept, read-only) |
 | `recommendations` | Per-profile rows built from ratings + TMDB recommendations/similar, and the "Surprise me" pick (ratings + watch history); see [Recommendations](#recommendations), [Surprise me](#surprise-me) | – (memory cache) |
 | `top10` | Netflix weekly Top 10 (Turkey and global) mapped to TMDB; see [Top 10](#top-10) | `top10_lists`, `top10_titles` |
-| `catalog` | TMDB lists, details, search, related titles, seasons, search filters (`/api/catalog/discover`, see [Search filters](#search-filters)) | – |
+| `catalog` | TMDB lists, details, ranked search with typo correction and suggest (see [Search ranking](#search-ranking)), related titles, seasons, search filters and ranked browsing (`/api/catalog/discover`, see [Search filters](#search-filters), [Browse ranking](#browse-ranking)) | – (typo index file `/app/data/search-index.tsv.gz`) |
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
@@ -74,7 +74,7 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 5. `progress`, `ratings`, then `profiles` with both as cleaners, plus `EnsureDefault`; `ratings.MigrateMyList()`
    (one time, logged) and `go ratings.Backfill(ctx)`; `recommendations` (ratings adapter + TMDB catalog, hooked to
    `ratings.OnChange`), plus the watch history (`SetHistory(watchHistory(progress))`); `top10` (`Start(ctx)` loads stored lists and refreshes in the background).
-6. `catalog`, `providers` (both on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
+6. `catalog` with `StartSearchIndex(ctx, SEARCH_INDEX_DIR or /app/data)` (loads / refreshes the typo index in the background), `SetRatings(searchRatings(ratings))` + `ratings.OnChange(InvalidateTaste)` (genre taste) and `SetLocalSignals(localSignals(profiles, progress, ratings))` (browse ranking); `providers` (on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
 7. `httpserver.New`, `images.Register(r, …)` on the root, `api := r.Group("/api")`, every other module's `Register`, `httpserver.Run`.
 
 ## Web
@@ -90,7 +90,7 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 | `profiles` | `/profiles` (and `ProfileGate`, which forces a profile pick on every page) |
 | `settings` | `/settings` |
 | `watch` | player, Watch button, seasons/episodes, Continue Watching row (used by other features) |
-| `shell` | navbar and page shell |
+| `shell` | navbar, phone tab bar and page shell |
 
 ### Rules
 
@@ -103,6 +103,23 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
   billboard and hero artwork is rendered with `shared/ui/TmdbImage` (see [Images](#images)).
 - The active profile lives in `localStorage` under `hfx-profile`; changes fire the `hfx-profile-change` event.
   API calls that are per profile send `profileHeaders()` (`X-User-ID`).
+
+### Phones and tablets
+
+Desktop (≥ `md`, 768 px) keeps its layout; smaller screens and touch input get Netflix-app tweaks:
+
+- Shell: below `md` the top bar is compact (logo, search icon → `/search`, notifications, profile; 44 px touch
+  boxes) and `shell/BottomTabBar` (Home, TV Shows, Movies, New, Favorites) replaces the Browse menu. The page gets
+  bottom padding through `body:has(.nf-tabbar)`; the bar hides while an `aria-modal` dialog is open. Bars pad with
+  `env(safe-area-inset-*)` (`viewport-fit=cover`).
+- Use `max-md:` / `md:` for layout and `pointer-coarse:` for touch sizes (≥ 44 px targets, larger ⚡ chip). Inputs
+  are at least 16 px on phones and touch screens (iOS zooms otherwise; `globals.css`). Hover previews and row
+  arrows are mouse-only; elements that only appear on hover are shown or hidden on touch (`pointer-coarse:`).
+- Rows (`.nf-card-row`) snap to cards on touch and keep horizontal swipes inside the row. Phone cards are sized for
+  about 2.5 backdrops / 3 posters per screen.
+- Billboards and the detail hero are taller on phones and portrait tablets (`sm:portrait:`), with full-width Play
+  buttons; pop-overs become bottom sheets on phones (genre menu, Surprise me).
+- PWA: `public/site.webmanifest` (standalone, `#141414`) and the Apple web-app metas in `app/layout.tsx`.
 
 ## Localization
 
@@ -380,10 +397,18 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    upgrade / sidegrade searches, spares, `subalt`), so the year must be right: with a `tmdb_id` it is TMDB's release
    year (`englishTitle`, cached with the English title), whatever year the client sent (none on resumes and some
    upgrade polls, a wrong one from tests). Episode requests only accept the episode, ranges covering it, season packs of its season and
-   complete-series packs containing it; bonus material ("Greatest Moments", "Inside the Episode", "Making of",
-   "Recap", "Sample", ...) is rejected. The episode info after the title (`tsParseEpisode`, after an optional year /
-   country and the repeated title of "Çukur / Cukur (Season: 4 ...") must come first, else the title goes on (another
-   show). Notations: `S01E05`, `S01E05-E07`, `S1 E5`, `1x05`, `S01`, `S01-S03`, `Season 1 Episode 5`, `Seasons 1-3`,
+   complete-series packs containing it. Bonus material is rejected for movies and episodes: a word of it anywhere in
+   the name ("Greatest Moments", "Inside the Episode", "Making of" / "Making-of", "Behind the Scenes",
+   "Featurette", "Extras", "Bonus", "Trailer", "Sample", "Interview", "Documentary", "Prologue", "Promo", "Recap",
+   ...; in Cyrillic "Трейлер", "Тизер", "Фильм о фильме", "Бонус", "Интервью", ...) that the title or one of its
+   names does not contain itself; the whole name counts, so an IMDb id match scored by its own name
+   ("The Odyssey: The Making of an Epic 2026 1080p web YTS") is caught too. So is a namesake that says so
+   ("The.Odyssey.2026.720p.TUBI.WEB-DL.AAC2.0-NOtLAN (NOT The Chris Nolan FILM)"): a name with "not ... film" /
+   "not ... movie" is rejected unless those words name someone and the title's directors (TMDB credits, read with
+   the English title) are known and not among them (then the title is that namesake).
+   The episode info after the title (`tsParseEpisode`, after an optional year / country and the repeated title of
+   "Çukur / Cukur (Season: 4 ...") must come first, else the title goes on (another show).
+   Notations: `S01E05`, `S01E05-E07`, `S1 E5`, `1x05`, `S01`, `S01-S03`, `Season 1 Episode 5`, `Seasons 1-3`,
    `Sezon 1 Bölüm 5`, `2. Sezon 5. Bölüm`, `01.sez` (season); `E05`, `B05`, `BL.90`, `BLM 12`, `Bölüm 5`, `5. Bölüm`,
    `ep.1`, `Episode 1`, `Episodes 01-107` (episode, of the named season when there is one); `Series 2` is a season
    (British), `Season 2 / Series: 108-138` episodes (Russian trackers); a bare number right after the title
@@ -477,7 +502,9 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    (every seek is a new stream; up to 90 s while the stream has not sent its first bytes, e.g. an MP4 whose `moov`
    still comes from the end of the file), logged as
    `warm: deferring … while … starts` / `resuming … after …`. A measurement interrupted before its verdict starts over
-   afterwards; one that already has a verdict ends with it. Checks before the answer (Play, prefetch on the detail
+   afterwards; one that already has a verdict ends with it. Work on a TorBox file does not wait for a starting TorBox
+   stream (CDN reads take nothing from a swarm; GoT S01E01: the 4K upgrade warm-up waited 48 s behind the 1080p TorBox
+   stream it was to replace), only for a starting torrent. Checks before the answer (Play, prefetch on the detail
    page) never wait for a starting stream; another title's playback is a different rule (playback priority below).
 
 The chosen source is saved in TorrServer's DB (`save_to_db`, category `nextflix`), so after a drop or a restart it opens
@@ -498,8 +525,14 @@ speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `pl
 - A cached candidate is checked without TorrServer: its file is picked from TorBox's file list with the usual
   movie / episode / pack logic (`tsPickFile`; the file's index is its place in that list + 1), the torrent is found in
   the account (`mylist`) or added (`createtorrent` with `add_only_if_cached`; nothing is downloaded), `requestdl` gives
-  the HTTPS link, the duration probe reads it (the duration check still applies) and a short read from the middle of
-  the file (≤ 2 s, ≤ 32 MB) stands in for the swarm health. The answer carries `source: "torbox"` and `debrid: true`.
+  the HTTPS link, the duration probe reads it (the duration check still applies) and a short read stands in for the
+  swarm health (`debrid_rate.go`): 3 bounded ranges of 16 MB from the middle of the file are read through the proxy in
+  parallel for 2.5 s after the first byte; the rate leaves out the first 0.5 s (connection ramp), `peak` is the best
+  1 s. One sequential 1.5 s read before read one cold CDN connection and underrated TorBox (Game of Thrones S01E01
+  4K: 2.28 MB/s "peak 0.00" at resolve, 14.74 MB/s a minute later), so a cached 4K never won and the 1080p started.
+  The rates TorBox delivered in the last 10 minutes are kept (these measurements and the proxy's CDN bytes per 2 s); a
+  measurement below 1.3× the need whose first bytes came within 2 s keeps up when that best recent rate is ≥ 1.3× the
+  need (logged as `TorBox line … MB/s`). Upgrade warm-ups of a TorBox file measure the same way. The answer carries `source: "torbox"` and `debrid: true`.
   When TorBox cannot give a link the candidate is checked through its swarm instead.
 - The best ranked cached check goes first: checks ranked below it wait until it finished (≤ 5 s); once it is a good
   pick the ones of its resolution or lower stop (`a TorBox source of this resolution was picked`), so no swarm competes
@@ -536,9 +569,35 @@ speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `pl
   from TorrServer (the same file found there by path and size). Switching TorBox off does the same. Uncached releases
   are never added, unless "add uncached to TorBox" (default off) sends the picked torrent source to TorBox afterwards
   (≤ 20 an hour) so a later play is cached.
-- Players: the web player shows a small "⚡ TorBox" badge next to the quality badge for a debrid source.
+- Players: the web player shows a small "TorBox" badge with an SVG bolt (neutral #e5e5e5, no emoji) next to the quality badge for a debrid source.
 - Live check: `go test -tags live -run TestLiveTorBox -v ./internal/modules/streaming/` with `TORBOX_API_KEY` (and
   ffmpeg) checks the account read-only with the public-domain Big Buck Bunny torrent.
+
+### Films in cinemas with a home release (`homerelease.go`)
+
+TMDB's digital dates lag the real ones: a film it lists as only in cinemas can already have WEB-DL releases (The
+Odyssey 2026 on 2026-10-09: TMDB said "digital 2026-11-17", the indexers had AMZN WEB-DL and WEBRip releases next to
+TELESYNC / HDTS recordings). So for a movie whose TMDB verdict is `in_theaters`, or `not_released` with a release
+date that has passed (or none) or a digital date ahead, the catalog asks streaming (`catalog.HomeReleaseFinder`,
+wired in `main.go`) before answering:
+
+- `HomeReleaseOut` runs the resolve search without TorrServer (`searchRanked`: TMDB's English title, year, other
+  names and directors, the same early cut; when nothing usable came early it waits for the slower indexers, 15 s in
+  all) and ranks it with `tsRankAll`. A home release is a candidate that names a home source (WEB-DL, WEBRip, web,
+  BluRay, HDTV, ...; never a cinema tier: CAM / TS / TELESYNC / HDTS / TC / SCR are rejected by `tsScore`, R5 / LTE
+  / DCPRip / hardcoded subs are the cinema tier), passes the title, year, bonus-material and namesake rules, starts
+  with the title (after a `www.site.org - ` prefix: "George A. Romero's Resident Evil (2025)" is another film) and has
+  10 seeders. Fake WEB-DLs of films in cinemas are common, so these must come from 2 release groups (the last word
+  of the name): Resident Evil (2026) three weeks into its cinema run had one uploader's "WEB-DL" (4581 seeders) and a
+  0.9 GB "AMZN WEB-DL" with 5 seeders, and stays `in_theaters`; The Odyssey had Kitsune, QxR, LAMA, YTS, ...
+- The verdict is kept per film in memory: found 6 h, cinema recordings only (or nothing) 1 h, a failed search 5 min.
+  Concurrent callers share one search; at most 3 searches run at once. A caller waits up to 4 s; a slower search
+  answers "not found" now and caches its verdict for the next call.
+- Found: `/api/availability` answers `available` with `digital_release_found: true` (the TMDB dates stay), so the web
+  and TV detail pages, billboards and hover previews show a normal Play instead of "In theaters · Streaming from
+  ..." / "Sinemalarda · Dijital çıkış: ...". Resolve, prefetch, the instant-play check and `resolve?dry=1` get the
+  same verdict through `notOut` (its wait covers the 4 s) and search normally; the file check (duration against TMDB's
+  runtime) is unchanged. Not found: the 425 / `not_released` answers as before.
 
 ### Instant play hints
 
@@ -551,7 +610,8 @@ so Play starts from the CDN at once (`instant.go`, `POST /api/torrent-stream/ins
   releases below 720p, go to one `checkcached` call (the shared 30 min answer cache, so a Play right after reuses it).
   Any cached → true; none → false; nothing usable found → false; a hash TorBox did not answer (failure, pause) or a
   failed search → unknown. TV shows are checked by S01E01 (the episode a Continue Watching card names, when given);
-  season packs count. A title that is not out yet is false without a search.
+  season packs count. A title that is not out yet (a film in cinemas without a home release, see above) is false
+  without a search.
 - Answers are kept per title (`movie:<id>` / `tv:<id>`) in memory: true 6 h, false 1 h; an expired one is still
   served (up to 24 h) while it is checked again. Unknown answers are retried after 10 min at the earliest.
 - The endpoint never waits: it answers what is known and queues the rest (a client's titles before prewarm ones,
@@ -696,9 +756,13 @@ it; and any other episode or capability variant of the same movie / show: same t
 - When the last stream ended (+20 s) it resumes (`resuming <key> (n torrents back)`): its dropped torrents are added
   again from the DB (a stat), its waiting work goes on and a deferred prefetch starts.
 
-The player (`web/src/features/watch/components/TorrentStreamPlayer.tsx`) polls `upgrade` every 15 s during the first
-5 minutes while a source below 2160p plays on an HEVC client. At most one upgrade per session (a dropped preparation
-is tried once more after 60 s, see below), never after a step down.
+The player (`web/src/features/watch/components/TorrentStreamPlayer.tsx`) polls `upgrade` 5 s after the start, then every
+10 s during the first 5 minutes while a source below 2160p plays on an HEVC client (a poll that has to wait logs why
+in the console: quality unknown, no position yet, another switch loads, retry pause). At most one upgrade per session
+(a dropped preparation is tried once more after 60 s, 15 s for a TorBox source, see below), never after a step down.
+A finished upgrade is logged (`[nextflix] upgraded to <hash> (TorBox) 26 s after the start (offered at 5 s; ready
+in 4.1 s, lead 20 s)`) and the release of the replaced torrent carries it as `why=` (`player: dropping …` in the
+server log), so a slow switch shows its cause (late offer, slow preparation, overtaken / keyframe / seek restarts).
 When playback stalls (two stalls within 60 s or one over 8 s) it first asks `sidegrade` for a faster source of the
 same quality (at most every 2 minutes; a source resolve measured as starving is checked 8 s after it is ready, then
 every 15 s during the first 3 minutes, before the first frame too when playback started at 0), else it re-resolves
@@ -781,7 +845,9 @@ seek or a close drops the preparation and nothing changes. Measured on an LG TV 
 another release plays across the cut with no waiting and no frozen frame (the old stream loses a few B-frames just
 before the cut; a stop there would jump to the cut). Another codec family (H.264 → HEVC) is refused: after
 `changeType` the TV never shows a frame of it (the clock stops at the cut and seeks on either side never finish), so
-such an upgrade waits for the next seek, which restarts anyway. A source of another length (> 3 s) is not spliced,
+such an upgrade restarts on the new source at once when it arrives within the first 90 s of playback (a short
+loading screen beats the lower quality for the whole title), later it waits for the next seek, which restarts anyway.
+The TV polls `upgrade` 5 s after the start, then every 10 s. A source of another length (> 3 s) is not spliced,
 and a switch with a restart never starts at 0 from a position past 30 s: a file that does not reach the position
 (a pack's wrong file) sends the player back to the source it came from.
 
@@ -817,8 +883,9 @@ one preparation at a time:
    the time the last try ran plus 7 s). A seek that leaves the hidden start ahead
    keeps it; any other seek (or another audio track) restarts the preparation once the visible stream plays again
    (up to 4 times). Not ready within 60 s, an element error, or the end of the title near: the preparation is
-   dropped and its torrent released. The reason is logged in the console (`[nextflix] upgrade to <hash> dropped:
-   …`) and reaches the server log: a dropped upgrade is offered once more a minute later (that `upgrade` poll
+   dropped and its torrent released. The reason (with the preparation's timings and restarts) is logged in the console
+   (`[nextflix] upgrade to <hash> dropped: …`) and reaches the server log: a dropped upgrade is offered once more a
+   minute later (15 s for TorBox) (that `upgrade` poll
    carries `failed=<reason>`, logged as `the player could not switch to the upgrade: …`), any other dropped switch
    releases its torrent with `why=<reason>` (`player: dropping <hash>: …`). After the second failure the upgrade
    is not tried again this session.
@@ -838,6 +905,24 @@ The player has a single exit control, a Back arrow at the top left (shown with t
 paused). It does what closing always did (saves progress, releases the title and its torrents, cancels the next
 episode's warm-up) and the screen the player was opened from shows again; the player is an overlay without a route
 of its own, so no history entry is popped. Esc still closes it.
+
+Phones and tablets (`features/watch/mobile.ts`, `components/TouchSeekBar.tsx`, `mobilePlayer.module.css`): on a
+touch-first device (`(hover: none) and (pointer: coarse)`) the player switches to a touch layout; desktop is
+unchanged. A tap shows / hides the controls (they hide after 3 s; hidden controls take no taps), Play / Pause and
+±10 s are big center buttons, a double-tap on the left / right third seeks back / forward with a ripple and the
+running total ("+20 s"); every further tap adds 10 s and the seek runs once 650 ms after the last tap (one stream
+restart, not one per tap). The seek bar is a 44 px touch target that starts dragging only after a sideways move (a
+vertical swipe never seeks); the drag shows the `SeekThumbnail` frame above the finger and the target time. Audio &
+Subtitles opens as a bottom sheet (drag its handle down or tap outside to close). Subtitles are placed on the
+picture and sized from its height (5.5 %, 14-40 px, times the Settings size), above the controls when they show.
+No mute / volume (hardware buttons), no long-press 2× (it would read as a draining buffer to the buffer health
+check). Opening the player requests fullscreen on the container (never the `<video>`: the overlay, the controls
+and the hidden switch slot live next to it) and locks landscape where allowed (Chrome Android); a rotate button
+toggles the lock. iPhone Safari has no element fullscreen and `webkitEnterFullscreen` would hide our subtitles and
+break the two-slot switch, so there the fixed full-viewport container is the fullscreen (the fullscreen and rotate
+buttons are hidden; the address bar may stay, Add to Home Screen removes it). While open, the player adds
+`viewport-fit=cover` (safe-area insets pad the bars), stops overscroll / pull-to-refresh (touchmove is cancelled
+outside `[data-scroll]` lists), disables double-tap zoom (`touch-action`) and holds a screen Wake Lock while playing.
 
 Release from the web app: an open player marks its title / episode as playing (`holdPlaying` in `api.ts`) and
 `releaseTitle` skips a playing title, so only that player releases it when it closes (or on Next). The detail page
@@ -959,33 +1044,66 @@ profile share one computation.
 
 ## Surprise me
 
-`GET /api/recommendations/surprise` (`recommendations/surprise.go`) answers one title per press:
+`GET /api/recommendations/surprise` answers one title per press. It must not keep circling one loved title, so every
+press first draws one of three buckets and then a source inside it:
 
-1. Taste: ratings and watch history become weighted titles: `love` 3, `like` 2, favorite without a rating 1.2
+| Bucket | Share | What it picks | `reason.kind` (client text) |
+|---|---|---|---|
+| `taste` (taste blend) | 50 % | the related titles of one positive title, or a pair of the profile's top genres | `because_loved` / `because_liked` / `favorite_like` / `because_watched` ("Because you loved X"), `genre` ("Because you like drama and crime") |
+| `adjacent` (adjacent discovery) | 25 % | a liked genre, but well-rated titles from other eras that are in no seed's related lists | `adjacent` ("A new pick in sci-fi" / "Bilim kurguda yeni bir keşif") |
+| `wild` (wild card) | 25 % | acclaimed titles outside the taste: other languages, genres never watched, classics | `wild_card` ("Something completely different", plus "– a highly rated Korean film" / "– a highly rated anime" when `language` is set) |
+
+The pool (`surprisepool.go`), cached 30 min per profile and language and dropped by `Invalidate` (any rating change):
+
+1. Taste titles: ratings and watch history become weighted titles: `love` 3, `like` 2, favorite without a rating 1.2
    (+0.5 on top of love / like), finished title 1.0, started title 0.4 (a rated title ignores its history),
    `dislike` −3; all times the recency factor of [Recommendations](#recommendations). History comes from
    `progress.Service.History` through `recommendations.SetHistory` (adapter `watchHistory` in `main.go`).
-2. Candidates: TMDB recommendations and similar titles of the 8 strongest positive titles (support = weight × list
-   weight × position decay, as for the rows), the 3 genres with the highest affinity (≥ 0.2; genre sums of the 40 most
-   recent taste titles scaled to [−1, 1]) through TMDB discover (popular and well-rated titles of that genre, movie
-   and/or TV depending on the genre id; support 0.8 × affinity), and `/trending/all/week` (support 0.3, exploration).
-   The strongest single contribution decides the `reason`.
-3. Penalties: what the 5 most recent dislikes recommend counts against a candidate; a candidate whose penalty reaches
-   its support, or whose genres average below −0.35 affinity (a disliked genre), is dropped. So are rated / favorited
-   and adult titles, titles without backdrop or poster and titles with fewer than 50 votes.
-4. Score = support − penalty + 1.5 × genre affinity + the quality prior. The ranked pool is cached 30 min per profile
-   and language and dropped by `Invalidate` (any rating change).
-5. Each press removes titles with any watch progress (read fresh), the client's `exclude` list and the profile's last
-   20 picks (server memory), then samples one of the best 40 with a softmax over the scores scaled to [0, 1]
-   (temperature 0.35: the best is about 17 times as likely as the 40th). When every candidate was shown lately the
-   memory starts over. A profile without taste gets trending titles (`trending_pick`).
-6. The logo comes from TMDB images (profile language, English, language-less).
+2. Genres: TV genres count as their movie counterpart (Action & Adventure → Action, Sci-Fi & Fantasy → Sci-Fi,
+   War & Politics → War, Kids → Family). The affinity sums the weights of the 40 most recent taste titles per genre,
+   scaled to [−1, 1]. The strength of a genre is `ln(1 + Σ)` over all positive titles carrying it, each title adding
+   at most 1 (love / like 1, favorite 0.6, finished 0.5, started 0.2), so several liked titles outweigh one loved
+   title. Only genres with a positive affinity have a strength.
+3. Taste groups: one per positive title (the 20 strongest; TMDB recommendations and similar titles, weight = the
+   title's weight) and one per pair of the 3 strongest genres (TMDB discover, popular and well-rated movies plus popular
+   TV; weight 2 × the pair's mean strength / the top strength). Taste titles need a 6.5 average.
+4. Adjacent groups: the 4 strongest genres, each through discover sorted by rating: movies up to 1999 and from 2000
+   (≥ 300 votes) and TV (≥ 200 votes); titles need a 7.0 average and must not be in any positive or disliked title's
+   related lists. Weight = strength / top strength.
+5. Wild groups (weight 1 each): acclaimed movies (≥ 500 votes) in Korean, Japanese (no animation), Spanish, French,
+   Italian, Turkish, Hindi and German, plus TV for Korean, Spanish and Turkish; anime (Japanese animation, movies and
+   TV); 4 random genres the profile never watched (horror is never used; by vote count); classics before 1975. A wild
+   title needs a 7.2 average, 500 votes (TV 300), no genre with a negative affinity, no place in a related list, and
+   something new: a language other than English, a main genre the profile never watched, or a year before 1975.
+6. Everywhere: rated / favorited, adult and artless titles, titles with fewer than 50 votes, titles whose genres
+   average below −0.35 affinity and titles the 5 most recent dislikes point to more than the liked titles are dropped.
+   A profile without positive titles gets a trending group (`trending_pick`) next to the wild cards.
+
+A press (`surprise.go`, RNG injectable for tests):
+
+1. Removes titles with any watch progress (read fresh), the client's `exclude` list and the profile's last 30 picks
+   (server memory). When nothing is left the memory starts over.
+2. Draws the bucket 50 / 25 / 25. After an adjacent or wild pick the same bucket is not drawn, after a taste pick taste
+   counts half; that keeps the long-run shares at exactly 50 / 25 / 25 without forcing a strict taste / other rhythm.
+3. Draws a group of that bucket by weight. The group of the last pick is skipped (never the same seed twice in a row)
+   and a group used in the last 4 picks counts 1/5 (seeds rotate). A title whose main genre was one of the last pick's
+   genres is skipped. When these guards leave nothing, the other buckets are tried, then the guards are relaxed.
+4. Draws one of the group's best 12 titles with a softmax over the scores scaled to [0, 1] (temperature 0.35 for taste,
+   0.7 for the discoveries); a title of the same media type as each of the last 2 picks counts half (movies and TV mix).
+5. The logo comes from TMDB images (profile language, English, language-less).
+
+Measured (tests with a fixed RNG, `TestSurpriseMixOverThirtyPresses` / `TestSurpriseBucketShares`): 30 presses of a
+profile that loves The Godfather Part II use 5 seeds, 12 main genres and 8 non-English titles with no repeat; 1,200
+presses split 50 / 24 / 26 % and The Godfather Part II seeds 10 % of the taste picks.
 
 Clients: web `features/surprise` (`SurpriseButton` + `SurpriseModal`: backdrop, logo, reason, overview, Play /
 Details / Something else; Play on the home page uses the page's player, elsewhere the detail page with `?play=1`;
-the last 20 picks of the tab go out as `exclude`), on the home billboard (`home/components/HomeSurprise`) and next to
-the search field. TV: side menu item "Surprise me" → `screens/SurpriseScreen.tsx` (full screen; Play opens the detail
-page with autoplay, the pick survives Back).
+the last 30 picks of the tab go out as `exclude`), as a centered pill under the last row of the home page
+(`home/components/HomeSurprise`) and next to the search field. TV: a centered button under the last home row
+(`RowsScreen` `surprise`, `data-nav-id="home-surprise"`), reached with Down from the last row; while it has focus the
+hero explains it. It opens `screens/SurpriseScreen.tsx` (full screen; Play opens the detail page with autoplay, the
+pick survives Back, Back returns the focus to the button). Both clients build the reason text (`reasonText`), with
+the Turkish locative suffix for adjacent picks (`trLocative`: "Bilim kurguda", "Suçta").
 
 ## Search filters
 
@@ -995,13 +1113,81 @@ chips of both search pages. A `Filter` holds the type (`all` / `movie` / `tv`), 
 counterpart (Action / Adventure → Action & Adventure, Sci-Fi / Fantasy → Sci-Fi & Fantasy, War → War & Politics,
 Thriller → Mystery, Kids → Family for movies) or to none (History, Horror, Music, Romance; Reality only exists for TV),
 which rules that media type out. Without a query the filter becomes TMDB discover queries (`with_genres` joined with
-commas = AND), movie and TV pages merged by popularity; with a query the first 5 multi-search pages (cached 15 min) are
-filtered with the same mapping (`Filter.Match`).
+commas = AND), a wider pool of movie and TV pages re-ranked by the [browse score](#browse-ranking); with a query the ranked
+search ([Search ranking](#search-ranking), 5 multi-search pages, cached 15 min) is filtered with the same mapping
+(`Filter.Match`).
 
 Web (`features/search`): type toggle (All / Movies / TV), chips sorted by their localized names (chips that cannot
 match the type are hidden and dropped), filters in the URL (`/search?q=&type=&genres=&anime=1`), infinite scroll while
 browsing. TV (`screens/SearchScreen.tsx`, `lib/discover.ts`): a horizontally scrolling chip row above the results
 (type chips, Anime, genres), OK toggles; the next browse page loads when focus nears the end of the grid.
+
+## Search ranking
+
+`catalog/search_rank.go` orders `/api/tmdb/search`, `/api/tmdb/suggestions` and `/api/catalog/discover?q=` itself; TMDB's multi
+search (pages 1-3 asked at once, 5 with filters; people and titles without artwork dropped; cached 15 min per language
+and query) only finds the candidates. Texts are normalized first (`search_text.go`): lowercase, Turkish letters and
+accents folded (İ/ı → i, ş → s, é → e), apostrophes dropped, other punctuation → space; a leading "the / a / an" is
+ignored where noted.
+
+Score of a result = 3 × text + 0.4 × log10(1 + popularity) + 0.3 × log10(1 + vote_count) + 0.3 × (1 − TMDB position /
+pool size) + 0.15 (released this or last year and popularity ≥ 20) + 0.35 × the profile's mean genre affinity − penalties:
+
+- text: the best match of the query against the title, original title and learned localized titles: exact 1.0 >
+  exact without article 0.97 > prefix ending at a word 0.8 (+0.1 × coverage) > other prefix 0.72 > whole-word phrase
+  0.68 > all words 0.6 > a word starts with it 0.55 > substring 0.45 > fuzzy 0.6 × similarity (≥ 0.72; 0.6 ×
+  Damerau-Levenshtein + 0.4 × Jaro-Winkler, +0.08 for the same phonetic key) > 0;
+- −0.6 under 5 votes, −0.25 under 30 (not for titles released in the last 60 days or later);
+- −0.5 documentaries and −0.7 making-ofs / specials / podcasts ("making of", "behind the scenes", "special look", ...)
+  unless the query asks for them ("documentary", "belgesel", "making", ...); −0.4 talk and news shows; −0.4 no poster;
+- taste: genre affinity in [−1, 1] from the profile's ratings (love 2, like 1, dislike −2, favorite +1; 40 titles, genres
+  from the cached TMDB details, TV genres mapped onto movie genres), computed in the background and cached 30 min per
+  profile; a search never waits for it.
+
+Typo correction (`search_index.go`): a title index built from TMDB's daily ID exports
+(`http://files.tmdb.org/p/exports/movie_ids_MM_DD_YYYY.json.gz`, `tv_series_ids_…`; today's appears around 8:00 UTC, so
+up to 3 days back are tried) through `platform/upstream` (3 tries, 4 min budget, 128 MB cap). Kept: not adult, not
+`video`, popularity ≥ 1, a Latin letter in the title, the 200,000 most popular (measured: 200k titles, about 55 MB heap,
+6.6 s download + build, 3.3 MB file, 0.5 s load at start). Saved to `search-index.tsv.gz` in `SEARCH_INDEX_DIR`
+(`/app/data`), rebuilt when older than 24 h (checked hourly). Localized titles that TMDB searches return are learned as
+aliases (`search-aliases.tsv.gz`, up to 50,000) and become searchable at the next rebuild of the names (every 10 min).
+Lookups: trigram postings (a trigram in more than 60,000 names is skipped), a phonetic key (consonant skeleton:
+"mandoloarien" and "mandalorian" are both `mndlrn`), Damerau-Levenshtein, Jaro-Winkler and popularity
+(+0.06 × log10(1 + popularity)); 2-5 ms per query.
+
+A query is corrected when the index's best hit (similarity ≥ 0.75) differs from it and no result matches at least as a
+prefix ending at a word, counting only results with 50 votes or popularity 5, unless the correction is not 10 times as
+popular (an obscure film named "Interstelar" does not hide Interstellar). The correction is then searched too (started
+right away when a query word is in no indexed title), its results scored against the corrected text and merged (best
+score per title); the corrected title itself is added from its details when that search missed it. `did_you_mean`
+names it when one of its results matches it at least as a word prefix.
+
+Suggest (`/api/catalog/suggest`) uses only the index: prefix (1.0, 1.05 for a name in the request language), a word
+prefix (0.85), a typo-tolerant prefix (0.6 × similarity + 0.1, compared with the name's start one letter longer than the
+query), each + 0.15 × log10(1 + popularity), one per title and display text.
+
+Clients: web `features/search` (`api.ts`): ranked results, "Did you mean *X*?" above the grid (click searches X), a
+completion list under the field while typing (150 ms debounce, arrow keys + Enter, Escape closes); the navbar dropdown
+keeps the server's order. TV (`screens/SearchScreen.tsx`, `lib/search.ts`): completions as a list under the on-screen
+keyboard (D-pad Down, OK searches it) and a "Did you mean X?" chip above the results.
+
+## Browse ranking
+
+`catalog/browse_rank.go` orders filter-only browsing (`/api/catalog/discover` without `q`). Pool per allowed media type:
+TMDB discover `popularity.desc` pages 1-5, `vote_count.desc` 1-3 and `vote_average.desc` 1-3 with `vote_count.gte=200`
+(same AND genres and Anime rule, each page cached 24 h, 6 requests at a time). Score:
+
+- the Bayesian (IMDb) weighted rating WR = v/(v+m)·R + m/(v+m)·C, v = vote_count, R = vote_average, C = the pool's mean
+  rating, m = its 75th percentile vote count (a 9.0 from 12 votes does not beat an 8.6 from 30k);
+- + 0.35 × log10(1 + vote_count) + 0.3 × log10(1 + popularity) + 0.4 × (1 − age / 3 years) for titles under 3 years;
+- server-wide signals (every profile's watch history and ratings, `SetLocalSignals`, cached 5 min, dropped on rating
+  changes): + 0.4 × log2(1 + profiles that watched it) + 0.5 per love / like − 0.8 per dislike;
+- the current profile (`X-User-ID`): + 0.6 × mean genre affinity (the search taste), − 1.5 when it finished the title,
+  − 0.8 when it started it; its disliked titles go after everything else.
+
+Pages of 40 (`type=all`) or 20 come from the ranked pool; later pages continue with TMDB's popularity order from page 6
+without the pool's titles. Scores stay internal. Trakt watcher counts are not used (they would need an API key setting
+and one lookup per title).
 
 ## Top 10
 
