@@ -40,9 +40,10 @@ func (s *Service) cachedSource(key string) (*tsResolveResult, bool) {
 	if row == nil {
 		return nil, false
 	}
-	expires := row.ResolvedAt.Add(tsSourceTTL)
 	var res tsResolveResult
-	if !now.Before(expires) || json.Unmarshal([]byte(row.Result), &res) != nil || !tsHashPattern.MatchString(res.Hash) {
+	bad := json.Unmarshal([]byte(row.Result), &res) != nil || !tsHashPattern.MatchString(res.Hash)
+	expires := row.ResolvedAt.Add(tsSourceTTLOf(&res))
+	if bad || !now.Before(expires) {
 		_ = deleteSource(s.db, key)
 		return nil, false
 	}
@@ -56,7 +57,7 @@ func (s *Service) cachedSource(key string) (*tsResolveResult, bool) {
 func (s *Service) storeSource(key string, res tsResolveResult) {
 	now := time.Now()
 	res.Cached = false
-	s.resolveCache.Store(key, tsCacheEntry{res: res, expires: now.Add(tsSourceTTL)})
+	s.resolveCache.Store(key, tsCacheEntry{res: res, expires: now.Add(tsSourceTTLOf(&res))})
 	s.noteTitle(key, res.Hash)
 	s.persistTorrent(res)
 	if s.db == nil {

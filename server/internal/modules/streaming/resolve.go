@@ -21,6 +21,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"nextflix/internal/platform/torbox"
 )
 
 // Auto-pick for the "Watch" button: search Jackett, rank releases for direct browser
@@ -59,6 +61,11 @@ type tsResolveResult struct {
 	// Debrid: the file plays from TorBox's cache (Source "torbox"), not the swarm (debrid.go)
 	Source string `json:"source,omitempty"`
 	Debrid bool   `json:"debrid,omitempty"`
+	// Why the file breaks the client's caps when nothing fitting was found (it plays
+	// re-encoded or above the cap); "" for a fitting source
+	CapsFallback string `json:"caps_fallback,omitempty"`
+	// A cinema recording (TS, TELESYNC, CAM ...), only picked with ?cinema=1
+	Cinema bool `json:"cinema,omitempty"`
 
 	durationChecked bool // a runtime was known, so DurationVerified means something
 	nameQ           int  // resolution the release name claims (Quality follows the probed file)
@@ -70,6 +77,9 @@ type tsResolveResult struct {
 	rankAdj float64
 	unfit   string
 	avoided bool
+	// The probed video breaks the client's caps (see applyProbedCaps); unfit says why.
+	// reencode: play has to re-encode its video for the client
+	overCaps, reencode bool
 }
 
 // demoted: the probed file is smaller than its release name claimed.
@@ -119,6 +129,10 @@ type tsResolveQuery struct {
 	absEp     int
 	// Upgrade search: only resolutions above this one (0 = a normal resolve)
 	upgradeFrom int
+	// Fallback ranking (nothing fitting was found): names above maxQ are kept, not rejected
+	overCap bool
+	// The viewer asked for a cinema recording of a film still in cinemas (?cinema=1, cinema.go)
+	cinema bool
 	// Warm-up bookkeeping of the title (nil in tests): the torrents this resolve adds and
 	// the context of its background work
 	warm *tsWarm
@@ -146,6 +160,7 @@ type tsCandidate struct {
 	rest    []string // the name's normalized tokens after the title
 	// A Dolby Vision tag at the end of a cut-off name: it may hide an HDR10 base layer
 	maybeCutDV bool
+	cinema     bool // a cinema recording (only ranked with ?cinema=1)
 }
 
 const (
@@ -161,8 +176,8 @@ var (
 	tsEpPattern     = regexp.MustCompile(`^s(\d{1,2})e(\d{1,4})(?:e(\d{1,4}))?$`)
 	tsXEpPattern    = regexp.MustCompile(`^(\d{1,2})x(\d{1,3})$`)
 	tsSeasonPattern = regexp.MustCompile(`^s(\d{1,2})$`)
-	tsH264Pattern   = regexp.MustCompile(`[xh][ .]?264|\bavc\b`) // "H 264": some indexers turn dots into spaces
-	tsHEVCPattern   = regexp.MustCompile(`[xh][ .]?265|hevc`)
+	tsH264Pattern   = regexp.MustCompile(`[xh][ ._-]?264|\bavc\b`) // "H 264", "x-264": indexers turn dots into spaces or dashes
+	tsHEVCPattern   = regexp.MustCompile(`[xh][ ._-]?265|hevc`)
 	tsAV1Pattern    = regexp.MustCompile(`\bav1\b`)
 	tsHDRPattern    = regexp.MustCompile(`\bhdr(10)?\b|\bdv\b|dolby.?vision`)
 	tsHDR10Pattern  = regexp.MustCompile(`\bhdr(10)?\b|hdr10plus|\bhlg\b`) // HDR10, HDR10+, HLG: a base layer browsers show correctly
@@ -388,13 +403,15 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 	if !ok {
 		return c, false
 	}
+	// Cinema recordings only when the viewer asked for one (?cinema=1, see cinema.go)
+	recording := false
 	for i, t := range rest {
-		if tsBadSourceTokens[t] {
-			return c, false
-		}
 		// "HD-TS", "Tele-Sync", "DVD-Scr" are split by tsNormalize
-		if i+1 < len(rest) && len(t) > 1 && len(rest[i+1]) > 1 && tsBadSourceTokens[t+rest[i+1]] {
-			return c, false
+		if tsBadSourceTokens[t] || (i+1 < len(rest) && len(t) > 1 && len(rest[i+1]) > 1 && tsBadSourceTokens[t+rest[i+1]]) {
+			if !q.cinema {
+				return c, false
+			}
+			recording = true
 		}
 	}
 	// Specials, compilations and bonus material ("Greatest Moments", "The Making of an Epic")
@@ -467,7 +484,7 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 		tokens[t] = true
 	}
 	c.quality = tsResolution(tokens, q.hevc)
-	if (q.maxQ > 0 && c.quality > q.maxQ) || (q.upgradeFrom > 0 && c.quality <= q.upgradeFrom) {
+	if (q.maxQ > 0 && c.quality > q.maxQ && !q.overCap) || (q.upgradeFrom > 0 && c.quality <= q.upgradeFrom) {
 		return c, false
 	}
 	uhd := q.hevc && c.quality == 2160
@@ -504,8 +521,15 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 		p.Res = 5
 	default:
 		p.Res = 12
+		if tsCapped(q) {
+			p.Res = tsUnknownResCapped // may be a 4K HEVC file: below every labeled fitting one until probed
+		}
 	}
 	p.Source = tsSourceScore(rest)
+	if q.cinema && (recording || tsSourceOf(rest) == "cinema") {
+		c.cinema = true
+		p.Source = tsCinemaScore(rest, q)
+	}
 
 	lower := strings.ToLower(r.Title)
 	c.tags = tsParseTags(r.Title)
@@ -542,6 +566,9 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 		}
 	}
 	p.Lang = tsLangScore(r.Title, rest, q.origLang)
+	if c.cinema && tsNamesLang(rest, q.lang) {
+		p.Lang = tsLangMultiPart // a recording dubbed in the profile's language is fine
+	}
 	p.Subs = tsSubNameScore(rest, q.lang, q.origLang)
 	c.rest = rest
 	p.Rate = tsRateScore(r.Size, c.quality, q.runtime, q.mediaType, c.kind)
@@ -693,6 +720,9 @@ func tsResolveCaps(q tsResolveQuery) string {
 	}
 	if q.maxQ > 0 {
 		caps += fmt.Sprintf("|max%d", q.maxQ)
+	}
+	if q.cinema {
+		caps += "|cinema" // a normal resolve never reuses a cinema recording
 	}
 	return caps
 }
@@ -867,6 +897,7 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 		nameQ:           c.quality,
 		rank:            c.score,
 		avoided:         tsAvoided(c, q),
+		Cinema:          c.cinema,
 	}
 	nameTags := c.tags
 	res.Format = &nameTags
@@ -937,6 +968,8 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 	formatMoved := s.applyProbedFormat(res, c, q)
 	// After the format, which replaces res.Format
 	subsMoved := s.applyProbedSubs(res, c, q, stat.FileStats, file)
+	// A file above the client's cap or with video it cannot decode is unfit for it
+	s.applyProbedCaps(res, q)
 	if formatMoved || subsMoved || res.unfit != "" {
 		log.Printf("resolve %q: %q probed as {%s}: rank %.1f -> %.1f%s", q.title, c.raw.Title, res.Format, c.score, res.rank,
 			tsUnfitNote(res.unfit))
@@ -1099,7 +1132,7 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	q.runtime, from, rtTook = runtime()
 	log.Printf("resolve %q: expected runtime %dm (%s, lookup %s)", q.title, q.runtime, from, rtTook.Round(time.Millisecond))
 
-	raw := sr.raw
+	raw := s.withoutRejectedHome(q, sr.raw) // another video under the film's name (homedur.go)
 	cands := tsRankCandidates(raw, q)
 	// Nothing usable from the fast indexers: wait for the slow ones
 	for len(cands) == 0 && sr.late != nil {
@@ -1116,8 +1149,16 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 			return nil, nil, errNoSource
 		}
 	}
+	// Nothing within the client's caps by name: the ones above them are better than nothing
+	rq := q
+	if len(cands) == 0 && q.upgradeFrom == 0 && q.maxQ > 0 {
+		if over := s.fallbackCandidates(q, raw, nil, nil); len(over) > 0 {
+			log.Printf("resolve %q%s: no release within the caps by name, checking %d that are not", q.title, tsResolveCaps(q), len(over))
+			cands, rq.overCap = over, true
+		}
+	}
 	// Releases TorBox has cached play from it (debrid_resolve.go)
-	cands, debridItems := s.debridCandidates(ctx, q, raw, cands)
+	cands, debridItems := s.debridCandidates(ctx, rq, raw, cands)
 	pendingNote := ""
 	if sr.late != nil {
 		pendingNote = " (slower indexers still searching)"
@@ -1130,6 +1171,66 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	tsLogRanking(q, cands)
 	s.noteRanked(q, raw) // releases a subtitle scan may try later (subalt.go)
 
+	checkStart := time.Now()
+	pick, warmCtx, warmCancel := s.runChecks(ctx, q, cands, debridItems, sr.base)
+	for j, err := range pick.errs {
+		if err != nil && !pick.kept[j] {
+			log.Printf("resolve %q: candidate %q rejected: %v", q.title, cands[j].raw.Title, err)
+		}
+	}
+	seedQ := q // q stays as the checks read it
+	if n, ok := names.get(); ok && !named {
+		seedQ.names, seedQ.imdbID, seedQ.origLang = n.names, n.imdbID, n.lang // late results match the other names too
+	}
+	seed := &tsUpgradeSeed{q: seedQ, cands: cands, pick: pick, ctx: warmCtx, cancel: warmCancel, raw: raw, late: sr.late, base: sr.base}
+	res := pick.res
+	// Home releases of the wrong length: the film is in cinemas after all (homedur.go)
+	if s.noteHomeDurations(q, cands, pick) && (res == nil || !res.durationOK()) {
+		seed.cancel()
+		return nil, nil, errNoSource
+	}
+	// Nothing that fits the client's caps (or nothing at all): more candidates are checked
+	// before an unfit one is played
+	if q.upgradeFrom == 0 && (res == nil || res.overCaps) {
+		res, seed = s.capsFallback(ctx, q, res, seed, debridItems)
+		pick = seed.pick
+	}
+	if res == nil {
+		seed.cancel()
+		return nil, nil, errNoSource
+	}
+	if res.overCaps {
+		res.CapsFallback = res.unfit
+		log.Printf("resolve %q%s: nothing that fits the client was found, falling back to %q (%s: %s)", q.title, tsResolveCaps(q),
+			res.TorrentTitle, res.Quality, res.unfit)
+	}
+	if pick.live {
+		running := 0
+		for _, k := range pick.kept {
+			if k {
+				running++
+			}
+		}
+		note := ""
+		if res.partial {
+			note = ", before its verdict"
+		}
+		log.Printf("resolve %q: nothing keeps up after %s, answering with the best so far (%q, %s%s); %d checks keep measuring",
+			q.title, time.Since(checkStart).Round(time.Millisecond), res.TorrentTitle, res.Health, note, running-1)
+	} else if !res.keepsUp() {
+		log.Printf("resolve %q: no candidate keeps up, using the closest one", q.title)
+	}
+	if !res.durationOK() {
+		log.Printf("resolve %q: no candidate of verified duration, using one of unknown length", q.title)
+	}
+	log.Printf("resolve %q: candidate #%d (%s) validated in %s", q.title, pick.best+1, res.Quality, time.Since(checkStart).Round(time.Millisecond))
+	return res, seed, nil
+}
+
+// runChecks checks cands (best first) in parallel like a resolve does (see tsPickBestKeep)
+// and returns the pick with the context its kept checks run on and its cancel.
+func (s *Service) runChecks(ctx context.Context, q tsResolveQuery, cands []tsCandidate, items map[string]*torbox.CachedItem,
+	base string) (*tsPick, context.Context, context.CancelFunc) {
 	topQ := 0
 	for _, c := range cands {
 		topQ = max(topQ, c.quality)
@@ -1142,7 +1243,6 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	phase := &tsPhase{}
 	phase.background.Store(q.upgradeFrom > 0 || tsInBackground(ctx))
 	warmCtx, warmCancel := context.WithTimeout(tsWithPhase(q.warmCtx(), phase), tsUpgradeWarmTime)
-	checkStart := time.Now()
 	// Wait a little for a still-running candidate of a higher resolution than the best success
 	graceFor := func(best int) time.Duration {
 		for j := 0; j < best; j++ {
@@ -1175,7 +1275,7 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	}
 	claim := tsClaims(cands)
 	live := newLive(len(cands))
-	gate := s.newDebridGate(cands, debridItems)
+	gate := s.newDebridGate(cands, items)
 	pick := tsPickBestKeep(ctx, warmCtx, len(cands), graceFor, keep, func(ctx context.Context, i int) (*tsResolveResult, error) {
 		window := tsWarmWindow
 		if cands[i].quality == topQ {
@@ -1183,47 +1283,12 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 		}
 		return gate.check(ctx, i, q, func(h string) bool { return claim(h, i) }, func(r *tsResolveResult) { live.set(i, r) },
 			func(ctx context.Context) (*tsResolveResult, error) {
-				return s.checkCandidate(ctx, cands[i], q, sr.base, window, func(h string) bool { return claim(h, i) },
+				return s.checkCandidate(ctx, cands[i], q, base, window, func(h string) bool { return claim(h, i) },
 					func(r *tsResolveResult) { live.set(i, r) })
 			})
 	}, live)
 	phase.background.Store(true)
-	for j, err := range pick.errs {
-		if err != nil && !pick.kept[j] {
-			log.Printf("resolve %q: candidate %q rejected: %v", q.title, cands[j].raw.Title, err)
-		}
-	}
-	seedQ := q // q stays as the checks read it
-	if n, ok := names.get(); ok && !named {
-		seedQ.names, seedQ.imdbID, seedQ.origLang = n.names, n.imdbID, n.lang // late results match the other names too
-	}
-	seed := &tsUpgradeSeed{q: seedQ, cands: cands, pick: pick, ctx: warmCtx, cancel: warmCancel, raw: raw, late: sr.late, base: sr.base}
-	res := pick.res
-	if res == nil {
-		seed.cancel()
-		return nil, nil, errNoSource
-	}
-	if pick.live {
-		running := 0
-		for _, k := range pick.kept {
-			if k {
-				running++
-			}
-		}
-		note := ""
-		if res.partial {
-			note = ", before its verdict"
-		}
-		log.Printf("resolve %q: nothing keeps up after %s, answering with the best so far (%q, %s%s); %d checks keep measuring",
-			q.title, time.Since(checkStart).Round(time.Millisecond), res.TorrentTitle, res.Health, note, running-1)
-	} else if !res.keepsUp() {
-		log.Printf("resolve %q: no candidate keeps up, using the closest one", q.title)
-	}
-	if !res.durationOK() {
-		log.Printf("resolve %q: no candidate of verified duration, using one of unknown length", q.title)
-	}
-	log.Printf("resolve %q: candidate #%d (%s) validated in %s", q.title, pick.best+1, res.Quality, time.Since(checkStart).Round(time.Millisecond))
-	return res, seed, nil
+	return pick, warmCtx, warmCancel
 }
 
 // tsClaims hands each torrent to one candidate check. Known hashes belong to their
@@ -1309,16 +1374,7 @@ func tsRankAll(raw []JackettResult, q tsResolveQuery) []tsCandidate {
 		}
 	}
 	cands := tsDedupe(scored)
-	sort.SliceStable(cands, func(i, j int) bool {
-		ai, aj := tsAvoided(cands[i], q), tsAvoided(cands[j], q)
-		if ai != aj {
-			return aj
-		}
-		if cands[i].score != cands[j].score {
-			return cands[i].score > cands[j].score
-		}
-		return cands[i].raw.Title < cands[j].raw.Title
-	})
+	tsSortCandidates(cands, q)
 	return cands
 }
 
@@ -1782,9 +1838,10 @@ func tsPickBestKeep(ctx, checkCtx context.Context, n int, graceFor func(best int
 				case now:
 					return done(g)
 				case g >= 0: // in the grace of a promising better-ranked check
-				case p.results[best].good():
+				case p.results[best].good() && p.results[best].unfit == "":
 					setGrace(graceFor(best))
 				default:
+					// Starving, or unfit for the client: the running checks may still give a good one
 					setGrace(tsStarvingGrace)
 				}
 			}

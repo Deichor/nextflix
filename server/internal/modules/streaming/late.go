@@ -18,22 +18,15 @@ const (
 )
 
 // tsLateBetter returns up to tsLateMax candidates of all results that rank above the pick
-// and were not checked yet (copies of a checked torrent included).
-func tsLateBetter(raw []JackettResult, q tsResolveQuery, checked []tsCandidate, pick tsCandidate) []tsCandidate {
+// and were not checked yet (copies of a checked torrent included). After a pick that breaks
+// the client's caps (anyFit) every unchecked one whose name may fit counts, whatever its rank.
+func tsLateBetter(raw []JackettResult, q tsResolveQuery, checked []tsCandidate, pick tsCandidate, anyFit bool) []tsCandidate {
 	var out []tsCandidate
 	for _, c := range tsRankAll(raw, q) {
-		if len(out) >= tsLateMax || c.score <= pick.score || tsAvoided(c, q) {
+		if len(out) >= tsLateMax || (c.score <= pick.score && !anyFit) || tsAvoided(c, q) {
 			break
 		}
-		seen := false
-		for _, k := range checked {
-			if (c.hash != "" && c.hash == k.hash) || (c.raw.Title == k.raw.Title && c.raw.Size == k.raw.Size) ||
-				(tsStem(c.raw.Title) == tsStem(k.raw.Title) && tsSameSize(c.raw.Size, k.raw.Size)) {
-				seen = true
-				break
-			}
-		}
-		if !seen {
+		if !tsCheckedAlready(c, checked) && !(anyFit && tsNameUnfit(c, q)) {
 			out = append(out, c)
 		}
 	}
@@ -67,13 +60,16 @@ func (s *Service) mergeLate(key string, q tsResolveQuery, pick *tsResolveResult,
 	if got == 0 || seed.pick.best < 0 {
 		return
 	}
-	better := tsLateBetter(raw, q, seed.cands, seed.cands[seed.pick.best])
+	better := tsLateBetter(raw, q, seed.cands, seed.cands[seed.pick.best], pick.overCaps)
 	log.Printf("resolve %q: %d late results, %d better candidates", q.title, got, len(better))
 	if len(better) == 0 {
 		return
 	}
 
 	floor := tsQualityHeight(pick.Quality)
+	if pick.overCaps && q.maxQ > 0 {
+		floor = min(floor, q.maxQ) // the fallback is above the cap: one at the cap replaces it
+	}
 	upgradable := q.hevc && q.maxQ == 0
 	// They are background work: they wait while a stream starts
 	bg := tsBackground(ctx)
@@ -94,13 +90,15 @@ func (s *Service) mergeLate(key string, q tsResolveQuery, pick *tsResolveResult,
 			}
 			used := false
 			switch {
+			case r.unfit != "":
+				log.Printf("resolve %q: late candidate %q does not fit the client: %s", q.title, c.raw.Title, r.unfit)
 			case tsQualityHeight(r.Quality) > floor && upgradable:
 				if up := s.keepWarming(cctx, q, *r, nil); up != nil && tsQualityHeight(up.Quality) > floor {
 					used = s.offerUpgrade(key, q, up)
 				}
-			case r.good() && tsQualityHeight(r.Quality) >= floor:
-				// Same (or, for a capped client, the only playable) resolution: next time's
-				// source, unless something replaced the pick meanwhile
+			case r.good() && (tsQualityHeight(r.Quality) >= floor || pick.overCaps):
+				// Same (or, for a capped client, the only playable) resolution, or one that fits after
+				// a fallback: next time's source, unless something replaced the pick meanwhile
 				if cached, ok := s.cachedSource(key); ok && cached.Hash == pick.Hash {
 					s.storeSource(key, *r)
 					log.Printf("resolve %q: late candidate %q is the source from now on: %s", q.title, c.raw.Title, r.Health)

@@ -47,7 +47,8 @@ func (s *Service) notOut(q tsResolveQuery) (TitleAvailability, bool) {
 	}()
 	select {
 	case a := <-ch:
-		blocked := a.Status == "not_released" || a.Status == "in_theaters"
+		// The viewer may ask for a cinema recording of a film in cinemas (cinema.go)
+		blocked := a.Status == "not_released" || (a.Status == "in_theaters" && !q.cinema)
 		if blocked {
 			log.Printf("resolve %q: not searched, %s (release %q, digital %q)", q.title, a.Status, a.ReleaseDate, a.DigitalDate)
 		}

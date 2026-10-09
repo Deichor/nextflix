@@ -132,8 +132,10 @@ func tsMidOffset(size int64, round int) int64 {
 // A good one whose file turned out smaller than its name said (demoted) gives way to a later
 // good one of a higher real resolution, and one whose probed format ranks it lower than a
 // finished good one of the same resolution gives way to that one. A file the client cannot
-// show right (unfit: DV profile 5 without dv, Hi10P / 4:4:4) is only taken when no other
-// check is left. final is false while a running check could still beat it.
+// show right (unfit: DV profile 5 without dv, Hi10P / 4:4:4, above its maxq, video it cannot
+// decode) is only taken when no other check is left; of the ones that break the caps the
+// lowest good resolution (the cheapest re-encode). final is false while a running check could
+// still beat it.
 func tsChoose(results []*tsResolveResult, finished []bool) (best int, final bool) {
 	fit := results
 	unfit := false
@@ -151,7 +153,7 @@ func tsChoose(results []*tsResolveResult, finished []bool) (best int, final bool
 	if best, final = tsChooseFit(fit, finished); best >= 0 || !unfit {
 		return best, final
 	}
-	best, _ = tsChooseFit(results, finished)
+	best, _ = tsChooseFit(tsCheapest(results), finished)
 	return best, tsAllDone(finished)
 }
 
@@ -251,7 +253,7 @@ func tsCapClearly(a, b float64) bool { return a-b >= 0.1 && a >= 1.5*b }
 // tsChoosePlayable picks, when nothing keeps up at the answer cap, the source most likely to
 // play: finished checks and snapshots of running ones alike (rs, best rank first). In order:
 // alive (active peers or data, not dead) over a dead or silent swarm, fit for the client
-// (not unfit), measured over unmeasured (a 4K below 0.3 never beats a <= 1080p with a higher
+// (not unfit; of two that break its caps the good one, then the lower resolution), measured over unmeasured (a 4K below 0.3 never beats a <= 1080p with a higher
 // ratio), a verified duration (unless it delivers under tsCapVerifiedMin and the other one
 // clearly more), a clearly better rate / need ratio, the lower need (bitrate) when the ratios
 // are close, then more active peers, connected seeders, Jackett seeders and the rank. -1 when
@@ -263,6 +265,9 @@ func tsChoosePlayable(rs []*tsResolveResult) int {
 		}
 		if (a.unfit == "") != (b.unfit == "") {
 			return a.unfit == ""
+		}
+		if a.overCaps && b.overCaps && (tsCheaperFallback(a, b) || tsCheaperFallback(b, a)) {
+			return tsCheaperFallback(a, b)
 		}
 		if a.measured() != b.measured() {
 			return a.measured()

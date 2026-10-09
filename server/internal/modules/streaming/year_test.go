@@ -73,7 +73,7 @@ func TestTMDBYearRejectsRemakesOnEveryPath(t *testing.T) {
 			t.Errorf("client year %d: upgrade candidates %q", clientYear, got[0].raw.Title)
 		}
 		pick := tsCandidate{raw: JackettResult{Title: notldYTS}, score: -1000}
-		for _, c := range tsLateBetter(notldResults(), q, nil, pick) {
+		for _, c := range tsLateBetter(notldResults(), q, nil, pick, false) {
 			if c.raw.Title == notld2026 || c.raw.Title == notld1990 {
 				t.Errorf("client year %d: late candidate %q", clientYear, c.raw.Title)
 			}

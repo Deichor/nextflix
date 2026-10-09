@@ -259,8 +259,10 @@ func tsSidegradeWorthy(r *tsResolveResult, cur *tsHealth) bool {
 	return cur == nil || !cur.KeepsUp || cur.Dead || r.Health.ratio() >= tsClearlyFaster*cur.ratio()
 }
 
+// addSpare keeps r as a spare of w for a sidegrade (never one unfit for the client); false
+// when it was not taken.
 func (s *Service) addSpare(w *tsWarm, r *tsResolveResult) bool {
-	if w == nil || !tsHashPattern.MatchString(r.Hash) {
+	if w == nil || !tsHashPattern.MatchString(r.Hash) || r.unfit != "" {
 		return false
 	}
 	s.warmMu.Lock()
@@ -936,6 +938,10 @@ func (h handler) sidegrade(c *gin.Context) {
 		if cached, ok := h.s.cachedSource(key); ok {
 			curQ = tsQualityHeight(cached.Quality)
 		}
+	}
+	// A fallback above the cap plays: spares and searches stay within the cap
+	if q.maxQ > 0 && curQ > q.maxQ {
+		curQ = q.maxQ
 	}
 	q.warm = h.s.holdWarm(key)
 	h.s.markIntent(q.warm)

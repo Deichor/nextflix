@@ -328,9 +328,9 @@ func (w *tsUpgradeWatch) arrived(r *tsResolveResult) bool {
 	return taken
 }
 
-// offer queues r unless it is dead, a torrent already tried or over the limit.
+// offer queues r unless it is dead, unfit for the client, a torrent already tried or over the limit.
 func (w *tsUpgradeWatch) offer(r *tsResolveResult) bool {
-	if r == nil || (r.Health != nil && r.Health.Dead) {
+	if r == nil || (r.Health != nil && r.Health.Dead) || r.unfit != "" {
 		return false
 	}
 	w.mu.Lock()
@@ -453,6 +453,9 @@ func (s *Service) keepWarming(ctx context.Context, q tsResolveQuery, r tsResolve
 			return nil
 		}
 		s.applyProbedQuality(&r)
+		if s.applyProbedCaps(&r, q); r.unfit != "" {
+			return nil
+		}
 		r.DurationVerified = true
 		return &r
 	}
@@ -498,7 +501,7 @@ func (s *Service) upgradeFor(key string, q tsResolveQuery, current string, curQ 
 	}
 	better := func(r *tsResolveResult) bool {
 		return r != nil && r.Hash != current && tsQualityHeight(r.Quality) > curQ && r.Health != nil && r.Health.KeepsUp &&
-			!r.Health.Dead && !r.partial && r.durationOK()
+			!r.Health.Dead && !r.partial && r.durationOK() && r.unfit == "" && r.CapsFallback == "" && s.capsMiss(r, q) == ""
 	}
 	var u *tsUpgrade
 	if v, ok := s.upgrades.Load(key); ok {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,10 +46,14 @@ type tsHome struct {
 	cache map[int]tsHomeVerdict
 	calls map[int]*tsHomeCall
 	slots chan struct{}
+	// Hashes per movie whose length was wrong: never a home release again (homedur.go)
+	rejected map[int]map[string]time.Time
+	probing  chan struct{} // one background length check at a time
 }
 
 func newHome() *tsHome {
-	return &tsHome{cache: map[int]tsHomeVerdict{}, calls: map[int]*tsHomeCall{}, slots: make(chan struct{}, tsHomeMax)}
+	return &tsHome{cache: map[int]tsHomeVerdict{}, calls: map[int]*tsHomeCall{}, slots: make(chan struct{}, tsHomeMax),
+		rejected: map[int]map[string]time.Time{}, probing: make(chan struct{}, 1)}
 }
 
 // tsHomeCandidates are the ranked candidates of raw that count as a home release: a
@@ -106,7 +111,7 @@ func (s *Service) HomeReleaseOut(tmdbID int) bool {
 	h.mu.Unlock()
 	if !running {
 		go func() {
-			v := s.searchHomeRelease(tmdbID)
+			v, check := s.searchHomeRelease(tmdbID)
 			h.mu.Lock()
 			now := time.Now()
 			for k, old := range h.cache {
@@ -119,6 +124,9 @@ func (s *Service) HomeReleaseOut(tmdbID int) bool {
 			h.mu.Unlock()
 			call.v = v
 			close(call.done)
+			if check != nil {
+				check() // after the verdict is stored, so a wrong length can turn it
+			}
 		}()
 	}
 	select {
@@ -130,7 +138,9 @@ func (s *Service) HomeReleaseOut(tmdbID int) bool {
 	}
 }
 
-func (s *Service) searchHomeRelease(tmdbID int) tsHomeVerdict {
+// searchHomeRelease searches the movie's home releases; check (nil unless found) probes the
+// lengths of the TorBox-cached ones (probeHomeReleases).
+func (s *Service) searchHomeRelease(tmdbID int) (v tsHomeVerdict, check func()) {
 	h := s.home
 	h.slots <- struct{}{}
 	defer func() { <-h.slots }()
@@ -140,16 +150,27 @@ func (s *Service) searchHomeRelease(tmdbID int) tsHomeVerdict {
 	s.englishTitle(&q)
 	if len(tsNormalize(q.title)) == 0 {
 		log.Printf("home release of movie %d: no title", tmdbID)
-		return fail
+		return fail, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tsHomeSearchTime)
 	defer cancel()
-	q, _, cands, err := s.searchRanked(ctx, q, tsHomeFound, tsHomeCandidates)
+	// Releases whose length was wrong before never count
+	rejected := h.rejectedHome(tmdbID)
+	rank := func(raw []JackettResult, q tsResolveQuery) []tsCandidate {
+		var out []tsCandidate
+		for _, c := range tsHomeCandidates(raw, q) {
+			if !rejected[strings.ToLower(c.hash)] {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	q, _, cands, err := s.searchRanked(ctx, q, tsHomeFound, rank)
 	if err != nil {
 		log.Printf("home release %q: search failed: %v", q.title, err)
-		return fail
+		return fail, nil
 	}
-	v := tsHomeVerdict{found: tsHomeFound(cands), expires: started.Add(tsHomeMissTTL)}
+	v = tsHomeVerdict{found: tsHomeFound(cands), expires: started.Add(tsHomeMissTTL)}
 	if v.found {
 		v.expires = started.Add(tsHomeFoundTTL)
 	}
@@ -161,7 +182,11 @@ func (s *Service) searchHomeRelease(tmdbID int) tsHomeVerdict {
 	}
 	log.Printf("home release %q (%d): found=%v, %d home releases in %s, best %q", q.title, q.year, v.found, len(cands),
 		time.Since(started).Round(time.Millisecond), v.best)
-	return v
+	if v.found {
+		q.tmdbID = tmdbID
+		check = func() { s.probeHomeReleases(q, cands) }
+	}
+	return v, check
 }
 
 // searchRanked searches a title like resolve does and ranks the results with rank. When
@@ -226,8 +251,12 @@ func (s *Service) dryResolve(c *gin.Context, q tsResolveQuery) {
 		if i == 100 {
 			break
 		}
+		src := tsSourceOf(cand.rest)
+		if cand.cinema {
+			src = "cinema" // a recording (?cinema=1)
+		}
 		out = append(out, item{Title: cand.raw.Title, Seeders: cand.raw.Seeders, Size: cand.raw.Size, Quality: cand.quality,
-			Source: tsSourceOf(cand.rest), Score: cand.score, Parts: cand.parts.String()})
+			Source: src, Score: cand.score, Parts: cand.parts.String()})
 	}
 	c.JSON(http.StatusOK, gin.H{"title": q.title, "year": q.year, "runtime": q.runtime, "results": len(raw),
 		"usable": len(cands), "took_ms": time.Since(started).Milliseconds(), "candidates": out})

@@ -24,6 +24,8 @@ type tsTags struct {
 	Probed    bool   `json:"probed,omitempty"` // audio / HDR corrected from ffprobe
 	// Hi10P / 4:4:4 / 4:2:2 H.264: no browser (and few TVs) decodes it, a re-encode is heavy
 	Undecodable bool `json:"undecodable,omitempty"`
+	// Video codec of the probed file (ffprobe name: h264, hevc, av1, ...); "" before a probe
+	Video string `json:"video,omitempty"`
 	// Languages of the text subtitles inside (embedded tracks, files next to the video), from
 	// the check of the file; nil when unknown
 	Subs []string `json:"subs,omitempty"`
@@ -234,6 +236,9 @@ func (t tsTags) String() string {
 	if t.Truncated {
 		parts = append(parts, "cut")
 	}
+	if t.Video != "" {
+		parts = append(parts, t.Video)
+	}
 	if t.Probed {
 		parts = append(parts, "probed")
 	}
@@ -315,6 +320,7 @@ func tsProbedTags(p *tsProbe) (tsTags, bool) {
 		t.DVOnly = profile == 5 || (profile == 8 && compat == 0)
 		t.HDR10 = v.hdrTransfer() != "" && !t.DVOnly
 		t.Undecodable = tsUndecodableVideo(v)
+		t.Video = v.CodecName
 	}
 	t.Probed = true
 	return t, true
@@ -350,6 +356,7 @@ func tsMergeProbed(name, probed tsTags) tsTags {
 		t.HDR10 = true
 	}
 	t.Undecodable = probed.Undecodable
+	t.Video = probed.Video
 	t.Probed = true
 	return t
 }

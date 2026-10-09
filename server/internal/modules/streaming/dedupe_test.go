@@ -147,7 +147,7 @@ func TestLateBetterCandidates(t *testing.T) {
 		{Title: "Night of the Living Dead 1968 720p BluRay x264 [1337x]", Seeders: 20, Size: gbSize(1.2), Link: "http://jackett/dl/1337x/8"}, // a copy of the checked 720p
 		{Title: "Night of the Living Dead 1968 480p XviD", Seeders: 2, Size: tsGB},
 	}
-	better := tsLateBetter(append(early, late...), q, checked, checked[0])
+	better := tsLateBetter(append(early, late...), q, checked, checked[0], false)
 	if len(better) != 1 || !strings.Contains(better[0].raw.Title, "1080p") {
 		t.Fatalf("late better: %q, want only the new 1080p", titles(better))
 	}

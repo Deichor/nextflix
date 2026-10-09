@@ -98,12 +98,16 @@ func tsDebridBoost(cands []tsCandidate, cached func(tsCandidate) bool) {
 	}
 }
 
-// tsSortCandidates is tsRankAll's order: avoided last, then score, then name.
+// tsSortCandidates is tsRankAll's order: avoided last, for a capped client names without a
+// resolution tag after the labeled ones (see tsUnknownRes), then score, then name.
 func tsSortCandidates(cands []tsCandidate, q tsResolveQuery) {
 	sort.SliceStable(cands, func(i, j int) bool {
 		ai, aj := tsAvoided(cands[i], q), tsAvoided(cands[j], q)
 		if ai != aj {
 			return aj
+		}
+		if ui, uj := tsUnknownRes(cands[i], q), tsUnknownRes(cands[j], q); ui != uj {
+			return uj
 		}
 		if cands[i].score != cands[j].score {
 			return cands[i].score > cands[j].score
@@ -113,8 +117,8 @@ func tsSortCandidates(cands []tsCandidate, q tsResolveQuery) {
 }
 
 // tsDebridGate lets the best ranked cached candidate (lead) go first: checks ranked below it
-// wait until it finished (at most tsDebridGateWait), and once it is a good pick the ones of
-// its resolution or lower stop, so no swarm competes with the TorBox stream for the line.
+// wait until it finished (at most tsDebridGateWait), and once it is a good pick that fits the
+// client the ones of its resolution or lower stop, so no swarm competes with the TorBox stream for the line.
 // Higher resolutions still run (upgrade path).
 type tsDebridGate struct {
 	s     *Service
@@ -144,7 +148,7 @@ func (g *tsDebridGate) item(i int) *torbox.CachedItem {
 
 func (g *tsDebridGate) finish(res *tsResolveResult, err error) {
 	g.once.Do(func() {
-		if err == nil && res != nil && res.good() {
+		if err == nil && res != nil && res.good() && res.unfit == "" {
 			g.mu.Lock()
 			g.pick = res
 			g.mu.Unlock()
@@ -250,6 +254,7 @@ func (s *Service) checkDebrid(ctx context.Context, c tsCandidate, q tsResolveQue
 		nameQ:           c.quality,
 		rank:            c.score,
 		avoided:         tsAvoided(c, q),
+		Cinema:          c.cinema,
 	}
 	nameTags := c.tags
 	res.Format = &nameTags
@@ -277,6 +282,7 @@ func (s *Service) checkDebrid(ctx context.Context, c tsCandidate, q tsResolveQue
 	s.applyProbedLanguage(res, q)
 	formatMoved := s.applyProbedFormat(res, c, q)
 	subsMoved := s.applyProbedSubs(res, c, q, files, file)
+	s.applyProbedCaps(res, q)
 	if formatMoved || subsMoved || res.unfit != "" {
 		log.Printf("resolve %q: %q probed as {%s}: rank %.1f -> %.1f%s", q.title, c.raw.Title, res.Format, c.score, res.rank,
 			tsUnfitNote(res.unfit))

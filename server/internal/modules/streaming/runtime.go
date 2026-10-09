@@ -257,6 +257,11 @@ func (s *Service) checkDuration(ctx context.Context, c tsCandidate, q tsResolveQ
 	return s.judgeDuration(c.raw.Title, q, o.p.duration(), started)
 }
 
+// tsDurationError: a probed file is not as long as the title (see judgeDuration).
+type tsDurationError struct{ verdict string }
+
+func (e *tsDurationError) Error() string { return e.verdict }
+
 // judgeDuration compares a probed duration (seconds, 0 = unknown) with q.runtime.
 func (s *Service) judgeDuration(release string, q tsResolveQuery, dur float64, started time.Time) (float64, bool, error) {
 	if dur <= 0 {
@@ -266,7 +271,7 @@ func (s *Service) judgeDuration(release string, q tsResolveQuery, dur float64, s
 	verdict := fmt.Sprintf("duration %dm vs runtime %dm", int(math.Round(dur/60)), q.runtime)
 	if tsDurationMismatch(dur, q.runtime, q.mediaType, tsLongerCut(release)) {
 		log.Printf("resolve %q: %q %s: rejected (%s)", q.title, release, verdict, time.Since(started).Round(time.Millisecond))
-		return dur, false, fmt.Errorf("%s", verdict)
+		return dur, false, &tsDurationError{verdict}
 	}
 	log.Printf("resolve %q: %q %s: ok (%s)", q.title, release, verdict, time.Since(started).Round(time.Millisecond))
 	return dur, true, nil

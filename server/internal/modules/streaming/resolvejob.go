@@ -151,6 +151,8 @@ func parseResolveQuery(c *gin.Context) (tsResolveQuery, bool) {
 	q.dv = q.hevc && c.Query("dv") == "1"
 	q.atmos = c.Query("atmos") == "1"
 	q.acodecs = clientAudioCodecs(c)
+	// A cinema recording of a film still in cinemas (cinema.go)
+	q.cinema = c.Query("cinema") == "1"
 	q.lang = httpserver.Lang(c) // the profile language: its dub is fine too (see lang.go)
 	if rt, err := strconv.Atoi(c.Query("runtime")); err == nil && rt >= 1 && rt <= 600 {
 		q.runtime = rt
@@ -210,7 +212,7 @@ func (h handler) resolve(c *gin.Context) {
 	key := tsResolveKey(q)
 	// cached=1 only reports a known source; it never searches, joins a swarm or holds the title
 	if c.Query("cached") == "1" {
-		if res, ok := s.cachedSource(key); ok {
+		if res, ok := s.cachedFor(key, q); ok {
 			res.Cached = true
 			c.JSON(http.StatusOK, res)
 		} else {
@@ -219,7 +221,7 @@ func (h handler) resolve(c *gin.Context) {
 		return
 	}
 	refresh := c.Query("refresh") == "1" || c.Query("refresh") == "true"
-	if res, ok := s.cachedSource(key); ok && !refresh {
+	if res, ok := s.cachedFor(key, q); ok && !refresh {
 		// Play is about to open it: the title is held, and released with the player
 		w := s.holdWarm(key)
 		s.markIntent(w) // a player asks: the title never gives way to another one's playback
@@ -252,6 +254,13 @@ func (h handler) resolve(c *gin.Context) {
 		return // the viewer gave up; the job keeps running until the player releases the title
 	}
 	if f.err != nil {
+		// The search may have found that the film is only in cinemas after all (homedur.go)
+		if errors.Is(f.err, errNoSource) {
+			if a, blocked := s.notOut(q); blocked {
+				c.JSON(statusTooEarly, tsNotOutBody(a))
+				return
+			}
+		}
 		var re *tsResolveError
 		if errors.As(f.err, &re) {
 			c.JSON(re.status, gin.H{"error": re.msg})
@@ -280,7 +289,7 @@ func (h handler) prefetch(c *gin.Context) {
 			return
 		}
 	}
-	if !s.cachedOrRunning(key) {
+	if !s.cachedOrRunning(key, q) {
 		if a, blocked := s.notOut(q); blocked {
 			c.JSON(http.StatusAccepted, gin.H{"status": "not_released", "availability": a.Status,
 				"release_date": tsDateOrNil(a.ReleaseDate), "digital_date": tsDateOrNil(a.DigitalDate)})
@@ -304,8 +313,8 @@ func (h handler) prefetch(c *gin.Context) {
 // tsPrefetchMax at once) and returns the prefetch status.
 func (s *Service) prefetchStart(key string, q tsResolveQuery, w *tsWarm) string {
 	switch {
-	case s.cachedOrRunning(key):
-		if res, ok := s.cachedSource(key); ok {
+	case s.cachedOrRunning(key, q):
+		if res, ok := s.cachedFor(key, q); ok {
 			s.rewarm(w, res)
 		}
 		return "ready"
@@ -329,8 +338,8 @@ func (s *Service) prefetchStart(key string, q tsResolveQuery, w *tsWarm) string 
 	}
 }
 
-func (s *Service) cachedOrRunning(key string) bool {
-	if _, ok := s.cachedSource(key); ok {
+func (s *Service) cachedOrRunning(key string, q tsResolveQuery) bool {
+	if _, ok := s.cachedFor(key, q); ok {
 		return true
 	}
 	return s.flights.running(key)
