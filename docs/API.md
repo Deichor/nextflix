@@ -102,7 +102,7 @@ see [ARCHITECTURE.md](ARCHITECTURE.md#ratings-and-favorites). Migrated rows may 
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/recommendations?profile_id=N` | 200 `{rows: [Row]}`; computed from the profile's ratings and favorites (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#recommendations)), cached 30 min per profile and `X-Lang` and recomputed after any rating/favorite change of that profile |
+| GET | `/api/recommendations?profile_id=N` | 200 `{rows: [Row]}`; computed from the profile's ratings and favorites (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#recommendations)), cached 30 min per profile and `X-Lang` (2 min while a "More Like This" list was not ready yet) and recomputed after any rating/favorite change of that profile |
 
 Row: `{id, title, reason, items: [Item]}`. Item:
 
@@ -208,13 +208,35 @@ the Turkish TMDB details (cached 24 h); ranks are unchanged and titles without a
 | GET | `/api/tmdb/tv/:id/similar` |
 | GET | `/api/tmdb/tv/:id/recommendations` |
 | GET | `/api/tmdb/tv/:id/season/:season` |
-| GET | `/api/tmdb/:id/related` |
+| GET | `/api/tmdb/:id/related` (legacy, same list as `/api/catalog/:type/:id/similar`) |
+| GET | `/api/catalog/:type/:id/similar` (see [More Like This](#more-like-this)) |
 | GET | `/api/catalog/discover` (see [Discover](#discover-search-filters)) |
 | GET | `/api/catalog/suggest` (see [Search](#search-ranking-did-you-mean-suggest)) |
 
 All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search pools 15 min). With `X-Lang: tr`,
 `/api/tmdb/movie/:id/images` lists only Turkish, English and language-less images (`include_image_language=tr,en,null`),
 and details videos include English trailers (`include_video_language=tr,en,null`).
+
+### More Like This
+
+`GET /api/catalog/{movie|tv}/{id}/similar?profile_id=&limit=` (limit 1-40, default 24; the profile also from `X-User-ID`)
+→ 200 `{results: [SimilarItem], total_results, media_type, media_id}`. The list comes from the matcher in
+[ARCHITECTURE.md](ARCHITECTURE.md#more-like-this) (cached 24 h per title and `X-Lang`; the profile's dislikes are removed,
+watched titles moved down and liked genres nudged up per request). An item is a SearchResult (`id`, `media_type`,
+`title`, `original_title`, `overview`, `release_date` (TV: first air date), `poster_path`, `backdrop_path`,
+`vote_average`, `vote_count`, `popularity`, `genre_ids`, `original_language`) plus `reason`: `collection` (another part
+of the movie's collection, first, in release order), `spin_off` (same franchise, e.g. El Camino for Breaking Bad) or
+`match`. A few items may be of the other media type. `debug=1` adds `score` and `why` (the score terms). When the
+matcher fails and nothing is cached, TMDB's similar + recommended lists are returned (`reason` absent); 400 for a type
+other than `movie`/`tv`.
+
+`GET /api/tmdb/:id/related?type=movie|tv&limit=` (default 20, max 50) answers the same list (`year` is ignored); kept
+for TV apps installed before the endpoint above.
+
+```
+GET /api/catalog/movie/240/similar?limit=4 → {"results":[{"id":238,"title":"The Godfather","reason":"collection",...},
+  {"id":242,"title":"The Godfather Part III","reason":"collection",...},{"id":769,"title":"GoodFellas","reason":"match",...},...]}
+```
 
 ### Search (ranking, did you mean, suggest)
 
@@ -299,13 +321,17 @@ block). Dates are compared with today's date in Europe/Istanbul.
   1 h otherwise, see [ARCHITECTURE.md](ARCHITECTURE.md#films-in-cinemas-with-a-home-release-homereleasego)).
   When home releases (WEB-DL, WEBRip, BluRay, ...; never a cinema recording, bonus material or a namesake) of at
   least 2 release groups exist the answer is `available` with `digital_release_found: true` and `release_date` =
-  the theatrical date; the other dates stay.
+  the theatrical date; the other dates stay. Home releases whose probed length is wrong (resolve's checks, or the
+  home check's own header probe of up to 3 TorBox-cached ones) turn it back: when none had the film's length and at
+  least 2 had another one, the film is `in_theaters` again for 6 h and those releases never count again.
 ```
 GET /api/availability?media_type=tv&tmdb_id=320754&season=1&episode=1      (Money Trap, on 2026-10-08)
 → 200 {"status":"not_released","release_date":"2026-10-16","theatrical_date":null,"digital_date":null}
-GET /api/availability?media_type=movie&tmdb_id=1368337                     (The Odyssey, on 2026-10-09: WEB-DLs out)
+GET /api/availability?media_type=movie&tmdb_id=1368337                     (The Odyssey, on 2026-10-09: "WEB-DLs" out)
 → 200 {"status":"available","release_date":"2026-07-15","theatrical_date":"2026-07-15","digital_date":"2026-11-17",
        "digital_release_found":true}
+  ... seconds later, the TorBox-cached "WEB-DLs" probed as 86 min for 173 min:
+→ 200 {"status":"in_theaters","release_date":"2026-11-17","theatrical_date":"2026-07-15","digital_date":"2026-11-17"}
 GET /api/availability?media_type=movie&tmdb_id=27205                       (Inception)
 → 200 {"status":"available","release_date":"2010-12-03","theatrical_date":"2010-07-15","digital_date":"2020-08-13"}
 ```
@@ -329,7 +355,7 @@ GET /api/availability?media_type=movie&tmdb_id=27205                       (Ince
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/torrent-stream/resolve?type=movie&title=&year=` | auto-pick for the Watch button |
-| GET | `/api/torrent-stream/resolve?type=tv&title=&season=&episode=` | → 200 `{magnet, hash, index, file_name, torrent_title, quality, seeders, size, hdr?, health?, duration?, duration_verified, cached?, format?, source?, debrid?}`, 404 `{error: "No playable source found"}`; 425 `{error: "not_released", status: "not_released"\|"in_theaters", release_date, digital_date}` (dates `YYYY-MM-DD` or null) when `tmdb_id` names a title that is not out yet or only in cinemas with no home release on the indexers yet (see [Availability](#availability): a film in cinemas whose WEB-DL is out is `available` and resolves normally): nothing more is searched. `unknown` availability, a lookup slower than 4 s, a cached source or a resolve already running never answer 425. Can take up to ~60 s. `health` = `{rate, peak?, need, active_peers, seeders, keeps_up, dead?}` (bytes/s; `rate` is the rate delivered after the warm-up start burst, `peak` the best 3 s window for comparison). `quality` is the probed video size once the header was read (else the release name). `format` = `{audio?, channels?, atmos?, dv?, dv_only?, hdr10?, hdr10plus?, source?, truncated?, probed?, undecodable?, subs?}` (see [Playback capabilities](#playback-capabilities); `probed` once ffprobe corrected it; `subs`: ISO 639-1 languages of the text subtitles inside the file or next to it in the torrent, from the check). When nothing keeps up the answer comes about 12 s after the checks started (up to 16 s while nothing is measured yet) with the most playable source so far (`health.keeps_up: false`); every alternative keeps measuring for `sidegrade`. Optional: `tmdb_id`, `runtime` (minutes), `hevc=1`, `hdr=1`, `dv=1`, `atmos=1`, `acodecs=`, `maxq=1080\|720`,|720`, `refresh=1` (skip the cache, avoid the cached torrent), `avoid=<hash>,<hash>` (up to 5 torrents that must not be picked again, ranked last), `cached=1` (only answer from the cache, never search), `dry=1` (search and rank only: 200 `{title, year, runtime, results, usable, took_ms, candidates: [{title, seeders, size, quality, source, score, parts}]}` with the ranked candidates (up to 100); no TorrServer, TorBox, source cache or hold; the same 425 gate) |
+| GET | `/api/torrent-stream/resolve?type=tv&title=&season=&episode=` | → 200 `{magnet, hash, index, file_name, torrent_title, quality, seeders, size, hdr?, health?, duration?, duration_verified, cached?, format?, source?, debrid?, caps_fallback?, cinema?}`, 404 `{error: "No playable source found"}`; 425 `{error: "not_released", status: "not_released"\|"in_theaters", release_date, digital_date}` (dates `YYYY-MM-DD` or null) when `tmdb_id` names a title that is not out yet or only in cinemas with no home release on the indexers yet (see [Availability](#availability): a film in cinemas whose WEB-DL is out is `available` and resolves normally): nothing more is searched. `unknown` availability, a lookup slower than 4 s, a cached source or a resolve already running never answer 425. A resolve whose checks show that the home releases have the wrong length (the film is in cinemas after all) answers 425 `in_theaters` instead of 404. Can take up to ~60 s. `health` = `{rate, peak?, need, active_peers, seeders, keeps_up, dead?}` (bytes/s; `rate` is the rate delivered after the warm-up start burst, `peak` the best 3 s window for comparison). `quality` is the probed video size once the header was read (else the release name). `format` = `{audio?, channels?, atmos?, dv?, dv_only?, hdr10?, hdr10plus?, source?, truncated?, probed?, undecodable?, video?, subs?}` (see [Playback capabilities](#playback-capabilities); `probed` once ffprobe corrected it; `video`: the probed video codec; `subs`: ISO 639-1 languages of the text subtitles inside the file or next to it in the torrent, from the check). When nothing keeps up the answer comes about 12 s after the checks started (up to 16 s while nothing is measured yet) with the most playable source so far (`health.keeps_up: false`); every alternative keeps measuring for `sidegrade`. `caps_fallback`: why the file breaks the client's caps (taller than `maxq`, or video play re-encodes for it, e.g. `2160p above the 720p cap, hevc yuv420p10le video is re-encoded`); only set when no fitting file was found (see [Playback capabilities](#playback-capabilities)). Optional: `tmdb_id`, `runtime` (minutes), `hevc=1`, `hdr=1`, `dv=1`, `atmos=1`, `acodecs=`, `maxq=1080\|720`, `refresh=1` (skip the cache, avoid the cached torrent), `avoid=<hash>,<hash>` (up to 5 torrents that must not be picked again, ranked last), `cinema=1` (a cinema recording of a film that is only in cinemas: the `in_theaters` 425 is skipped, recordings such as TELESYNC / HDTS / CAM are ranked, best capture first, the duration check still applies; own cache key; the answer then carries `cinema: true`; send it on prefetch, sidegrade, upgrade, subalt and release of that playback too, see [ARCHITECTURE.md](ARCHITECTURE.md#cinema-recordings-on-request-cinemago)), `cached=1` (only answer from the cache, never search), `dry=1` (search and rank only: 200 `{title, year, runtime, results, usable, took_ms, candidates: [{title, seeders, size, quality, source, score, parts}]}` with the ranked candidates (up to 100); no TorrServer, TorBox, source cache or hold; the same 425 gate) |
 | POST | `/api/torrent-stream/prefetch?<same query as resolve>` | 202 `{status: started|ready|running|busy|failed_recently|early|not_released|deferred}`; the intent to watch: starts the resolve job in the background and holds the title warm (a cached source is re-added to TorrServer and its header read). While another title plays (playback priority, `docs/ARCHITECTURE.md`) a detail-page prefetch answers `deferred`: the title is held but nothing is searched or loaded until the last stream ends, then it starts by itself; a next-episode prefetch (`next_pos`) of the playing show is never deferred.|ready\|running\|busy\|failed_recently\|early\|not_released}`; the intent to watch: starts the resolve job in the background and holds the title warm (a cached source is re-added to TorrServer and its header read). Optional `next_pos=&next_dur=` (seconds of the current episode): a next-episode prefetch only runs once 10 min are left (85 % for episodes under 25 min), else `early`. A title that is not out yet (resolve would answer 425) gets `{status: "not_released", availability: "not_released"\|"in_theaters", release_date, digital_date}` and no job is started |
 | POST | `/api/torrent-stream/release?<resolve query>[&delay=<s>]` / `?hash=<h>,<h>` | 202 `{status: released\|scheduled, titles?, hashes?}`; drops a title's warmed torrents from TorrServer (every capability variant of that title / episode) and cancels its background work (resolve job unless a player waits for it, upgrade warm-up, late indexer results). `delay` (≤ 120 s) waits first; any prefetch, resolve or play of the title cancels it. `hash` (≤ 10) drops torrents a closing player used; `why=<reason>` (with `hash`) is logged: why the player left them (a switch to them failed, or how the upgrade that replaced them went). Playing torrents and ones another title holds are never dropped: no torrent a player reads (a `play` stream, `probe` or `seekpoint`), or whose `play` stream ended less than 60 s ago, is dropped by any path (the drop is retried once it is free). A title release while a player reads one of the title's torrents (any capability variant) is checked again 5 s later and ignored if the player still reads it; a `hash` that a player reads is ignored. Made for `navigator.sendBeacon`; 400 without a title or hash |
 | GET | `/api/torrent-stream/sidegrade?<same query as resolve>&current=<hash>&current_q=[&draining=1][&critical=1][&avoid=<hash>,<hash>]` | 200 resolve result of a different torrent of at least `current_q` that keeps up now (measured within 45 s; a spare the resolve kept warm) and, when `current`'s last measurement kept up too, delivers ≥ 1.5× its rate / need; while `current` starves (or with `critical=1`) also one of a lower resolution that keeps up (the playing resolution or higher first). A spare that does not keep up is never offered. 204 otherwise (then it measures the spares in the background). At most one per title every 2 minutes; spares exist only until 60 s after the pick without playback or 3 minutes into playback (or after their arrival / the last `draining=1` poll, whichever is later). `draining=1`: the player's buffer drains; when no spare is left to measure, the server searches for alternatives in the background (at most every 3 min per title, capped at the playing resolution, without `current` and `avoid`; its checks wait while a stream starts) and a pick that finished good (never the search's "best so far" cap answer) is offered on a later poll under the same rules. `critical=1` (buffer under 6 s, implies `draining`): a lower resolution that keeps up is fine too. `avoid=` (≤ 5): torrents the player found slow, never offered (spares among them are dropped). 400 for an invalid `current` |
@@ -375,6 +401,14 @@ calls address different cache entries.
 | `atmos=1` | passes Atmos (E-AC-3 JOC / TrueHD) through to the speakers; only counts together with `eac3` in `acodecs` | ranking, key |
 | `acodecs=` | comma list of audio codecs the client decodes: `aac`, `opus`, `flac`, `mp3`, `ac3`, `eac3`, `truehd`, `dts` (ffprobe names; unknown names are ignored) | ranking (with `atmos=1`; `ac3`, `truehd`, `dts` are part of the key), probe/play |
 | `split_acodecs=` | audio codecs the client plays only on their own, in an audio-only SourceBuffer (an LG TV: `ac3,eac3`); copied only into `track=audio` streams, never into a muxed one. Resolve-family calls declare them in `acodecs` instead (ranking, key) | probe/play/seekpoint |
+
+The caps hold for the probed file, not only its name: a file taller than `maxq`, or whose video `play` has to
+re-encode for the client (HEVC without `hevc=1`, AV1, VP9, MPEG-4, Hi10P / 4:4:4), does not fit. Resolve prefers
+any fitting file and checks up to 4 more candidates before it plays one that does not fit; then it takes the
+cheapest (copied above the cap before re-encoded, then the lowest resolution) and says why in `caps_fallback`.
+For a capped client (`maxq`, or no `hevc=1`) a release name without a resolution tag ranks after every labeled one
+until probed. A cached source that breaks the caps is resolved again (a caps fallback is reused for 6 h). `cinema=1`
+(a cinema recording, see resolve) is part of the source cache key as well (`…|cinema`).
 
 Ranking within one resolution (resolution, source tier and the measured swarm health always come first):
 

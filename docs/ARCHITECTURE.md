@@ -41,7 +41,7 @@ docs/                       this folder
 | `ratings` | Per-profile ratings (`dislike`/`like`/`love`) and Favorites (replaces My List), one-time My List migration, change hook; see [Ratings and Favorites](#ratings-and-favorites) | `title_ratings`, `rating_migrations` (`my_list_items` is kept, read-only) |
 | `recommendations` | Per-profile rows built from ratings + TMDB recommendations/similar, and the "Surprise me" pick (ratings + watch history); see [Recommendations](#recommendations), [Surprise me](#surprise-me) | – (memory cache) |
 | `top10` | Netflix weekly Top 10 (Turkey and global) mapped to TMDB; see [Top 10](#top-10) | `top10_lists`, `top10_titles` |
-| `catalog` | TMDB lists, details, ranked search with typo correction and suggest (see [Search ranking](#search-ranking)), related titles, seasons, search filters and ranked browsing (`/api/catalog/discover`, see [Search filters](#search-filters), [Browse ranking](#browse-ranking)) | – (typo index file `/app/data/search-index.tsv.gz`) |
+| `catalog` | TMDB lists, details, ranked search with typo correction and suggest (see [Search ranking](#search-ranking)), "More Like This" (see [More Like This](#more-like-this)), seasons, search filters and ranked browsing (`/api/catalog/discover`, see [Search filters](#search-filters), [Browse ranking](#browse-ranking)) | – (typo index file `/app/data/search-index.tsv.gz`) |
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
@@ -74,7 +74,7 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 5. `progress`, `ratings`, then `profiles` with both as cleaners, plus `EnsureDefault`; `ratings.MigrateMyList()`
    (one time, logged) and `go ratings.Backfill(ctx)`; `recommendations` (ratings adapter + TMDB catalog, hooked to
    `ratings.OnChange`), plus the watch history (`SetHistory(watchHistory(progress))`); `top10` (`Start(ctx)` loads stored lists and refreshes in the background).
-6. `catalog` with `StartSearchIndex(ctx, SEARCH_INDEX_DIR or /app/data)` (loads / refreshes the typo index in the background), `SetRatings(searchRatings(ratings))` + `ratings.OnChange(InvalidateTaste)` (genre taste) and `SetLocalSignals(localSignals(profiles, progress, ratings))` (browse ranking); `providers` (on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
+6. `catalog` with `StartSearchIndex(ctx, SEARCH_INDEX_DIR or /app/data)` (loads / refreshes the typo index in the background), `SetRatings(searchRatings(ratings))` + `ratings.OnChange(InvalidateTaste)` (genre taste) and `SetLocalSignals(localSignals(profiles, progress, ratings))` (browse ranking) and `recommendations.SetSimilar(similarTitles(catalog))` (More Like This lists for the "Because you ..." rows); `providers` (on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
 7. `httpserver.New`, `images.Register(r, …)` on the root, `api := r.Group("/api")`, every other module's `Register`, `httpserver.Run`.
 
 ## Web
@@ -452,6 +452,27 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
      title says "original" or names the original language, keeps the file; without a known original language
      nothing is judged. Unfit files are never spares or upgrades, but the only playable source still plays
      (logged as `has the wrong audio (audio only in ru, original en)`).
+   - Client caps on the probed file (`caps.go`): names can say nothing about the file (Big Buck Bunny on TorBox,
+     `big-buck-bunny-2008-4-k-60-fps-blender-animated-short-x-265`, is a 7 GB 2160p HEVC 10-bit file), so after the
+     probe a file taller than the client's `maxq`, or whose video play has to re-encode for it (HEVC without
+     `hevc=1`, AV1, VP9, MPEG-4, Hi10P / 4:4:4: whatever `videoPlan` does not copy), is unfit too (`applyProbedCaps`,
+     logged `unfit: 2160p above the 720p cap, hevc yuv420p10le video is re-encoded`). An unfit result never starts the
+     short grace (only the starving one, so fitting checks still running get their time) and never stops the other
+     checks behind the TorBox gate. When the checks end with an unfit pick (or none), `capsFallback` checks up to 4
+     more candidates: unchecked ones whose name may fit first, then those whose name breaks the caps (names above
+     `maxq` included, which ranking otherwise rejects), cheapest first. A fitting extra pick replaces the first one
+     when it is good, or when neither is good and it is the more playable one (a dead swarm never replaces one that
+     delivers). Only when nothing fits does an unfit file play, then the cheapest (`tsPlayCost`: a copy above the cap
+     before any re-encode, then the lowest resolution; a good one before a starving one); the answer carries
+     `caps_fallback` with the reason and the log says `nothing that fits the client was found, falling back to …`.
+     Without any name within `maxq` the names above it are checked the same way. For a capped client (`maxq`, or no
+     `hevc=1`) a name without a resolution tag ranks after every labeled one (`tsUnknownRes`, res part -40) until
+     probed. `x-265` / `h_264` count as codec tags.
+   - Caps elsewhere: the source cache key holds the caps, and `cachedFor` drops a cached source that breaks them
+     (its probe, else its stored `quality` and `format.video`) and resolves again; a source stored as a caps fallback
+     is reused for these caps for 6 h only. Late results after a fallback pick may replace it with any fitting one
+     (any rank). `sidegrade` clamps the playing resolution to `maxq`; spares, upgrades (`upgrade` offers nothing with
+     `maxq`) and late candidates are never unfit.
    - Swarm health (`health.go`): a warm-up read from the middle of the file while TorrServer's stat is polled every 1 s,
      up to 15 s for the highest resolution on offer, 8 s for the others. It starts once the probe has read the header,
      at the latest 2.5 s after the file was picked (`tsProbeHeadStart`): the probe needs the start and often the tail
@@ -598,6 +619,37 @@ wired in `main.go`) before answering:
   ..." / "Sinemalarda · Dijital çıkış: ...". Resolve, prefetch, the instant-play check and `resolve?dry=1` get the
   same verdict through `notOut` (its wait covers the 4 s) and search normally; the file check (duration against TMDB's
   runtime) is unchanged. Not found: the 425 / `not_released` answers as before.
+- Wrong lengths (`homedur.go`): the "WEB-DL"s can be another video under the film's name (The Odyssey on 2026-10-09:
+  the Kitsune, QxR, LAMA and YTS "WEB-DL"s were all 86 min for a 173 min film, the making-of, and every resolve
+  ended in 404). When no probed home release has the title's length and at least 2 have another one
+  (`tsHomeMislabeled`), the verdict turns to not found for 6 h and their hashes never count as a home release again
+  (7 days): the film is `in_theaters` again (theater banner, 425). Two checks feed it: resolve's own candidate checks
+  (`noteHomeDurations`, while the film counts as out only through its home releases; the resolve then answers 425
+  `in_theaters` instead of 404), and the home check itself: after a found verdict it probes the headers of up to 3
+  TorBox-cached home releases through the debrid proxy in the background (one film at a time; nothing is streamed),
+  so the banner is back seconds after the first look (live: 3 files of 86 min, `in_theaters` 4 s after the search).
+
+### Cinema recordings on request (`cinema.go`)
+
+A film that is only in cinemas (`in_theaters`) can still be watched as a cinema recording when the viewer asks for it:
+the web and TV detail pages show a secondary "Sinema kaydını yine de izle" / "Watch the cinema recording anyway" button
+under the theater banner (movies only). The first press shows a one-line warning (low picture and sound quality), the
+second plays with `cinema=1` (web: `CinemaRecordingButton`; TV: the button in the detail actions, reachable with the
+D-pad, its warning in the action caption). Every call of that playback carries the flag (`StreamMeta.cinema` →
+`paramsOf`: resolve, prefetch, sidegrade, upgrade, subalt, release), and the players show a neutral "Sinema kaydı" /
+"Cinema recording" badge (lucide clapperboard, #e5e5e5) like the TorBox one.
+
+- Server: `cinema=1` skips only the `in_theaters` 425 gate (`notOut`; `not_released` stays blocked). Recordings
+  (TS, TELESYNC, HDTS, HDTC, CAM, screeners, R5, DCP rips, hardcoded-sub leaks), rejected otherwise, are ranked: the
+  source part is `tsCinemaBase` (45, one resolution step above the home sources, which are fakes while a film is in
+  cinemas; a real one passes the duration check) plus the capture: DCP rip 34 > HDTS / TELESYNC / HDTC 30 > screener
+  26 > R5 24 > TS / TC 20 > other 10 > CAM -20, "HQ" +5, burned-in subtitles -15 (Korean ones fine for a Korean
+  profile); a name that tags the profile's audio language (`TR`, `Türkçe Dublaj`, `ENG`) gets the multi-audio part.
+  Bonus material, namesakes ("NOT the … film"), other years and the duration check apply as always. The source cache
+  key carries `|cinema`, so a normal resolve never reuses a recording, and normal resolves, upgrades, sidegrades and
+  late results never rank one. The answer carries `cinema: true` for a recording; upgrade searches of a cinema
+  playback rank recordings the same way, so they only leave the tier for a home release that passes the duration
+  check. Live (The Odyssey, 2026-10-09): `dry=1&cinema=1` lists "1080p HQ HDTS" and "1080p TELESYNC" releases first.
 
 ### Instant play hints
 
@@ -1023,6 +1075,10 @@ modified or dropped. Migrated rows have no title or artwork; `Backfill` fills em
    cache) are fetched, 6 at a time. Each listed title gets `seed weight × list weight × 1/(1 + 0.08·position)`,
    list weight 1.0 for recommendations and 0.5 for similar. Positive seeds add to its support, dislikes to its
    penalty.
+   When `SetSimilar` is wired (`main.go`, `similarTitles`), a positive seed uses its [More Like This](#more-like-this)
+   list (unpersonalized, as the recommendations list, similar empty) when it is ready within 6 s; otherwise that seed
+   uses TMDB's lists, the matcher keeps computing in the background and the rows are cached for 2 minutes only.
+   Dislikes always use TMDB's lists.
 4. Genre affinity: genres of the 40 most recently rated titles (TMDB details) are summed by signal weight and
    scaled to [−1, 1]; a candidate gets `1.5 × mean affinity of its genres`.
 5. Prior: `0.6 × vote_average/10 × min(1, vote_count/200) + 0.1 × log10(1 + popularity)`.
@@ -1105,6 +1161,72 @@ hero explains it. It opens `screens/SurpriseScreen.tsx` (full screen; Play opens
 pick survives Back, Back returns the focus to the button). Both clients build the reason text (`reasonText`), with
 the Turkish locative suffix for adjacent picks (`trLocative`: "Bilim kurguda", "Suçta").
 
+## More Like This
+
+`catalog/similar.go` (pipeline, cache, endpoint), `similar_fetch.go` (TMDB) and `similar_score.go` (pure scoring) build
+the "More Like This" list of the detail pages (`GET /api/catalog/:type/:id/similar`, also behind the legacy
+`/api/tmdb/:id/related`) and the "Because you ..." rows of [Recommendations](#recommendations). TMDB's own
+`/similar` (genre and keyword overlap of any quality) and lately `/recommendations` are poor on their own, so they are
+only two of the candidate sources.
+
+Candidates (in parallel; lists through the shared TMDB cache in the request language):
+
+1. The movie's collection (`/collection/{id}`): every released part, shown first in release order (at most 8).
+2. TMDB `recommendations` pages 1-2 (position kept: the audience signal) and `similar` page 1.
+3. People: the director(s) of a movie or creators of a show (2) and the top 3 billed cast,
+   `/person/{id}/combined_credits`: directed / created / written works and lead roles (movie order ≤ 3, 6+ episodes,
+   no "Self" roles), best voted 25 each. Cross-type works come from here (El Camino for Breaking Bad).
+4. Keywords: the source's keywords get an IDF weight `ln(cap / (1 + titles with it))` from discover's
+   `total_results` (cap 20,000 movies / 4,000 shows; counts cached 14 days); weights ≤ 0 and generic keywords
+   ("based on novel or book", "sequel", "woman director", "duringcreditsstinger", ...) drop out. The 4 strongest
+   keywords that at least 15 titles carry are discovered with the main genre, sorted by vote count.
+5. Non-English sources: the best voted titles of the same original language and main genre (2 pages).
+
+Main genre: the first TMDB genre, or the first specific one when it is broad (Drama, Action, Adventure, Comedy;
+Interstellar → Sci-Fi, Parasite → Thriller). TV genres are compared in movie terms (`commonGenre`).
+
+Two stages: every candidate is scored on its list data, the best 60 (plus collection parts and spin-offs) get their
+details with keywords (`/movie|tv/{id}?append_to_response=keywords`, English, kept 7 days in a compact cache of
+the matcher, 15,000 titles) and are scored again. Score:
+
+| Term | Value |
+|---|---|
+| audience | 1.4 × (recommendations 1/(1+0.05·pos) + similar 0.45/(1+0.05·pos) + 0.35 when in both) |
+| genres | 2.5 × weighted Jaccard (main genre 1.6×, broad genres 0.6) |
+| keywords | 3.5 × min(1, 2·Σ shared IDF / √(source IDF total × 1.5 × max(8, candidate keywords))) (stage 1: 0.5 per keyword list) |
+| people | +1.4 same director / creator (half without a shared genre), +0.35 per top-billed actor in a lead role (2 max) |
+| language | same original language +1.5 for ja, ko, tr, hi, zh, th and other strong local markets, +0.7 other non-English, +0.3 English; different: −1.0 (strong source), −0.2 (other non-English), −0.3 (English source); +0.25 shared origin country |
+| era | 0.8 × e^(−years apart / 12) |
+| quality | 0.9 × (Bayesian rating − 6.6) + 0.2 × log10(1 + votes), prior m = 400 votes (TV 200), halved for non-English sources, quartered for sources under 2,000 votes |
+| audience fit | live-action source: kids' animation dropped, other animation −2.2, family titles −1.0; animation source: live action −1.8 (anime), −2.2 (kids' source, non-family title) or −0.8; anime vs western animation −0.6; a kids' source drops non-family horror / crime / thriller titles when either side is animated, else −1.5 |
+| cross type | −1.0, only with the same creator, a spin-off title, 2 shared actors or keyword similarity ≥ 0.4 |
+
+Dropped: adult titles, videos, making-ofs / specials (search's `isExtra`), titles without poster, genres or a past
+release date, documentaries, news / talk / reality shows and shorts under 45 minutes unless the source is one, titles
+with nothing in common (no shared genre, keyword similarity < 0.2, no creator link), and titles under the vote floor:
+150 movies / 80 shows, a third for non-English or little-known sources, at most a quarter of the source's votes (at
+least 15); collection parts and the creator's works need a third of it.
+
+Spin-offs: a title containing the other as whole words (the shorter needs two words or ten letters) and linked by
+the creator or TMDB's lists ("El Camino: A Breaking Bad Movie", "The Mandalorian and Grogu"), up to 3 right after the
+collection.
+
+Selection: collection and spin-offs, then by score with at most 2 titles of any other collection (the source's own
+only in the block), 2 of one title prefix before a colon ("Star Trek: ..."), 4 of the source's director / creator
+and 3 of the other media type; 24 titles, below a score of 3 only to reach 12. `reason` tells `collection`,
+`spin_off` or `match`.
+
+Cache: per title and language for 24 h (concurrent requests share one computation; when TMDB fails, the expired list
+is served and retried after a minute; a source's details are kept the same way). TMDB requests of the matcher are
+limited to 12 at a time server-wide. A cold list takes about 1-5 s (60-120 TMDB requests, most of them cached for
+the next title), a cached one a few ms. Per request, with a profile (`profile_id` or `X-User-ID`): disliked titles
+are removed, finished ones −1.5 and started ones −0.5, + 0.6 × the mean genre affinity of the search taste; the
+collection / spin-off block keeps its order.
+
+Clients: web `fetchRelated` (`features/catalog/titles.ts`, 12 cards with `profile_id`) and TV `related`
+(`lib/catalog.ts`, a row of 24) call `/api/catalog/:type/:id/similar`; older TV builds still call `/api/tmdb/:id/related`,
+which answers the same list.
+
 ## Search filters
 
 `GET /api/catalog/discover` (`catalog/discover.go`, see [API.md](API.md#discover-search-filters)) backs the genre
@@ -1119,8 +1241,9 @@ search ([Search ranking](#search-ranking), 5 multi-search pages, cached 15 min) 
 
 Web (`features/search`): type toggle (All / Movies / TV), chips sorted by their localized names (chips that cannot
 match the type are hidden and dropped), filters in the URL (`/search?q=&type=&genres=&anime=1`), infinite scroll while
-browsing. TV (`screens/SearchScreen.tsx`, `lib/discover.ts`): a horizontally scrolling chip row above the results
-(type chips, Anime, genres), OK toggles; the next browse page loads when focus nears the end of the grid.
+browsing. TV (`screens/SearchScreen.tsx`, `lib/discover.ts`): the filters sit in the left column under the keyboard
+(a type row, then Anime and the genres in a 3-column grid; the column scrolls with the focus), OK toggles; the next
+browse page loads when focus nears the end of the grid.
 
 ## Search ranking
 
