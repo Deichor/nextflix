@@ -483,8 +483,8 @@ const TMDBMoviePage: React.FC = () => {
             <h1 className="mb-4 text-3xl font-black leading-tight drop-shadow-lg sm:text-5xl lg:text-6xl">{mediaDetails.title}</h1>
           )}
 
-          <div className="flex items-center gap-2 md:gap-3">
-            <WatchButton onClick={handleWatch} availability={availability} resume={!!resumeInfo} detail={resumeInfo?.label || (nextUp ? episodeLabel(nextUp.season, nextUp.episode, locale) : undefined)} />
+          <div className="flex flex-wrap items-center gap-3 sm:flex-nowrap sm:gap-2 md:gap-3">
+            <WatchButton className="w-full sm:w-auto [&>button]:min-h-12 sm:[&>button]:min-h-0" onClick={handleWatch} availability={availability} resume={!!resumeInfo} detail={resumeInfo?.label || (nextUp ? episodeLabel(nextUp.season, nextUp.episode, locale) : undefined)} />
             <InstantChip
               variant="label"
               className="text-sm font-bold drop-shadow md:text-base"
@@ -518,7 +518,7 @@ const TMDBMoviePage: React.FC = () => {
         </div>
 
         {showTrailer && (
-          <div className="absolute bottom-[14%] right-4 z-10 md:right-12">
+          <div className="absolute right-4 top-[calc(4.5rem+env(safe-area-inset-top))] z-10 sm:top-auto sm:bottom-[14%] md:right-12">
             <RoundButton onClick={toggleMute} title={t(isMuted ? 'detail.unmuteTrailer' : 'detail.muteTrailer')}>
               {isMuted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
             </RoundButton>

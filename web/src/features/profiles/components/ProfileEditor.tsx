@@ -85,7 +85,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
   };
 
   const buttonBase =
-    'px-6 py-2 text-sm md:text-base font-semibold uppercase tracking-[0.15em] transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
+    'px-6 py-2 text-sm md:text-base font-semibold uppercase pointer-coarse:min-h-11 tracking-[0.15em] transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
 
   return (
     <div className="fixed inset-0 z-[100] overflow-y-auto bg-[#141414] text-white" role="dialog" aria-modal="true">
@@ -156,7 +156,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
                       onClick={() => setColor(c)}
                       aria-label={t('profiles.colorLabel', { color: c })}
                       aria-pressed={selected}
-                      className={`flex h-9 w-9 items-center justify-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white ${
+                      className={`flex h-9 w-9 items-center justify-center rounded-full outline-none pointer-coarse:h-11 pointer-coarse:w-11 transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white ${
                         selected ? 'ring-2 ring-white ring-offset-2 ring-offset-[#141414]' : ''
                       }`}
                       style={{ backgroundColor: c }}

@@ -42,7 +42,7 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
         : { media_type: 'tv', tmdb_id: item.id, season: resumeAt?.season || 1, episode: resumeAt?.episode || 1 },
   );
 
-  const shell = 'relative w-full h-[75vw] sm:h-[56.25vw] max-h-[92vh] min-h-[420px] overflow-hidden bg-[#141414]';
+  const shell = 'relative w-full h-[125vw] sm:h-[56.25vw] sm:portrait:h-[75vw] max-h-[92vh] min-h-[420px] overflow-hidden bg-[#141414]';
 
   if (!item) {
     return (
@@ -82,7 +82,7 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
       <div className="absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/60 to-transparent" />
       <div className="absolute inset-x-0 bottom-0 h-[38%] bg-gradient-to-t from-[#141414] via-[#141414]/60 to-transparent" />
 
-      <div className="absolute left-4 md:left-12 right-4 bottom-[22%] sm:bottom-[30%] max-w-[92%] sm:max-w-[48%] lg:max-w-[38%]">
+      <div className="absolute left-4 md:left-12 right-4 bottom-[14%] sm:bottom-[30%] sm:portrait:bottom-[22%] max-w-[92%] sm:max-w-[48%] sm:portrait:max-w-[64%] lg:max-w-[38%]">
         {!!logo && !logoFailed ? (
           <img
             src={img('w500', logo)}
@@ -104,13 +104,14 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
         </div>
 
         {!!item.overview && (
-          <p className="hidden sm:block text-white text-sm md:text-base lg:text-lg leading-snug line-clamp-3 drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] mb-4 md:mb-6">
+          <p className="text-white text-sm md:text-base lg:text-lg leading-snug line-clamp-2 sm:line-clamp-3 drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] mb-4 md:mb-6">
             {item.overview}
           </p>
         )}
 
         <div className="flex flex-wrap items-start gap-2 md:gap-3">
           <WatchButton
+            className="flex-1 sm:flex-none [&>button]:min-h-11 md:[&>button]:min-h-0"
             onClick={() => play(item)}
             availability={availability}
             resume={!!saved}
@@ -120,7 +121,7 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
           />
           <button
             onClick={() => openInfo(item)}
-            className="flex items-center justify-center gap-2 px-5 py-2 md:px-7 md:py-2.5 rounded bg-[#6d6d6e]/70 hover:bg-[#6d6d6e]/50 text-white font-bold text-sm md:text-lg transition-colors"
+            className="flex flex-1 sm:flex-none min-h-11 md:min-h-0 items-center justify-center gap-2 px-5 py-2 md:px-7 md:py-2.5 rounded bg-[#6d6d6e]/70 hover:bg-[#6d6d6e]/50 text-white font-bold text-sm md:text-lg transition-colors"
           >
             <Info className="w-5 h-5 md:w-6 md:h-6" />
             <span>{t('detail.moreInfo')}</span>

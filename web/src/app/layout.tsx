@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { NavigationLoaderProvider } from "@/shared/navigation/NavigationLoaderContext";
 import NavigationLoader from "@/shared/navigation/NavigationLoader";
@@ -28,13 +28,21 @@ export const metadata: Metadata = {
     apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
   },
   manifest: '/site.webmanifest',
+  // "Add to Home Screen" opens like an app (status bar text over the dark page)
+  appleWebApp: {
+    capable: true,
+    title: 'Nextflix',
+    statusBarStyle: 'black',
+  },
 };
 
-export const viewport = {
+export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1,
+  // Draw under the notch / home indicator; the shell pads with env(safe-area-inset-*)
+  viewportFit: 'cover',
   themeColor: '#141414',
+  colorScheme: 'dark',
 };
 
 export default function RootLayout({
@@ -48,8 +56,8 @@ export default function RootLayout({
         {/* Self-hosted Inter font */}
         <link rel="preload" href="/fonts/Inter/InterVariable.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
 
-        {/* Performance hints */}
-        <meta name="color-scheme" content="dark" />
+        {/* Older iOS versions only read the apple- prefixed name */}
+        <meta name="apple-mobile-web-app-capable" content="yes" />
 
         {/* Prevent FOUC */}
         <script

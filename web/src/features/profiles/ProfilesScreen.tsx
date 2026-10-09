@@ -10,7 +10,8 @@ import { listProfiles, MAX_PROFILES } from '@/features/profiles/api';
 import { useT } from '@/shared/i18n';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 
-const AVATAR_SIZE = 'clamp(84px, 10vw, 180px)';
+// --nf-avatar is set on <main>: larger tiles in two columns on phones
+const AVATAR_SIZE = 'var(--nf-avatar)';
 
 // Only allow same-origin paths and never bounce back to the picker
 function safeNext(next: string | null): string {
@@ -66,7 +67,7 @@ function ProfilesPicker() {
   const canAdd = !!profiles && profiles.length < MAX_PROFILES;
 
   return (
-    <main className="fixed inset-0 overflow-y-auto bg-[#141414] text-white">
+    <main className="fixed inset-0 overflow-y-auto bg-[#141414] text-white [--nf-avatar:clamp(84px,10vw,180px)] max-sm:[--nf-avatar:108px]">
       <div className="absolute left-0 top-0 px-4 py-5 md:px-12">
         <span className="text-2xl font-black tracking-tight text-[#E50914] md:text-3xl">NEXTFLIX</span>
       </div>
@@ -98,7 +99,7 @@ function ProfilesPicker() {
         )}
 
         {profiles && (
-          <ul className="mt-8 flex flex-wrap justify-center gap-[2vw] md:mt-10">
+          <ul className="mt-8 flex flex-wrap justify-center gap-[2vw] max-sm:max-w-[18rem] max-sm:gap-x-10 max-sm:gap-y-6 md:mt-10">
             {profiles.map((p) => (
               <li key={p.id}>
                 <button
@@ -157,7 +158,7 @@ function ProfilesPicker() {
           <button
             type="button"
             onClick={toggleManage}
-            className={`mt-12 px-6 py-2 text-sm uppercase tracking-[0.2em] transition-colors md:mt-16 md:px-8 md:text-lg ${
+            className={`mt-12 px-6 py-2 text-sm uppercase pointer-coarse:min-h-11 tracking-[0.2em] transition-colors md:mt-16 md:px-8 md:text-lg ${
               manage
                 ? 'bg-white font-semibold text-black hover:bg-[#E50914] hover:text-white'
                 : 'border border-[#808080] text-[#808080] hover:border-white hover:text-white'

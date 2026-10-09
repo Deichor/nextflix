@@ -11,10 +11,10 @@ export const inputClass =
   'w-full rounded bg-[#333] px-3 py-2.5 text-sm text-white outline-none placeholder:text-[#8c8c8c] focus:ring-2 focus:ring-white/70';
 
 export const primaryButton =
-  'inline-flex items-center gap-2 rounded bg-[#E50914] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#f40612] disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex items-center justify-center gap-2 rounded bg-[#E50914] px-5 py-2 text-sm pointer-coarse:min-h-11 font-semibold text-white transition-colors hover:bg-[#f40612] disabled:cursor-not-allowed disabled:opacity-50';
 
 export const secondaryButton =
-  'inline-flex items-center gap-2 rounded bg-white/15 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-white/25 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex items-center justify-center gap-2 rounded bg-white/15 px-5 py-2 text-sm pointer-coarse:min-h-11 font-semibold text-white transition-colors hover:bg-white/25 disabled:cursor-not-allowed disabled:opacity-50';
 
 export function StatusLine({ status }: { status: Status }) {
   if (!status) return null;
@@ -149,7 +149,7 @@ export function Segmented<V extends string>({
             aria-checked={active}
             disabled={disabled}
             onClick={() => !active && onChange(o.value)}
-            className={`min-w-[4.5rem] rounded px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:cursor-not-allowed disabled:opacity-60 ${
+            className={`min-w-[4.5rem] rounded px-3 py-1.5 text-sm font-medium pointer-coarse:min-h-11 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:cursor-not-allowed disabled:opacity-60 ${
               active ? 'bg-white text-black' : 'text-[#d2d2d2] hover:bg-white/10 hover:text-white'
             }`}
           >
@@ -177,7 +177,7 @@ export function Toggle({
       aria-checked={checked}
       aria-labelledby={labelledBy}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${
+      className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors pointer-coarse:before:absolute pointer-coarse:before:-inset-2 pointer-coarse:before:content-[''] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${
         checked ? 'bg-[#E50914]' : 'bg-[#4d4d4d]'
       }`}
     >

@@ -83,14 +83,9 @@ export default function Home() {
       <div className="min-h-screen bg-[#141414] text-white overflow-x-hidden">
         <Navbar />
 
-        <div className="relative">
-          <ErrorBoundary>
-            <Billboard item={featured} loading={loading} />
-          </ErrorBoundary>
-          {!!profile && (
-            <HomeSurprise className="absolute right-4 top-20 sm:top-auto sm:bottom-[30%] md:right-12 z-20 rounded-full border border-white/40 bg-black/40 px-4 py-2 text-sm md:text-base backdrop-blur-sm hover:bg-black/60 hover:border-white" />
-          )}
-        </div>
+        <ErrorBoundary>
+          <Billboard item={featured} loading={loading} />
+        </ErrorBoundary>
 
         <main className="relative z-10 -mt-6 sm:-mt-[7vw] pb-20 space-y-2 md:space-y-4">
           <ErrorBoundary>
@@ -118,6 +113,8 @@ export default function Home() {
           {GENRE_ROWS.map(g => (
             <LazyRow key={g.title} title={t(g.title)} load={signal => discoverMovies(g.params, signal)} />
           ))}
+
+          {!!profile && <HomeSurprise />}
         </main>
       </div>
     </TitleActionsProvider>

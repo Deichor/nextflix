@@ -41,7 +41,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
   const unavailable = useUnavailableLabel(availability);
 
   return (
-    <section className="relative h-[70vw] max-h-[88vh] min-h-[440px] w-full overflow-hidden bg-[#141414] sm:h-[56.25vw]">
+    <section className="relative h-[130vw] max-h-[88vh] min-h-[440px] w-full overflow-hidden bg-[#141414] sm:h-[56.25vw] sm:portrait:h-[75vw]">
       {loading && !item && <div className="nf-img" />}
       {!!backdrop && (
         <TmdbImage key={backdrop} src={backdrop} kind="billboard" sizes={BILLBOARD_SIZES} priority="high" className="object-top" />
@@ -52,7 +52,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
       <div className="absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/60 to-transparent" />
 
       {!!item && (
-        <div className="absolute bottom-[22%] left-4 right-4 z-10 sm:bottom-[30%] md:left-12 md:right-auto md:w-[42%]">
+        <div className="absolute bottom-[16%] left-4 right-4 z-10 sm:bottom-[30%] md:left-12 md:right-auto md:w-[42%] md:portrait:w-[60%]">
           {!!kicker && (
             <p className="mb-2 flex items-center gap-2 text-xs font-bold tracking-[0.3em] text-[#e5e5e5] md:text-sm">
               <span className="text-xl font-black tracking-normal text-[#E50914] md:text-2xl">N</span>
@@ -76,7 +76,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
             {!!item.year && <span className="text-[#e5e5e5]">{item.year}</span>}
           </div>
           {!!item.overview && (
-            <p className="mb-5 hidden text-sm leading-snug text-white drop-shadow-md sm:line-clamp-3 md:text-lg md:leading-normal">
+            <p className="mb-4 line-clamp-2 text-sm leading-snug text-white drop-shadow-md sm:mb-5 sm:line-clamp-3 md:text-lg md:leading-normal">
               {item.overview}
             </p>
           )}
@@ -85,7 +85,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
               <button
                 disabled
                 aria-disabled
-                className="flex cursor-default items-center gap-2 rounded bg-white/25 px-5 py-2 text-sm font-bold text-white/85 md:px-7 md:py-2.5 md:text-lg"
+                className="flex min-h-11 flex-1 cursor-default items-center justify-center gap-2 rounded bg-white/25 px-5 py-2 text-sm font-bold text-white/85 sm:flex-none md:min-h-0 md:px-7 md:py-2.5 md:text-lg"
               >
                 <CalendarClock className="h-5 w-5 shrink-0 md:h-6 md:w-6" />
                 <span className="text-left leading-tight">{unavailable}</span>
@@ -93,7 +93,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
             ) : (
               <button
                 onClick={() => (onPlay ? onPlay(item) : navigate.push(item.playHref || item.href))}
-                className="flex items-center gap-2 rounded bg-white px-5 py-2 text-sm font-bold text-black transition-colors hover:bg-white/75 md:px-8 md:py-2.5 md:text-lg"
+                className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded bg-white px-5 py-2 text-sm font-bold text-black transition-colors hover:bg-white/75 sm:flex-none md:min-h-0 md:px-8 md:py-2.5 md:text-lg"
               >
                 <Play className="h-5 w-5 fill-current md:h-7 md:w-7" />
                 {t('player.play')}
@@ -101,7 +101,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
             )}
             <button
               onClick={() => navigate.push(item.href)}
-              className="flex items-center gap-2 rounded bg-[rgba(109,109,110,0.7)] px-5 py-2 text-sm font-bold text-white transition-colors hover:bg-[rgba(109,109,110,0.4)] md:px-7 md:py-2.5 md:text-lg"
+              className="flex min-h-11 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded bg-[rgba(109,109,110,0.7)] px-5 py-2 text-sm font-bold text-white transition-colors hover:bg-[rgba(109,109,110,0.4)] sm:flex-none md:min-h-0 md:px-7 md:py-2.5 md:text-lg"
             >
               <Info className="h-5 w-5 md:h-7 md:w-7" />
               {t('detail.moreInfo')}

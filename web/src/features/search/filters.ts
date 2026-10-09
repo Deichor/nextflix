@@ -1,4 +1,6 @@
-import { getJson, type NfMediaType } from '@/features/catalog/titles';
+import { type NfMediaType } from '@/features/catalog/titles';
+import { getApiUrl } from '@/shared/lib/api';
+import { profileHeaders } from '@/shared/lib/profile';
 
 export type TypeFilter = 'all' | NfMediaType;
 
@@ -65,19 +67,30 @@ export interface DiscoverPage {
   results: any[];
   page: number;
   totalPages: number;
+  /** With a query: the corrected query whose results were merged in (typo), '' otherwise */
+  didYouMean: string;
 }
 
-/** GET /api/catalog/discover: browse by filters (no query) or filter the search results of `q`. */
+/**
+ * GET /api/catalog/discover: browse by filters (no query) or filter the search results of `q`.
+ * Both are ranked per profile on the server, so the answer is not cached here.
+ */
 export async function discover(f: SearchFilters, q: string, page: number): Promise<DiscoverPage | null> {
   const params = new URLSearchParams(filtersQuery(f));
   if (q) params.set('q', q);
   params.set('page', String(page));
-  // Browse pages are stable (cached like other lists); searches are not
-  const data = await getJson<any>(`/api/catalog/discover?${params.toString()}`, { cache: !q });
+  let data: any = null;
+  try {
+    const res = await fetch(`${getApiUrl()}/api/catalog/discover?${params.toString()}`, { headers: profileHeaders() });
+    data = res.ok ? await res.json() : null;
+  } catch {
+    data = null;
+  }
   if (!data) return null;
   return {
     results: Array.isArray(data.results) ? data.results : [],
     page: Number(data.page) || page,
     totalPages: Number(data.total_pages) || 1,
+    didYouMean: String(data.did_you_mean || ''),
   };
 }

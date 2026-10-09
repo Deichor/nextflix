@@ -465,3 +465,52 @@ aside {
   .nf-img-blur,
   .nf-img-main { transition: none; }
 }
+
+/* ---- Phones and tablets ---- */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* No double-tap zoom delay on taps */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Keyboard focus ring for every control that does not draw its own */
+@layer base {
+  :where(a, button, select, summary, [role="button"], [role="link"], [role="tab"], [tabindex]):focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 2px;
+  }
+}
+
+/* iOS zooms into inputs with a font below 16px */
+@media (max-width: 767px), (pointer: coarse) {
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not(.text-lg):not(.text-xl),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Card rows on touch screens: snap to cards, keep horizontal swipes inside the row */
+@media (pointer: coarse) {
+  .nf-card-row {
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: 1rem;
+    overscroll-behavior-x: contain;
+  }
+  .nf-card-row > * { scroll-snap-align: start; }
+}
+@media (pointer: coarse) and (min-width: 768px) {
+  .nf-card-row { scroll-padding-inline: 3rem; }
+}
+
+/* Room for the bottom tab bar (shell/BottomTabBar) */
+@media (max-width: 767px) {
+  body:has(.nf-tabbar) {
+    padding-bottom: calc(3.5rem + env(safe-area-inset-bottom));
+  }
+}
+/* A modal that sits inside a stacking context (e.g. the Surprise sheet in <main>) must not end up under the tab bar */
+body:has([aria-modal="true"]) .nf-tabbar { display: none; }

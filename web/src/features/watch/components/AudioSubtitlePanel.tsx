@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronLeft, Loader2, Minus, Plus, Repeat, SlidersHorizontal } from 'lucide-react';
 import { useFormat, useLocale, useT, type Locale, type TFunction } from '@/shared/i18n';
 import { AudioTrackInfo, SubtitleItem, languageName, normLang } from '@/features/watch/subtitles';
+import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
 
 interface AudioSubtitlePanelProps {
   open: boolean;
@@ -24,6 +25,8 @@ interface AudioSubtitlePanelProps {
   onDelay: (seconds: number) => void;
   /** Another release of the title carries a subtitle in lang (the playing one lacks it): a row to switch */
   subAlt?: { lang: string; busy: boolean; onSwitch: () => void } | null;
+  /** Touch layout: a bottom sheet (swipe down to close) instead of the popover */
+  sheet?: boolean;
 }
 
 const SOURCE_KEYS = { torrent: 'player.subSourceTorrent', embedded: 'player.subSourceEmbedded' } as const;
@@ -88,7 +91,7 @@ function Row({
 // Netflix-style "Audio & Subtitles" panel: two columns, red check on the active row,
 // arrow keys move inside / between the columns, Esc or a click outside closes it.
 export default function AudioSubtitlePanel({
-  open, onClose, anchorRef, audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, failedSubtitles, onSubtitle, delay, onDelay, subAlt,
+  open, onClose, anchorRef, audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, failedSubtitles, onSubtitle, delay, onDelay, subAlt, sheet = false,
 }: AudioSubtitlePanelProps) {
   const t = useT();
   const f = useFormat();
@@ -98,6 +101,11 @@ export default function AudioSubtitlePanel({
   // Simple view lists one row per language (its best subtitle); versions and timing live in the details view
   const [details, setDetails] = useState(false);
   useEffect(() => { if (!open) setDetails(false); }, [open]);
+  // Bottom sheet drag (handle)
+  const [dragY, setDragY] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef<{ id: number; y: number; at: number; moved: boolean } | null>(null);
+  useEffect(() => { if (!open) { setDragY(0); setDragging(false); } }, [open]);
   // A subtitle that cannot be downloaded now (quota used up, failed) is the language's row only when nothing else is left
   const unusable = (s: SubtitleItem) => !!s.quota || !!failedSubtitles?.has(s.id);
   const bestPerLanguage = useMemo(() => {
@@ -174,17 +182,61 @@ export default function AudioSubtitlePanel({
 
   const delayText = delay === 0 ? f.number(0, { minimumFractionDigits: 1 }) : f.number(delay, { minimumFractionDigits: 1, signDisplay: 'always' });
 
-  return (
+  const panel = (
     <div
       ref={panelRef}
       role="dialog"
       aria-label={t('player.audioSubtitles')}
       onClick={e => e.stopPropagation()}
-      className="absolute bottom-24 right-3 z-30 flex max-h-[min(72vh,600px)] w-[min(780px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-lg border border-white/10 bg-[#141414]/95 text-white shadow-[0_12px_40px_rgba(0,0,0,0.7)] backdrop-blur-md md:right-6 md:bottom-28"
+      className={sheet
+        ? `absolute inset-x-0 bottom-0 z-40 mx-auto flex w-full max-w-[760px] flex-col overflow-hidden rounded-t-2xl bg-[#181818] text-white shadow-[0_-8px_30px_rgba(0,0,0,0.6)] ${mobileCss.sheet}`
+        : 'absolute bottom-24 right-3 z-30 flex max-h-[min(72vh,600px)] w-[min(780px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-lg border border-white/10 bg-[#141414]/95 text-white shadow-[0_12px_40px_rgba(0,0,0,0.7)] backdrop-blur-md md:right-6 md:bottom-28'}
+      style={sheet ? { transform: dragY ? `translateY(${dragY}px)` : undefined, transition: dragging ? 'none' : 'transform 180ms ease-out' } : undefined}
     >
-      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:overflow-hidden">
+      {/* Bottom sheet: drag the handle down (or tap it) to close */}
+      {sheet && (
+        <button
+          type="button"
+          aria-label={t('common.close')}
+          className="flex w-full shrink-0 justify-center pb-2 pt-3 touch-none focus:outline-none"
+          onPointerDown={e => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            dragRef.current = { id: e.pointerId, y: e.clientY, at: Date.now(), moved: false };
+            setDragging(true);
+          }}
+          onPointerMove={e => {
+            const d = dragRef.current;
+            if (!d || d.id !== e.pointerId) return;
+            const dy = Math.max(0, e.clientY - d.y);
+            if (dy > 4) d.moved = true;
+            setDragY(dy);
+          }}
+          onPointerUp={e => {
+            const d = dragRef.current;
+            setDragging(false);
+            if (!d || d.id !== e.pointerId) return;
+            const dy = e.clientY - d.y;
+            // Far enough, or a quick flick
+            if (dy > 80 || (dy > 20 && dy / Math.max(1, Date.now() - d.at) > 0.5)) onClose();
+            else setDragY(0);
+          }}
+          onPointerCancel={() => {
+            dragRef.current = null;
+            setDragging(false);
+            setDragY(0);
+          }}
+          onClick={() => {
+            const d = dragRef.current;
+            dragRef.current = null;
+            if (!d?.moved) onClose();
+          }}
+        >
+          <span className="h-1.5 w-10 rounded-full bg-white/35" />
+        </button>
+      )}
+      <div data-scroll className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto overscroll-contain sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:overflow-hidden">
         {/* Audio */}
-        <section className="min-h-0 p-3 sm:overflow-y-auto md:p-4" role="radiogroup" aria-label={t('player.audio')}>
+        <section data-scroll className="min-h-0 p-3 sm:overflow-y-auto sm:overscroll-contain md:p-4" role="radiogroup" aria-label={t('player.audio')}>
           <h3 className="px-3 pb-2 pt-1 text-xl font-bold md:px-4 md:text-2xl">{t('player.audio')}</h3>
           {audioTracks.length === 0 ? (
             <Row active col="audio" onClick={() => {}}>{t('player.audioN', { n: 1 })}</Row>
@@ -205,7 +257,7 @@ export default function AudioSubtitlePanel({
         </section>
 
         {/* Subtitles */}
-        <section className="min-h-0 border-t border-white/10 p-3 sm:overflow-y-auto sm:border-l sm:border-t-0 md:p-4" role="radiogroup" aria-label={t('player.subtitles')}>
+        <section data-scroll className="min-h-0 border-t border-white/10 p-3 sm:overflow-y-auto sm:overscroll-contain sm:border-l sm:border-t-0 md:p-4" role="radiogroup" aria-label={t('player.subtitles')}>
           {details ? (
             <>
               <button
@@ -325,5 +377,14 @@ export default function AudioSubtitlePanel({
         </section>
       </div>
     </div>
+  );
+
+  if (!sheet) return panel;
+  return (
+    <>
+      {/* Dims the video; a tap on it closes the sheet (the outside-tap rule above) */}
+      <div className="absolute inset-0 z-[35] bg-black/50" aria-hidden="true" />
+      {panel}
+    </>
   );
 }

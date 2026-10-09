@@ -57,7 +57,7 @@ export default function ProfileLanguageSection({ profile }: { profile: Profile |
             </div>
             <Link
               href="/profiles?manage=1"
-              className="group inline-flex shrink-0 items-center gap-1 text-sm font-medium text-white hover:underline"
+              className="group inline-flex shrink-0 items-center gap-1 text-sm font-medium text-white hover:underline pointer-coarse:min-h-11"
             >
               {t('profiles.manageProfiles')}
               <ChevronRight className="h-4 w-4 text-[#8c8c8c] transition-transform group-hover:translate-x-0.5" />

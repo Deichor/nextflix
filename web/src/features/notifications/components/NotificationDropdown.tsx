@@ -61,7 +61,7 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ isOpen, onC
 
   return (
     <div
-      className="fixed left-2 right-2 top-16 z-[60] sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-4 sm:w-[400px]"
+      className="fixed left-2 right-2 top-[calc(3.75rem+env(safe-area-inset-top))] z-[60] sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-4 sm:w-[400px]"
       role="menu"
       aria-label={t("notifications.title")}
     >

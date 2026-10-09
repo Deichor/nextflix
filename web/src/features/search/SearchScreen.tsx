@@ -12,7 +12,6 @@ import {
   fetchMovieLists,
   fetchTvLists,
   fromTmdbList,
-  getJson,
   localGenre,
   uniqueTitles,
 } from '@/features/catalog/titles';
@@ -28,9 +27,10 @@ import {
   hasFilters,
   parseFilters,
 } from '@/features/search/filters';
+import { Completion, searchTitles, suggestTitles } from '@/features/search/api';
 import { useT } from '@/shared/i18n';
 
-const chipBase = 'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors';
+const chipBase = 'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors pointer-coarse:min-h-11';
 const chipOn = 'border-white bg-white text-black';
 const chipOff = 'border-white/30 bg-black/40 text-white/85 hover:border-white/70 hover:text-white';
 
@@ -49,6 +49,12 @@ function SearchContent() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [suggestions, setSuggestions] = useState<NfTitle[]>([]);
+  const [didYouMean, setDidYouMean] = useState('');
+  const [completions, setCompletions] = useState<Completion[]>([]);
+  const [activeCompletion, setActiveCompletion] = useState(-1);
+  const [inputFocused, setInputFocused] = useState(false);
+  // Completions only open while the user types, not for a query from the URL
+  const [typing, setTyping] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const loadingMore = useRef(false);
@@ -90,6 +96,7 @@ function SearchContent() {
   useEffect(() => {
     if (!q && !filtered) {
       setResults([]);
+      setDidYouMean('');
       setSearched(false);
       return;
     }
@@ -98,16 +105,20 @@ function SearchContent() {
       setLoading(true);
       let items: NfTitle[] = [];
       let pages = 1;
+      let corrected = '';
       if (filtered) {
         const res = await discover(filters, q, 1);
         items = fromTmdbList(res?.results);
         pages = res?.totalPages || 1;
+        corrected = res?.didYouMean || '';
       } else {
-        const tmdb = await getJson<any>(`/api/tmdb/search?q=${encodeURIComponent(q)}&page=1`, { cache: false });
-        items = fromTmdbList(tmdb?.results);
+        const res = await searchTitles(q);
+        items = fromTmdbList(res?.results);
+        corrected = res?.didYouMean || '';
       }
       if (cancelled) return;
       setResults(items);
+      setDidYouMean(corrected);
       setPage(1);
       setTotalPages(pages);
       setSearched(true);
@@ -115,6 +126,46 @@ function SearchContent() {
     }, q ? 300 : 0);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [q, filters, filtered]);
+
+  // Title completions while typing (server typo index, debounced 150 ms)
+  useEffect(() => {
+    if (q.length < 2) {
+      setCompletions([]);
+      return;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(async () => {
+      const list = await suggestTitles(q, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      // Nothing to complete when the query already is the title
+      setCompletions(list.filter(c => c.title.toLowerCase() !== q.toLowerCase()));
+      setActiveCompletion(-1);
+    }, 150);
+    return () => { clearTimeout(timer); ctrl.abort(); };
+  }, [q]);
+
+  const pickQuery = (text: string) => {
+    setQuery(text);
+    setTyping(false);
+    setCompletions([]);
+    setActiveCompletion(-1);
+  };
+
+  const onInputKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!completions.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const n = completions.length;
+      setActiveCompletion(i => (e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n));
+    } else if (e.key === 'Enter' && activeCompletion >= 0) {
+      e.preventDefault();
+      pickQuery(completions[activeCompletion].title);
+    } else if (e.key === 'Escape') {
+      setCompletions([]);
+    }
+  };
+
+  const showCompletions = inputFocused && typing && completions.length > 0;
 
   // Infinite scroll while browsing by filters
   useEffect(() => {
@@ -166,11 +217,40 @@ function SearchContent() {
             <input
               ref={inputRef}
               value={query}
-              onChange={e => setQuery(e.target.value)}
+              onChange={e => { setQuery(e.target.value); setTyping(true); }}
+              onKeyDown={onInputKey}
+              onFocus={() => setInputFocused(true)}
+              // Let a click on a completion land before the list closes
+              onBlur={() => setTimeout(() => setInputFocused(false), 150)}
               placeholder={t('nav.searchPlaceholder')}
               aria-label={t('nav.search')}
+              aria-autocomplete="list"
+              aria-expanded={showCompletions}
+              aria-controls="search-completions"
               className="w-full border border-white/30 bg-black/60 py-3.5 pl-14 pr-12 text-lg text-white placeholder-[#8c8c8c] focus:border-white focus:outline-none md:text-xl"
             />
+            {showCompletions && (
+              <ul
+                id="search-completions"
+                role="listbox"
+                aria-label={t('search.suggestions')}
+                className="absolute inset-x-0 top-full z-30 mt-1 border border-[#333] bg-[#141414] py-1 shadow-2xl"
+              >
+                {completions.map((c, i) => (
+                  <li key={`${c.mediaType}-${c.id}`} role="option" aria-selected={i === activeCompletion}>
+                    <button
+                      type="button"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => pickQuery(c.title)}
+                      className={`flex w-full items-center gap-3 px-4 py-2.5 text-left text-base text-white/90 hover:bg-white/10 ${i === activeCompletion ? 'bg-white/10' : ''}`}
+                    >
+                      <Search className="h-4 w-4 shrink-0 text-[#8c8c8c]" />
+                      <span className="truncate">{c.title}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             {!!query && (
               <button
                 onClick={() => { setQuery(''); inputRef.current?.focus(); }}
@@ -205,7 +285,7 @@ function SearchContent() {
           )}
         </div>
 
-        <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label={t('search.genres')}>
+        <div className="scrollbar-hide mt-3 flex flex-wrap gap-2 max-md:-mx-4 max-md:flex-nowrap max-md:overflow-x-auto max-md:px-4" role="group" aria-label={t('search.genres')}>
           <button
             onClick={() => setFilters(f => ({ ...f, anime: !f.anime }))}
             aria-pressed={filters.anime}
@@ -238,6 +318,22 @@ function SearchContent() {
           <div className="px-4 md:px-12"><TitleGrid items={[]} loading /></div>
         ) : results.length > 0 ? (
           <div className={`px-4 transition-opacity md:px-12 ${loading ? 'opacity-60' : ''}`}>
+            {!!q && !!didYouMean && (
+              <p className="mb-4 text-lg text-[#b3b3b3]">
+                {t.rich('search.didYouMean', {
+                  title: (
+                    <button
+                      key="dym"
+                      type="button"
+                      onClick={() => pickQuery(didYouMean)}
+                      className="font-semibold italic text-white underline-offset-4 hover:underline"
+                    >
+                      {didYouMean}
+                    </button>
+                  ),
+                })}
+              </p>
+            )}
             <TitleGrid items={results} />
             {browsing && page < totalPages && (
               <div ref={sentinelRef} className="py-8 text-center text-sm text-[#808080]">{t('search.loadingMore')}</div>

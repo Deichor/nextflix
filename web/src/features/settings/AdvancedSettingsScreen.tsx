@@ -18,7 +18,7 @@ export default function AdvancedSettingsScreen() {
       <div className="mx-auto max-w-3xl px-4 pt-24 md:px-12 md:pt-28">
         <Link
           href="/settings"
-          className="mb-4 inline-flex items-center gap-1 text-sm font-medium text-[#b3b3b3] hover:text-white"
+          className="mb-4 inline-flex items-center gap-1 text-sm font-medium text-[#b3b3b3] hover:text-white pointer-coarse:min-h-11"
         >
           <ChevronLeft className="h-4 w-4" aria-hidden />
           {t('settings.backToSettings')}

@@ -47,7 +47,7 @@ export default function Row({ title, items, variant = 'backdrop', playable = tru
 
   if (!loading && items.length === 0) return null;
 
-  const arrow = 'absolute top-3 bottom-3 z-30 w-10 md:w-12 flex items-center justify-center bg-[#141414]/60 hover:bg-[#141414]/85 opacity-0 group-hover/row:opacity-100 focus:opacity-100 transition-opacity';
+  const arrow = 'absolute top-3 bottom-3 z-30 w-10 md:w-12 flex items-center justify-center bg-[#141414]/60 hover:bg-[#141414]/85 opacity-0 group-hover/row:opacity-100 focus:opacity-100 transition-opacity pointer-coarse:hidden!';
 
   return (
     <section ref={gate.sectionRef} className="relative group/row" aria-label={title}>
@@ -88,7 +88,7 @@ export default function Row({ title, items, variant = 'backdrop', playable = tru
                     <div key={`${item.media_type}-${item.id}`} className="flex shrink-0 items-end">
                       <span
                         aria-hidden
-                        className="-mr-3 select-none text-[22vw] font-black leading-[0.8] text-[#141414] sm:text-[14vw] md:text-[10vw] lg:text-[8vw]"
+                        className="-mr-3 select-none text-[17vw] font-black leading-[0.8] text-[#141414] sm:text-[14vw] md:text-[10vw] lg:text-[8vw]"
                         style={{ WebkitTextStroke: '3px #595959' }}
                       >
                         {item.rank ?? i + 1}

@@ -485,8 +485,42 @@ export const en = {
   'surprise.reason.watchedTv': 'Because you watched {title}',
   'surprise.reason.favoriteMovie': 'Like {title} from your Favorites',
   'surprise.reason.favoriteTv': 'Like {title} from your Favorites',
-  'surprise.reason.genre': 'Because you enjoy {genre}',
+  'surprise.reason.genre': 'Because you like {genre}',
+  'surprise.reason.genres': 'Because you like {first} and {second}',
+  'surprise.reason.adjacent': 'A new pick in {genre}',
+  'surprise.reason.wild': 'Something completely different',
+  'surprise.reason.wildMovie': 'Something completely different – a highly rated {language} film',
+  'surprise.reason.wildTv': 'Something completely different – a highly rated {language} series',
+  'surprise.reason.wildAnime': 'Something completely different – a highly rated anime',
+  'surprise.lang.ko': 'Korean',
+  'surprise.lang.ja': 'Japanese',
+  'surprise.lang.es': 'Spanish',
+  'surprise.lang.fr': 'French',
+  'surprise.lang.it': 'Italian',
+  'surprise.lang.tr': 'Turkish',
+  'surprise.lang.hi': 'Indian',
+  'surprise.lang.de': 'German',
+  'surprise.lang.zh': 'Chinese',
+  'surprise.lang.da': 'Danish',
+  'surprise.lang.sv': 'Swedish',
+  'surprise.lang.pt': 'Portuguese',
+  'surprise.lang.ru': 'Russian',
+  'surprise.lang.fa': 'Iranian',
   'surprise.reason.trending': 'Trending this week',
+  'player.rotate': 'Rotate screen',
+  'player.seekDelta': '{delta} s',
+  'player.back10Touch': 'Back 10 seconds',
+  'player.forward10Touch': 'Forward 10 seconds',
+  'player.fullscreenTouch': 'Fullscreen',
+  'player.exitFullscreenTouch': 'Exit fullscreen',
+
+  // Mobile tab bar
+  'nav.tabBar': 'Main navigation',
+  'nav.newPopularShort': 'New',
+
+  // Search corrections and completions
+  'search.didYouMean': 'Did you mean {title}?',
+  'search.suggestions': 'Suggestions',
 } satisfies Record<string, Message>;
 
 export type MessageKey = keyof typeof en;

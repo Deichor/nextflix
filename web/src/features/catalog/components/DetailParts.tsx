@@ -17,7 +17,7 @@ export function RoundButton({
       onClick={onClick}
       title={title}
       aria-label={title}
-      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-2 border-white/50 bg-[#2a2a2a]/60 text-white transition-colors hover:border-white hover:bg-white/10 md:h-11 md:w-11 ${className}`}
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-2 border-white/50 bg-[#2a2a2a]/60 text-white transition-colors hover:border-white hover:bg-white/10 ${className}`}
     >
       {children}
     </button>
@@ -95,14 +95,14 @@ export function MoreLikeThisCard({ item }: { item: NfTitle }) {
         <button
           onClick={e => { e.stopPropagation(); navigate.push(item.playHref || item.href); }}
           aria-label={`${t('player.play')}: ${item.title}`}
-          className="absolute inset-0 m-auto flex h-11 w-11 items-center justify-center rounded-full border-2 border-white bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+          className="absolute inset-0 m-auto flex h-11 w-11 items-center justify-center rounded-full border-2 border-white bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:hidden!"
         >
           <Play className="h-5 w-5 translate-x-px fill-current" />
         </button>
       </div>
       <div className="flex flex-1 flex-col p-3 md:p-4">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex shrink-0 items-center gap-2 text-sm font-semibold">
             {match !== null && <span className="truncate text-[#46d369]">{t('detail.match', { n: match })}</span>}
             {!!item.year && <span className="text-[#bcbcbc]">{item.year}</span>}
           </div>

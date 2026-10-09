@@ -45,7 +45,7 @@ export default function BrowseHeader({
 
   return (
     <div
-      className={`${overlay ? 'absolute inset-x-0 top-16 z-30 md:top-[70px]' : 'relative pt-20 md:pt-24'} flex flex-wrap items-center gap-x-6 gap-y-3 px-4 pb-2 md:px-12`}
+      className={`${overlay ? `absolute inset-x-0 top-[calc(3.75rem+env(safe-area-inset-top))] md:top-[70px] ${open ? 'z-[60]' : 'z-30'}` : 'relative pt-20 md:pt-24'} flex flex-wrap items-center gap-x-6 gap-y-3 px-4 pb-2 md:px-12`}
     >
       <h1 className="flex items-center gap-3 text-2xl font-bold text-white drop-shadow md:text-[2.4rem]">
         {selectedLabel ? (
@@ -64,17 +64,21 @@ export default function BrowseHeader({
           <button
             onClick={() => setOpen(o => !o)}
             aria-expanded={open}
-            className="flex items-center gap-6 border border-white/80 bg-black px-2.5 py-1 text-sm font-semibold text-white transition-colors hover:bg-white/10"
+            className="flex items-center gap-6 border border-white/80 bg-black px-2.5 py-1 text-sm font-semibold text-white transition-colors hover:bg-white/10 pointer-coarse:min-h-11"
           >
             {dropdownLabel || t('catalog.genres')}
             <ChevronDown className={`h-4 w-4 transition-transform ${open ? 'rotate-180' : ''}`} />
           </button>
           {open && (
-            <div className="absolute left-0 top-full z-50 mt-0.5 grid max-h-[60vh] w-[min(92vw,520px)] grid-cols-2 gap-x-4 overflow-y-auto border border-white/15 bg-black/95 px-4 py-3 sm:grid-cols-3">
+            // Phones: bottom sheet over a dimmed page
+            <button aria-hidden tabIndex={-1} onClick={() => setOpen(false)} className="fixed inset-0 z-50 cursor-default bg-black/60 sm:hidden" />
+          )}
+          {open && (
+            <div className="fixed inset-x-0 bottom-0 z-50 grid max-h-[70vh] grid-cols-2 gap-x-4 overflow-y-auto rounded-t-xl border-t border-white/15 bg-[#181818] px-5 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 sm:absolute sm:inset-x-auto sm:bottom-auto sm:left-0 sm:top-full sm:mt-0.5 sm:max-h-[60vh] sm:w-[min(92vw,520px)] sm:grid-cols-3 sm:rounded-none sm:border sm:bg-black/95 sm:px-4 sm:py-3">
               {value && (
                 <button
                   onClick={() => { onChange?.(''); setOpen(false); }}
-                  className="col-span-full mb-1 text-left text-sm font-semibold text-white hover:underline"
+                  className="col-span-full mb-1 text-left text-sm font-semibold text-white hover:underline pointer-coarse:min-h-11"
                 >
                   {t('catalog.allOf', { title })}
                 </button>
@@ -83,7 +87,7 @@ export default function BrowseHeader({
                 <button
                   key={o.value}
                   onClick={() => { onChange?.(o.value); setOpen(false); }}
-                  className={`py-1 text-left text-sm hover:underline ${o.value === value ? 'font-bold text-white' : 'text-[#e5e5e5]'}`}
+                  className={`py-1 text-left text-sm hover:underline pointer-coarse:min-h-11 ${o.value === value ? 'font-bold text-white' : 'text-[#e5e5e5]'}`}
                 >
                   {o.label}
                 </button>
@@ -113,7 +117,7 @@ export function NfSelect({ value, onChange, options, label }: SelectProps) {
       <select
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="cursor-pointer appearance-none border border-white/80 bg-black py-1 pl-2.5 pr-8 text-sm font-semibold text-white focus:outline-none"
+        className="cursor-pointer appearance-none border border-white/80 bg-black py-1 pl-2.5 pr-8 text-sm font-semibold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white pointer-coarse:min-h-11"
       >
         {options.map(o => (
           <option key={o.value} value={o.value} className="bg-black">{o.label}</option>

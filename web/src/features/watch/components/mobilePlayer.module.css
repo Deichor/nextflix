@@ -1,0 +1,95 @@
+/* Touch layout of the player (phones, tablets). Insets keep controls off the notch and home indicator. */
+
+.touchRoot {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.safeTopLeft {
+  top: max(0.75rem, env(safe-area-inset-top));
+  left: max(0.75rem, env(safe-area-inset-left));
+}
+
+.topBar {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-left: max(0.5rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+  padding-bottom: 1.5rem;
+}
+
+.bottomBar {
+  padding-top: 2.5rem;
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.5rem, env(safe-area-inset-right));
+  padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+}
+
+.nextUp {
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: calc(8.5rem + env(safe-area-inset-bottom));
+}
+
+/* Button labels only where there is room (landscape, tablets) */
+.wideOnly {
+  display: none;
+}
+@media (min-width: 560px) {
+  .wideOnly {
+    display: inline;
+  }
+}
+
+.sheet {
+  max-height: 78vh;
+  max-height: 78dvh;
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  animation: sheetIn 200ms ease-out;
+}
+@media (orientation: landscape) {
+  .sheet {
+    max-height: 92vh;
+    max-height: 92dvh;
+  }
+}
+@keyframes sheetIn {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.ripple {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9rem;
+  height: 9rem;
+  margin: -4.5rem 0 0 -4.5rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.22);
+  animation: ripple 550ms ease-out forwards;
+}
+@keyframes ripple {
+  from {
+    transform: scale(0.2);
+    opacity: 1;
+  }
+  to {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+/* Short landscape screens: smaller center buttons, a bit higher, so raised subtitles fit under them */
+@media (max-height: 500px) {
+  .center {
+    transform: translateY(-14px) scale(0.85);
+  }
+}

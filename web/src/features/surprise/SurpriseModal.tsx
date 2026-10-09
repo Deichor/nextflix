@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Info, Play, Shuffle, X } from 'lucide-react';
-import { useT } from '@/shared/i18n';
+import { useLocale, useT } from '@/shared/i18n';
 import { tmdbImage } from '@/shared/lib/image';
 import TmdbImage from '@/shared/ui/TmdbImage';
 import { useNavigate } from '@/shared/navigation/useNavigate';
@@ -18,6 +18,7 @@ interface SurpriseModalProps {
 // "Surprise me": one pick at a time, "Something else" asks for the next one
 export default function SurpriseModal({ onClose, onPlay }: SurpriseModalProps) {
   const t = useT();
+  const locale = useLocale();
   const navigate = useNavigate();
   const [pick, setPick] = useState<SurprisePick | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,16 +83,16 @@ export default function SurpriseModal({ onClose, onPlay }: SurpriseModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/75 p-4"
+      className="fixed inset-0 z-[200] flex items-end justify-center bg-black/75 sm:items-center sm:p-4"
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
       role="dialog"
       aria-modal="true"
       aria-label={t('surprise.heading')}
     >
-      <div className="relative w-full max-w-3xl overflow-hidden rounded-md bg-[#181818] text-white shadow-2xl">
+      <div className="relative max-h-[92vh] w-full max-w-3xl overflow-y-auto overflow-x-hidden rounded-t-xl bg-[#181818] pb-[env(safe-area-inset-bottom)] text-white shadow-2xl sm:max-h-none sm:overflow-hidden sm:rounded-md sm:pb-0">
         <button
           onClick={onClose}
-          className="absolute right-3 top-3 z-20 flex h-9 w-9 items-center justify-center rounded-full bg-[#181818]/80 text-white hover:bg-[#2a2a2a]"
+          className="absolute right-3 top-3 z-20 flex h-9 w-9 pointer-coarse:h-11 pointer-coarse:w-11 items-center justify-center rounded-full bg-[#181818]/80 text-white hover:bg-[#2a2a2a]"
           aria-label={t('common.close')}
         >
           <X className="h-5 w-5" />
@@ -135,7 +136,7 @@ export default function SurpriseModal({ onClose, onPlay }: SurpriseModalProps) {
             <>
               <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-[#e5e5e5] md:text-base">
                 <Shuffle className="h-4 w-4 shrink-0 text-[#e50914]" />
-                {reasonText(t, pick.reason)}
+                {reasonText(t, locale, pick)}
               </p>
               <div className="mb-3 flex flex-wrap items-center gap-x-2 text-sm text-white/80">
                 {!!match && <span className="font-semibold text-[#46d369]">{t('detail.match', { n: match })}</span>}

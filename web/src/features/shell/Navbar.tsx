@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import NavigationLink from "@/shared/navigation/NavigationLink";
 import NotificationDropdown from "@/features/notifications/components/NotificationDropdown";
 import ProfileMenu from "@/features/profiles/components/ProfileMenu";
+import BottomTabBar from "@/features/shell/BottomTabBar";
 import { useNavigate } from "@/shared/navigation/useNavigate";
 import { getApiUrl } from "@/shared/lib/api";
 import { useNotifications } from "@/features/notifications/store";
@@ -122,8 +123,8 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
       try {
         const res = await fetch(`${getApiUrl()}/api/tmdb/suggestions?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
         const data = res.ok ? await res.json() : null;
+        // Already ranked by the server (text match first, then popularity)
         const results: TMDBSearchResult[] = Array.isArray(data?.results) ? data.results : [];
-        results.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
         setSuggestions(results);
       } catch (e: any) {
         if (e?.name !== "AbortError") setSuggestions([]);
@@ -181,13 +182,17 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
 
   const showSuggestions = isSearchOpen && searchQuery.trim().length >= 2;
 
+  // Phones: a 44px touch box around each top bar icon
+  const iconBox = "flex h-11 w-11 items-center justify-center md:h-auto md:w-auto";
+
   return (
+    <>
     <nav
-      className={`fixed top-0 inset-x-0 z-40 transition-colors duration-500 ${
+      className={`fixed top-0 inset-x-0 z-40 pt-[env(safe-area-inset-top)] transition-colors duration-500 ${
         isScrolled ? "bg-[#141414] shadow-[0_2px_10px_rgba(0,0,0,0.4)]" : "bg-gradient-to-b from-black/80 via-black/40 to-transparent"
       }`}
     >
-      <div className="flex items-center h-16 md:h-[68px] px-4 md:px-12">
+      <div className="flex items-center h-14 md:h-[68px] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(0.5rem,env(safe-area-inset-right))] md:px-12">
         {/* Logo */}
         <NavigationLink
           href="/"
@@ -209,7 +214,7 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
         </ul>
 
         {/* Mobile "Browse" menu */}
-        <div className={`relative lg:hidden ml-4 ${isSearchOpen ? "hidden sm:block" : ""}`} ref={browseRef}>
+        <div className={`relative hidden md:block lg:hidden ml-4 ${isSearchOpen ? "md:hidden" : ""}`} ref={browseRef}>
           <button
             onClick={() => setIsBrowseOpen(o => !o)}
             className="flex items-center gap-1 text-sm font-semibold text-white"
@@ -226,9 +231,12 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
         </div>
 
         {/* Right group */}
-        <div className="ml-auto flex items-center gap-3 md:gap-5">
-          {/* Search */}
-          <div className="relative" ref={searchRef}>
+        <div className="ml-auto flex items-center gap-0.5 md:gap-5">
+          {/* Search: phones open the search page, wider screens the inline field */}
+          <NavigationLink href="/search" aria-label={t("nav.search")} className={`${iconBox} text-white md:hidden`}>
+            <Search className="w-[22px] h-[22px]" />
+          </NavigationLink>
+          <div className="relative hidden md:block" ref={searchRef}>
             {isSearchOpen ? (
               <form
                 onSubmit={submitSearch}
@@ -307,16 +315,16 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
           </div>
 
           {/* Notifications */}
-          <div className={`relative ${isSearchOpen ? "hidden sm:block" : ""}`} ref={notificationRef}>
+          <div className="relative" ref={notificationRef}>
             <button
               onClick={() => setIsNotificationOpen(o => !o)}
-              className="relative flex items-center text-white hover:text-[#b3b3b3] transition-colors"
+              className={`relative ${iconBox} text-white hover:text-[#b3b3b3] transition-colors`}
               aria-label={notificationCount > 0 ? t("nav.notificationsNew", { count: notificationCount }) : t("nav.notifications")}
               aria-expanded={isNotificationOpen}
             >
-              <Bell className="w-5 h-5 md:w-6 md:h-6" />
+              <Bell className="w-[22px] h-[22px] md:w-6 md:h-6" />
               {notificationCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-[#E50914] text-[10px] font-bold leading-4 text-center text-white">
+                <span className="absolute top-1 right-0.5 md:-top-1.5 md:-right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-[#E50914] text-[10px] font-bold leading-4 text-center text-white">
                   {notificationCount > 9 ? "9+" : notificationCount}
                 </span>
               )}
@@ -328,6 +336,8 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
         </div>
       </div>
     </nav>
+    <BottomTabBar />
+    </>
   );
 };
 

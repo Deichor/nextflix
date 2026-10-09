@@ -15,8 +15,9 @@ import {
 export type RatingButtonSize = 'sm' | 'md';
 
 const SIZE: Record<RatingButtonSize, { btn: string; icon: string; option: string }> = {
-  sm: { btn: 'h-8 w-8', icon: 'h-4 w-4', option: 'h-9 w-9' },
-  md: { btn: 'h-10 w-10 md:h-11 md:w-11', icon: 'h-5 w-5', option: 'h-11 w-11 md:h-12 md:w-12' },
+  // Touch screens get 44px targets
+  sm: { btn: 'h-8 w-8 pointer-coarse:h-11 pointer-coarse:w-11', icon: 'h-4 w-4', option: 'h-9 w-9 pointer-coarse:h-11 pointer-coarse:w-11' },
+  md: { btn: 'h-11 w-11', icon: 'h-5 w-5', option: 'h-11 w-11 md:h-12 md:w-12' },
 };
 
 const circle =
@@ -65,7 +66,8 @@ export function FavoriteButton({ item, size = 'sm' }: { item: RatableTitle; size
       onClick={e => { e.stopPropagation(); setTitleFavorite(item, !fav); }}
       onPointerEnter={e => { if (e.pointerType === 'mouse') setHover(true); }}
       onPointerLeave={() => setHover(false)}
-      onFocus={() => setHover(true)}
+      // Keyboard focus only: a tap must not leave the tooltip on screen
+      onFocus={e => { if (e.currentTarget.matches(':focus-visible')) setHover(true); }}
       onBlur={() => setHover(false)}
       onKeyDown={stop}
       aria-label={label}

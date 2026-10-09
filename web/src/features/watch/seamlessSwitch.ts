@@ -143,6 +143,9 @@ export class SwitchPrep {
   private waitSettle = false;
   private lateRestarts = 0;
   private seekRestarts = 0;
+  // For the summary (stats): when it started and when the hidden stream first got ready
+  private createdAt = Date.now();
+  private readyAt = 0;
   // Extra lead after a keyframe came out too close to the visible position
   private farLead = 0;
   private farTries = 0;
@@ -167,6 +170,17 @@ export class SwitchPrep {
   /** The hidden stream is buffered and waits for the visible video to reach its start */
   get isReady() {
     return this.ready;
+  }
+
+  /** How the preparation went, for the logs: "ready in 6.2 s, lead 20 s, overtaken 1x" */
+  stats(): string {
+    const s = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+    const parts = [this.readyAt ? `ready in ${s(this.readyAt - this.createdAt)}` : `not ready after ${s(Date.now() - this.createdAt)}`,
+      `lead ${Math.round(this.lead + this.farLead)} s`];
+    if (this.lateRestarts) parts.push(`overtaken ${this.lateRestarts}x`);
+    if (this.farTries) parts.push(`keyframe retries ${this.farTries}`);
+    if (this.seekRestarts) parts.push(`seek restarts ${this.seekRestarts}`);
+    return parts.join(', ');
   }
 
   /** Why an abandoned preparation was dropped ('' otherwise) */
@@ -360,6 +374,7 @@ export class SwitchPrep {
         const ahead = bufferedEnd(el.buffered, el.currentTime) - el.currentTime;
         if (ahead >= this.readyAhead || (ahead >= READY_MIN_S && (el.readyState >= 4 || this.suspended))) {
           this.ready = true;
+          if (!this.readyAt) this.readyAt = Date.now();
           if (this.deadline) clearTimeout(this.deadline);
           this.deadline = null;
           this.startFrameWatch(v);

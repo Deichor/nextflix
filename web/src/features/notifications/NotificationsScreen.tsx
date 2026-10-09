@@ -136,7 +136,7 @@ export default function NotificationsScreen() {
               <button
                 onClick={() => void markAllNotificationsRead()}
                 disabled={unread === 0}
-                className="inline-flex items-center gap-1.5 border border-white/40 px-3 py-1 text-sm font-semibold text-white transition-colors hover:border-white hover:bg-white/10 disabled:cursor-default disabled:opacity-40 disabled:hover:border-white/40 disabled:hover:bg-transparent"
+                className="inline-flex items-center gap-1.5 border border-white/40 px-3 py-1 text-sm pointer-coarse:min-h-11 font-semibold text-white transition-colors hover:border-white hover:bg-white/10 disabled:cursor-default disabled:opacity-40 disabled:hover:border-white/40 disabled:hover:bg-transparent"
               >
                 <Check className="h-4 w-4" />
                 {t('notifications.markAllRead')}

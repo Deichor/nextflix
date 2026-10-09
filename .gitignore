@@ -2,6 +2,7 @@
 node_modules/
 .next/
 /web/out/
+/web/out-screens/
 *.tsbuildinfo
 /server/nextflix
 

@@ -2,13 +2,14 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare } from 'lucide-react';
+import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare, ChevronsLeft, ChevronsRight, RotateCwSquare } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import { getActiveProfileId } from '@/shared/lib/profile';
 import { useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction } from '@/shared/i18n';
 import AudioSubtitlePanel from '@/features/watch/components/AudioSubtitlePanel';
 import SubtitleOverlay from '@/features/watch/components/SubtitleOverlay';
 import SeekThumbnail from '@/features/watch/components/SeekThumbnail';
+import TouchSeekBar from '@/features/watch/components/TouchSeekBar';
 import {
   Cue,
   SubtitleItem,
@@ -69,6 +70,8 @@ import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
+import { useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
+import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
 
 // PlayerCore's seamless switch, for the parent
 interface CoreSwitch {
@@ -82,6 +85,8 @@ interface CoreSwitch {
   cancel(): void;
   /** Why the last abandoned preparation was dropped */
   failure(): string;
+  /** How the last preparation went (timings, restarts) */
+  stats(): string;
 }
 
 interface StreamFile {
@@ -151,12 +156,16 @@ const STALL_WINDOW_MS = 60000;
 const MIN_STALL_MS = 1500;
 const MAX_DOWNGRADES = 2;
 const TOAST_MS = 4000;
-// Upgrade (Netflix-like start low, switch up): below 4K the server is asked every
-// UPGRADE_POLL_MS during the first UPGRADE_FOR_MS whether a better source keeps up now.
+// Upgrade (Netflix-like start low, switch up): below 4K the server is asked UPGRADE_FIRST_MS
+// after the start (a TorBox 4K is often ready at once), then every UPGRADE_POLL_MS during the
+// first UPGRADE_FOR_MS whether a better source keeps up now.
 // At most one upgrade per session, and none once quality had to step down.
-const UPGRADE_POLL_MS = 15000;
+const UPGRADE_FIRST_MS = 5000;
+const UPGRADE_POLL_MS = 10000;
 const UPGRADE_FOR_MS = 5 * 60 * 1000;
+// A dropped preparation is tried once more after this (a TorBox file needs no swarm to warm up)
 const UPGRADE_RETRY_MS = 60000;
+const UPGRADE_RETRY_DEBRID_MS = 15000;
 // A file whose length does not fit the TMDB runtime is replaced at most this often per item
 const MAX_LENGTH_RETRIES = 2;
 // Sidegrade: a starving source is swapped for an alternative of the same (or higher) quality
@@ -357,6 +366,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const upgradeRetriesRef = useRef(0);
   const upgradeRetryAtRef = useRef(0);
   const upgradeFailRef = useRef('');
+  // How the upgrade went; sent as why= with the release of the source it replaced (server log)
+  const upgradeNoteRef = useRef('');
   // Live playback position and video quality class (0 until probed), written by PlayerCore
   const positionRef = useRef(0);
   const qualityRef = useRef(0);
@@ -718,6 +729,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const ctrl = new AbortController();
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const secs = () => `${Math.round((Date.now() - started) / 1000)} s`;
+    let waitedFor = '';
     const poll = async () => {
       const m = metaRef.current;
       // A retry after a failed preparation runs even past the polling window
@@ -726,7 +739,11 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       const quality = qualityRef.current || releaseHeight(src.quality);
       if (quality >= 2160) return;
       // Wait until the probe knows the quality and playback has a position (and no sidegrade loads)
-      if (quality > 0 && positionRef.current > 0 && !coreSwitchRef.current?.busy() && Date.now() >= upgradeRetryAtRef.current) {
+      const wait = quality <= 0 ? 'quality unknown' : positionRef.current <= 0 ? 'no position yet'
+        : coreSwitchRef.current?.busy() ? 'another switch loads' : Date.now() < upgradeRetryAtRef.current ? 'retry pause' : '';
+      if (wait && wait !== waitedFor) console.info(`[nextflix] upgrade poll waits (${secs()}): ${wait}`);
+      waitedFor = wait;
+      if (!wait) {
         const failed = upgradeFailRef.current;
         upgradeFailRef.current = '';
         const up = await checkUpgrade(
@@ -738,17 +755,24 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         if (up && releaseHeight(up.quality) > quality && !upgradedRef.current && !steppedDown()) {
           upgradedRef.current = true;
           const next = sourceOf(up);
+          const offered = secs();
           const res = await (coreSwitchRef.current?.prepare(next, 'upgrade') ?? 'unavailable');
+          const stats = coreSwitchRef.current?.stats() || '';
+          if (res === 'switched') {
+            upgradeNoteRef.current = `upgraded to ${next.hash.slice(0, 8)}${next.debrid ? ' (TorBox)' : ''} ${secs()} after the start (offered at ${offered}; ${stats})`;
+            console.info(`[nextflix] ${upgradeNoteRef.current}`);
+          }
           if (res === 'abandoned' || res === 'cancelled') {
-            const why = res === 'cancelled' ? 'cancelled' : coreSwitchRef.current?.failure() || 'unknown';
-            // One more try a minute later (the server hears why on that poll); after that the
+            const why = `${res === 'cancelled' ? 'cancelled' : coreSwitchRef.current?.failure() || 'unknown'} (${stats})`;
+            // One more try a little later (the server hears why on that poll); after that the
             // upgrade is not offered again this session
             if (upgradeRetriesRef.current < 1 && !ctrl.signal.aborted) {
+              const pause = next.debrid ? UPGRADE_RETRY_DEBRID_MS : UPGRADE_RETRY_MS;
               upgradeRetriesRef.current++;
               upgradedRef.current = false;
               upgradeFailRef.current = why;
-              upgradeRetryAtRef.current = Date.now() + UPGRADE_RETRY_MS;
-              timer = setTimeout(poll, UPGRADE_RETRY_MS);
+              upgradeRetryAtRef.current = Date.now() + pause;
+              timer = setTimeout(poll, pause);
               return;
             }
             releaseUnused(next.hash, `upgrade dropped: ${why}`);
@@ -765,7 +789,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       }
       timer = setTimeout(poll, UPGRADE_POLL_MS);
     };
-    timer = setTimeout(poll, UPGRADE_POLL_MS);
+    timer = setTimeout(poll, UPGRADE_FIRST_MS);
     return () => {
       ctrl.abort();
       if (timer) clearTimeout(timer);
@@ -947,7 +971,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     if (phase !== 'ready' || !h) return;
     const prev = currentHashRef.current;
     if (prev && prev !== h) {
-      releaseTorrents([prev]);
+      releaseTorrents([prev], upgradeNoteRef.current || undefined);
+      upgradeNoteRef.current = '';
       playedRef.current.delete(prev);
     }
     currentHashRef.current = h;
@@ -971,15 +996,30 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     };
   }, []);
 
+  // Phones: fullscreen on open, landscape lock, no page bounce, edge-to-edge (mobile.ts)
+  const touchUi = useTouchUi();
+  const mobileFs = useMobileFullscreen(containerRef, touchUi);
+  const mobileFsToggle = mobileFs.toggle;
+  useViewportFitCover(touchUi);
+  useNoBounce(containerRef, touchUi);
+
   const toggleFullscreen = useCallback(() => {
+    if (touchUi) {
+      mobileFsToggle();
+      return;
+    }
     if (!document.fullscreenElement) containerRef.current?.requestFullscreen().catch(() => {});
     else document.exitFullscreen().catch(() => {});
-  }, []);
+  }, [touchUi, mobileFsToggle]);
 
   useEffect(() => {
-    const onFs = () => setFullscreen(!!document.fullscreenElement);
+    const onFs = () => setFullscreen(!!(document.fullscreenElement ?? (document as Document & { webkitFullscreenElement?: Element | null }).webkitFullscreenElement));
     document.addEventListener('fullscreenchange', onFs);
-    return () => document.removeEventListener('fullscreenchange', onFs);
+    document.addEventListener('webkitfullscreenchange', onFs);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFs);
+      document.removeEventListener('webkitfullscreenchange', onFs);
+    };
   }, []);
 
   useEffect(() => {
@@ -1008,7 +1048,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
 
   // Portal to body so transformed ancestors can't trap the fixed overlay
   return createPortal(
-    <div ref={containerRef} className="fixed inset-0 z-[100] bg-black flex items-center justify-center select-none">
+    <div ref={containerRef} className={`fixed inset-0 z-[100] bg-black flex items-center justify-center select-none ${touchUi ? mobileCss.touchRoot : ''}`}>
       {/* The last frame stays (dimmed) under an empty video while a stream restarts or the source changes */}
       <canvas
         ref={frameRef}
@@ -1045,6 +1085,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           onClose={onClose}
           fullscreen={fullscreen}
           toggleFullscreen={toggleFullscreen}
+          touchUi={touchUi}
+          canFullscreen={!touchUi || mobileFs.supported}
+          onRotate={touchUi && mobileFs.canRotate ? mobileFs.rotate : undefined}
         />
       )}
 
@@ -1121,7 +1164,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       )}
 
       {phase !== 'ready' && (
-        <BackButton label={t('player.back')} onClick={onClose} className="absolute top-4 left-4 md:top-6 md:left-6 z-10" />
+        <BackButton label={t('player.back')} onClick={onClose} className={`absolute z-10 ${touchUi ? mobileCss.safeTopLeft : 'top-4 left-4 md:top-6 md:left-6'}`} />
       )}
     </div>,
     document.body
@@ -1173,7 +1216,18 @@ interface PlayerCoreProps {
   onClose: () => void;
   fullscreen: boolean;
   toggleFullscreen: () => void;
+  /** Phone / tablet layout: a tap shows the controls, double-tap seeks, bottom sheet panel */
+  touchUi?: boolean;
+  /** The fullscreen button works here (element fullscreen is missing on iPhone) */
+  canFullscreen?: boolean;
+  /** Portrait <-> landscape, where the browser can lock the orientation */
+  onRotate?: () => void;
 }
+
+// Double-tap seek (touch): a second tap within DOUBLE_TAP_MS on the same side seeks; more taps
+// add 10 s each and the seek runs SEEK_COMMIT_MS after the last one (one restart, not one per tap)
+const DOUBLE_TAP_MS = 260;
+const SEEK_COMMIT_MS = 650;
 
 // Plays a torrent while it downloads. The stream is a live fMP4 requested at `stream.t`
 // that really starts at `startPoint.t`, so the shown time adds that offset. Seeks inside
@@ -1182,7 +1236,7 @@ function PlayerCore({
   magnet, source, startAt, meta, title, subtitle, nextLabel, onNext, onPrefetchNext, onSourceFailed, recovering = false, frameShown = false,
   freezeFrame, onRecovering, onRecovered, onStruggling, onWrongLength,
   onBufferHealth, positionRef, qualityRef, switchRef, onSwitched, onSubtitleState, subAlt, wantSubLangRef, onClose, fullscreen,
-  toggleFullscreen,
+  toggleFullscreen, touchUi = false, canFullscreen = true, onRotate,
 }: PlayerCoreProps) {
   const apiUrl = getApiUrl();
   // Two <video> slots: the active one is on screen, the other loads a seamless switch muted and
@@ -1985,6 +2039,97 @@ function PlayerCore({
 
   useEffect(() => () => { if (hideTimer.current) clearTimeout(hideTimer.current); }, []);
 
+  // Touch layout: a tap shows / hides the controls (Play is the big center button); a double-tap
+  // on the left / right side seeks back / forward and further taps add up (seek mode)
+  const controlsVisibleRef = useRef(false);
+  const tapRef = useRef<{ at: number; side: number; timer: ReturnType<typeof setTimeout> | null }>({ at: 0, side: 0, timer: null });
+  const pressRef = useRef<{ id: number; x: number; y: number; at: number } | null>(null);
+  const seekAccRef = useRef<{ side: number; total: number; base: number; timer: ReturnType<typeof setTimeout> | null } | null>(null);
+  const [seekFx, setSeekFx] = useState<{ side: number; total: number; n: number } | null>(null);
+  const seekFxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const seekToRef = useRef(seekTo);
+  seekToRef.current = seekTo;
+  const posRef = useRef(position);
+  posRef.current = position;
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+  useEffect(() => () => {
+    if (tapRef.current.timer) clearTimeout(tapRef.current.timer);
+    if (seekAccRef.current?.timer) clearTimeout(seekAccRef.current.timer);
+    if (seekFxTimer.current) clearTimeout(seekFxTimer.current);
+  }, []);
+
+  const toggleControls = useCallback(() => {
+    if (!controlsVisibleRef.current) {
+      revealControls();
+      return;
+    }
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    setShowControls(false);
+  }, [revealControls]);
+
+  const doubleTapSeek = useCallback((side: number) => {
+    let acc = seekAccRef.current;
+    if (acc && acc.side !== side) {
+      // Turned around: the seek so far runs now, the other side starts over
+      if (acc.timer) clearTimeout(acc.timer);
+      seekToRef.current(acc.base + acc.total);
+      acc = null;
+    }
+    const a = acc || { side, total: 0, base: posRef.current, timer: null };
+    const dur = durationRef.current;
+    // Never past the start or the end
+    const room = side < 0 ? a.base : Math.max(0, dur - 1 - a.base);
+    a.total = side * Math.min(room, Math.abs(a.total) + 10);
+    if (a.timer) clearTimeout(a.timer);
+    a.timer = setTimeout(() => {
+      if (seekAccRef.current === a) seekAccRef.current = null;
+      if (a.total !== 0) seekToRef.current(a.base + a.total);
+    }, SEEK_COMMIT_MS);
+    seekAccRef.current = a;
+    setSeekFx(fx => ({ side, total: Math.round(a.total), n: (fx?.n ?? 0) + 1 }));
+    if (seekFxTimer.current) clearTimeout(seekFxTimer.current);
+    seekFxTimer.current = setTimeout(() => setSeekFx(null), SEEK_COMMIT_MS + 300);
+  }, []);
+
+  const onTouchTap = useCallback((x: number, width: number) => {
+    // The tap that closed the Audio & Subtitles panel does nothing else
+    if (Date.now() - panelClosedAt.current < 400) return;
+    const side = x < width * 0.35 ? -1 : x > width * 0.65 ? 1 : 0;
+    const now = Date.now();
+    const tap = tapRef.current;
+    const pending = tap.timer;
+    if (pending) clearTimeout(pending);
+    tap.timer = null;
+    const quick = now - tap.at < DOUBLE_TAP_MS && tap.side === side;
+    const seeking = !!seekAccRef.current && now - tap.at < SEEK_COMMIT_MS;
+    tap.at = now;
+    tap.side = side;
+    if (side !== 0 && (seeking || (pending && quick))) {
+      doubleTapSeek(side);
+      return;
+    }
+    // The center has no double-tap, so it answers at once; the sides wait for a second tap
+    if (side === 0) toggleControls();
+    else tap.timer = setTimeout(() => { tap.timer = null; toggleControls(); }, DOUBLE_TAP_MS);
+  }, [doubleTapSeek, toggleControls]);
+
+  useWakeLock(touchUi && playing);
+
+  // Touch: subtitles sit on the picture and scale with its height (portrait shows a small band)
+  const rootRef = useRef<HTMLDivElement>(null);
+  const bottomBarRef = useRef<HTMLDivElement>(null);
+  const [rootBox, setRootBox] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!touchUi || !el) return;
+    const measure = () => setRootBox({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [touchUi]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'SELECT') return;
@@ -2117,6 +2262,7 @@ function PlayerCore({
 
   // Why the last preparation was dropped (CoreSwitch.failure)
   const lastPrepFailRef = useRef('');
+  const lastPrepStatsRef = useRef('');
   // One preparation at a time; only while the visible stream plays (or is paused) smoothly
   const prepareSwitch = useCallback((next: StreamSource, kind: SwitchKind): Promise<SwitchResult> => {
     if (prepRef.current || finishFadeRef.current) return Promise.resolve('busy');
@@ -2128,9 +2274,10 @@ function PlayerCore({
     const prep = new SwitchPrep(switchHost, next, kind);
     prepRef.current = prep;
     return prep.promise.then(res => {
+      lastPrepStatsRef.current = prep.stats();
       if (res === 'abandoned') {
         lastPrepFailRef.current = prep.reason || 'unknown';
-        console.warn(`[nextflix] ${kind} to ${prep.hash.slice(0, 8)}:${next.index}${next.debrid ? ' (TorBox)' : ''} dropped: ${prep.reason}`);
+        console.warn(`[nextflix] ${kind} to ${prep.hash.slice(0, 8)}:${next.index}${next.debrid ? ' (TorBox)' : ''} dropped: ${prep.reason} (${lastPrepStatsRef.current})`);
       }
       return res;
     }).finally(() => { if (prepRef.current === prep) prepRef.current = null; });
@@ -2139,6 +2286,7 @@ function PlayerCore({
   const coreSwitch = useMemo<CoreSwitch>(() => ({
     prepare: prepareSwitch,
     failure: () => lastPrepFailRef.current,
+    stats: () => lastPrepStatsRef.current,
     preparing: () => (prepRef.current ? { kind: prepRef.current.kind, ready: prepRef.current.isReady } : null),
     busy: () => !!prepRef.current || !!finishFadeRef.current,
     cancel: () => prepRef.current?.cancel('cancelled'),
@@ -2323,21 +2471,55 @@ function PlayerCore({
   // Paused by the viewer: the controls (and the Back button) stay up
   const controlsVisible = showControls || panelOpen || (playable && !playing && !buffering && countdown === null);
   const ctl = 'p-2 text-white hover:text-red-500 focus:outline-none focus-visible:text-red-500';
+  controlsVisibleRef.current = controlsVisible;
+  // Touch: hidden controls take no taps (they would catch taps meant for the video)
+  const hiddenCls = controlsVisible ? 'opacity-100' : `opacity-0${touchUi ? ' pointer-events-none' : ''}`;
+  // Touch: center buttons step aside for a double-tap seek or a seek drag
+  const centerOn = controlsVisible && !seekFx && seekPreview === null;
+  const touchBtn = 'flex h-12 min-w-12 items-center justify-center gap-2 rounded-full px-2.5 text-white active:bg-white/15 focus:outline-none';
+
+  // Touch: the picture's box decides the subtitle size and place (on the picture, above the controls)
+  let subLayout: { bottom: number; fontPx: number } | undefined;
+  if (touchUi && rootBox.w > 0 && rootBox.h > 0) {
+    const v = videoRef.current;
+    const aspect = v?.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight
+      : videoInfo?.width && videoInfo.height ? videoInfo.width / videoInfo.height : 16 / 9;
+    const picH = Math.min(rootBox.h, rootBox.w / aspect);
+    const below = (rootBox.h - picH) / 2;
+    let bottom = below + picH * 0.06;
+    // Above the bar's rows (its gradient padding may cover the picture)
+    const bar = bottomBarRef.current;
+    const rows = bar?.firstElementChild as HTMLElement | null;
+    if (controlsVisible) bottom = Math.max(bottom, (bar && rows ? bar.offsetHeight - rows.offsetTop : 100) + 8);
+    subLayout = { bottom, fontPx: Math.max(14, Math.min(40, picH * 0.055)) * subScale };
+  }
 
   return (
     <div
+      ref={rootRef}
       className="absolute inset-0 flex items-center justify-center"
-      onMouseMove={revealControls}
+      onMouseMove={touchUi ? undefined : revealControls}
+      onPointerDownCapture={touchUi ? () => { if (controlsVisibleRef.current) revealControls(); } : undefined}
       style={{ cursor: controlsVisible ? 'default' : 'none' }}
     >
       {/* Both slots stack in their own layer under the overlays; the hidden one never touches player state */}
       <div
-        className="absolute inset-0 isolate"
-        onClick={() => {
+        className={`absolute inset-0 isolate${touchUi ? ' touch-none' : ''}`}
+        onClick={touchUi ? undefined : () => {
           // The click that closed the panel should not also pause
           if (Date.now() - panelClosedAt.current < 400) return;
           togglePlay();
         }}
+        onPointerDown={touchUi ? e => { pressRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now() }; } : undefined}
+        onPointerUp={touchUi ? e => {
+          const p = pressRef.current;
+          pressRef.current = null;
+          // Only a short, still touch is a tap
+          if (!p || p.id !== e.pointerId || Date.now() - p.at > 600 || Math.hypot(e.clientX - p.x, e.clientY - p.y) > 12) return;
+          const r = e.currentTarget.getBoundingClientRect();
+          onTouchTap(e.clientX - r.left, r.width);
+        } : undefined}
+        onPointerCancel={touchUi ? () => { pressRef.current = null; } : undefined}
       >
         {[0, 1].map(i => (
           <video
@@ -2412,12 +2594,12 @@ function PlayerCore({
 
       {/* Subtitles are drawn here (the stream restarts with offsets, so native tracks would drift) */}
       {playable && !!subId && cues.length > 0 && (
-        <SubtitleOverlay videoRef={videoRef} offsetRef={offsetRef} cues={cues} delay={subDelay} raised={controlsVisible} scale={subScale} />
+        <SubtitleOverlay videoRef={videoRef} offsetRef={offsetRef} cues={cues} delay={subDelay} raised={controlsVisible} scale={subScale} layout={subLayout} />
       )}
 
       {/* Episode / file picker (legacy magnet mode) */}
       {!file && files.length > 1 && !error && (
-        <div className="absolute inset-0 overflow-y-auto bg-black/95 p-6 md:p-12">
+        <div data-scroll className="absolute inset-0 overflow-y-auto overscroll-contain bg-black/95 p-6 md:p-12">
           <h2 className="text-white text-xl md:text-2xl font-bold mb-1">{title}</h2>
           <p className="text-white/50 text-sm mb-6">{t('player.chooseFile')}</p>
           <div className="grid gap-2 max-w-3xl">
@@ -2484,7 +2666,7 @@ function PlayerCore({
       )}
 
       {/* Top bar */}
-      <div className={`absolute top-0 inset-x-0 p-4 md:p-6 bg-gradient-to-b from-black/80 to-transparent flex items-center gap-4 transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
+      <div className={`absolute top-0 inset-x-0 bg-gradient-to-b from-black/80 to-transparent flex items-center transition-opacity duration-300 ${touchUi ? `${mobileCss.topBar} z-[8] gap-2` : 'p-4 md:p-6 gap-4'} ${hiddenCls}`}>
         <BackButton label={t('player.back')} onClick={onClose} onFocus={revealControls} />
         <div className="flex-1 min-w-0">
           <p className="text-white font-semibold truncate">{title}</p>
@@ -2499,8 +2681,9 @@ function PlayerCore({
             <span className={BADGE_CLASS}>{badge.label}</span>
             {badge.hdr && <span className={BADGE_CLASS}>HDR</span>}
             {shownSource?.debrid && (
-              <span className={BADGE_CLASS} title={t('player.debridBadgeTitle')}>
-                ⚡ {t('player.debridBadge')}
+              <span className={`${BADGE_CLASS} inline-flex items-center gap-1 !text-[#e5e5e5]`} title={t('player.debridBadgeTitle')}>
+                <svg viewBox="0 0 24 24" aria-hidden className="fill-current h-[1.1em] w-[1.1em]"><path d="M13.5 2 4 13.5h6.5L9 22l10-12h-6.5z" /></svg>
+                {t('player.debridBadge')}
               </span>
             )}
           </div>
@@ -2529,14 +2712,14 @@ function PlayerCore({
       {showNextButton && !panelOpen && (
         <button
           onClick={() => onNext?.()}
-          className="absolute right-4 md:right-8 bottom-28 flex items-center gap-2 px-5 py-2.5 bg-white text-black font-bold rounded shadow-lg hover:bg-white/80 transition"
+          className={`absolute ${touchUi ? mobileCss.nextUp : 'right-4 md:right-8 bottom-28'} flex items-center gap-2 px-5 py-2.5 bg-white text-black font-bold rounded shadow-lg hover:bg-white/80 transition`}
         >
           <SkipForward className="w-5 h-5 fill-current" /> {t('player.nextEpisode')}
         </button>
       )}
 
       {/* Bottom controls */}
-      {playable && (
+      {playable && !touchUi && (
         <div className={`absolute bottom-0 inset-x-0 px-4 md:px-6 pb-4 pt-10 bg-gradient-to-t from-black/90 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
           <SeekThumbnail apiUrl={apiUrl} hash={hash} index={file?.id} duration={duration} dragTime={seekPreview} position={position} playing={playing && !buffering}>
           <input
@@ -2601,8 +2784,100 @@ function PlayerCore({
         </div>
       )}
 
+      {/* Touch: double-tap seek feedback on the tapped side */}
+      {touchUi && !!seekFx && (
+        <div
+          className={`pointer-events-none absolute inset-y-0 z-[7] flex w-[38%] items-center justify-center overflow-hidden bg-white/10 ${seekFx.side < 0 ? 'left-0 rounded-r-[50%]' : 'right-0 rounded-l-[50%]'}`}
+          role="status"
+        >
+          <span key={seekFx.n} className={mobileCss.ripple} />
+          <div className="relative flex flex-col items-center text-white drop-shadow-[0_1px_3px_rgba(0,0,0,0.8)]">
+            {seekFx.side < 0 ? <ChevronsLeft className="h-9 w-9" /> : <ChevronsRight className="h-9 w-9" />}
+            <span className="text-sm font-semibold tabular-nums">
+              {t('player.seekDelta', { delta: `${seekFx.total < 0 ? '−' : '+'}${Math.abs(seekFx.total)}` })}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Touch: big center controls (the spinner takes Play's place while loading) */}
+      {playable && touchUi && countdown === null && (
+        <div className={`absolute inset-0 z-[6] flex items-center justify-center gap-10 pointer-events-none transition-opacity duration-200 ${mobileCss.center} ${centerOn ? 'opacity-100' : 'opacity-0'}`}>
+          {[-10, 0, 10].map(step => {
+            const live = centerOn ? 'pointer-events-auto' : '';
+            if (step === 0) {
+              return loadingShown || recovering ? <div key={step} className="h-[72px] w-[72px]" /> : (
+                <button key={step} type="button" onClick={() => { togglePlay(); revealControls(); }} className={`${live} flex h-[72px] w-[72px] items-center justify-center rounded-full bg-black/40 text-white active:scale-95 transition-transform`} aria-label={t(playing ? 'player.pause' : 'player.play')}>
+                  {playing ? <Pause className="h-10 w-10 fill-current" /> : <Play className="h-10 w-10 fill-current translate-x-0.5" />}
+                </button>
+              );
+            }
+            const Icon = step < 0 ? RotateCcw : RotateCw;
+            return (
+              <button key={step} type="button" onClick={() => { seekTo(position + step); revealControls(); }} className={`${live} relative flex h-14 w-14 items-center justify-center rounded-full bg-black/30 text-white active:scale-95 transition-transform`} aria-label={t(step < 0 ? 'player.back10Touch' : 'player.forward10Touch')}>
+                <Icon className="h-10 w-10" strokeWidth={1.5} />
+                <span className="absolute text-[11px] font-bold">10</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Touch: bottom bar (seek bar with the time left, then panel / episode / screen buttons) */}
+      {playable && touchUi && (
+        <div ref={bottomBarRef} className={`absolute bottom-0 inset-x-0 z-[8] bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-300 ${mobileCss.bottomBar} ${hiddenCls}`}>
+          <div className="flex items-center gap-3">
+            <SeekThumbnail apiUrl={apiUrl} hash={hash} index={file?.id} duration={duration} dragTime={seekPreview} position={position} playing={playing && !buffering} touch className="flex-1">
+              <TouchSeekBar
+                duration={duration}
+                value={shownTime}
+                label={t('player.seek')}
+                onPreview={setSeekPreview}
+                onCommit={time => { setSeekPreview(null); seekTo(time); }}
+                onActivity={revealControls}
+              />
+            </SeekThumbnail>
+            <span className="shrink-0 text-[13px] font-medium text-white/90 tabular-nums">
+              {seekPreview !== null ? formatTime(shownTime) : `-${formatTime(Math.max(0, duration - shownTime))}`}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="flex-1" />
+            {!!onNext && (
+              <button type="button" onClick={() => onNext()} className={touchBtn} aria-label={t('player.nextEpisode')}>
+                <SkipForward className="h-5 w-5" />
+                <span className={`text-sm font-semibold ${mobileCss.wideOnly}`}>{t('player.nextEpisode')}</span>
+              </button>
+            )}
+            <button
+              ref={panelButtonRef}
+              type="button"
+              onClick={() => (panelOpen ? closePanel() : setPanelOpen(true))}
+              className={`${touchBtn} ${panelOpen ? 'text-red-500' : ''}`}
+              aria-label={t('player.audioSubtitles')}
+              aria-haspopup="dialog"
+              aria-expanded={panelOpen}
+            >
+              <MessageSquare className="h-5 w-5" />
+              <span className={`text-sm font-semibold ${mobileCss.wideOnly}`}>{t('player.audioSubtitles')}</span>
+            </button>
+            {!!onRotate && (
+              <button type="button" onClick={onRotate} className={touchBtn} aria-label={t('player.rotate')}>
+                <RotateCwSquare className="h-5 w-5" />
+              </button>
+            )}
+            {canFullscreen && (
+              <button type="button" onClick={toggleFullscreen} className={touchBtn} aria-label={t(fullscreen ? 'player.exitFullscreenTouch' : 'player.fullscreenTouch')}>
+                {fullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {playable && (
         <AudioSubtitlePanel
+          sheet={touchUi}
           open={panelOpen}
           onClose={closePanel}
           anchorRef={panelButtonRef}

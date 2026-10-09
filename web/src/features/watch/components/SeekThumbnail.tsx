@@ -102,11 +102,14 @@ interface Props {
   /** Playback position and state: the frames around it are prefetched while it plays */
   position?: number;
   playing?: boolean;
+  /** Touch layout: no hover, a smaller frame held higher (above the finger) */
+  touch?: boolean;
+  className?: string;
   children: React.ReactNode;
 }
 
 /** Wraps the seek bar and shows the frame at the hovered or dragged time above it. */
-export default function SeekThumbnail({ apiUrl, hash, index, duration, dragTime, position, playing, children }: Props) {
+export default function SeekThumbnail({ apiUrl, hash, index, duration, dragTime, position, playing, touch = false, className = '', children }: Props) {
   const box = useRef<HTMLDivElement>(null);
   const [hoverT, setHoverT] = useState<number | null>(null);
   // Re-render when any frame request ends (the hovered one, or a nearer stand-in)
@@ -156,24 +159,26 @@ export default function SeekThumbnail({ apiUrl, hash, index, duration, dragTime,
   }, [apiUrl, hash, index, ready, playing, prefetchSlot, duration, prefix]);
 
   const width = box.current?.clientWidth || 0;
-  const x = t === null || duration <= 0 ? 0 : Math.max(110, Math.min(width - 110, (t / duration) * width));
+  // Half the frame plus a margin: the frame never leaves the bar
+  const half = touch ? 92 : 110;
+  const x = t === null || duration <= 0 ? 0 : Math.max(half, Math.min(width - half, (t / duration) * width));
   const exact = grid === null ? null : frames.get(prefix + grid) ?? null;
   const shown = exact ?? (grid === null ? null : nearestFrame(prefix, grid));
 
   return (
     <div
       ref={box}
-      className="relative"
-      onMouseMove={e => {
+      className={`relative ${className}`}
+      onMouseMove={touch ? undefined : e => {
         const r = e.currentTarget.getBoundingClientRect();
         if (r.width > 0 && duration > 0) setHoverT(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * duration);
       }}
-      onMouseLeave={() => setHoverT(null)}
+      onMouseLeave={touch ? undefined : () => setHoverT(null)}
     >
       {children}
       {ready && t !== null && width > 0 && (
-        <div className="absolute bottom-full mb-3 -translate-x-1/2 pointer-events-none" style={{ left: x }} aria-hidden="true">
-          <div className="relative w-[200px] aspect-video rounded-md overflow-hidden border-2 border-white/90 bg-neutral-800 shadow-lg shadow-black/60">
+        <div className={`absolute bottom-full -translate-x-1/2 pointer-events-none ${touch ? 'mb-5' : 'mb-3'}`} style={{ left: x }} aria-hidden="true">
+          <div className={`relative ${touch ? 'w-[164px]' : 'w-[200px]'} aspect-video rounded-md overflow-hidden border-2 border-white/90 bg-neutral-800 shadow-lg shadow-black/60`}>
             {!!shown && (
               <img src={shown} alt="" className={`w-full h-full object-contain bg-black transition-opacity duration-100 ${exact ? 'opacity-100' : 'opacity-50'}`} />
             )}

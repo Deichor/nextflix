@@ -20,13 +20,13 @@ interface TitleCardProps {
 }
 
 export const CARD_WIDTH: Record<CardVariant, string> = {
-  backdrop: 'w-[42vw] sm:w-[30vw] md:w-[23vw] lg:w-[18vw] xl:w-[15.2vw]',
+  backdrop: 'w-[37vw] sm:w-[30vw] md:w-[23vw] lg:w-[18vw] xl:w-[15.2vw]',
   poster: 'w-[30vw] sm:w-[22vw] md:w-[17vw] lg:w-[13vw] xl:w-[11.2vw]',
 };
 
 // CSS widths of CARD_WIDTH, for the srcset
 export const CARD_SIZES: Record<CardVariant, string> = {
-  backdrop: '(min-width: 1280px) 15.2vw, (min-width: 1024px) 18vw, (min-width: 768px) 23vw, (min-width: 640px) 30vw, 42vw',
+  backdrop: '(min-width: 1280px) 15.2vw, (min-width: 1024px) 18vw, (min-width: 768px) 23vw, (min-width: 640px) 30vw, 37vw',
   poster: '(min-width: 1280px) 11.2vw, (min-width: 1024px) 13vw, (min-width: 768px) 17vw, (min-width: 640px) 22vw, 30vw',
 };
 

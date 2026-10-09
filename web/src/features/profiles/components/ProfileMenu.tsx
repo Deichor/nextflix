@@ -81,7 +81,7 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
   };
 
   const others = profiles.filter((p) => p.id !== active?.id);
-  const itemClass = 'flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-white hover:underline';
+  const itemClass = 'flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-white hover:underline pointer-coarse:min-h-11';
 
   return (
     <div
@@ -101,7 +101,7 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={active ? t('profiles.menuFor', { name: active.name }) : t('profiles.menu')}
-        className="flex items-center gap-2 outline-none focus-visible:ring-2 focus-visible:ring-white rounded"
+        className="flex min-h-11 min-w-11 items-center justify-center gap-2 outline-none focus-visible:ring-2 focus-visible:ring-white rounded md:min-h-0 md:min-w-0"
       >
         {active ? (
           <ProfileAvatar profile={active} size={32} />
@@ -118,12 +118,12 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full z-[60] mt-3 w-56 border border-[#333] bg-black/90 py-2 text-white shadow-2xl backdrop-blur-sm"
+          className="absolute right-0 top-full z-[60] mt-1 w-56 md:mt-3 border border-[#333] bg-black/90 py-2 text-white shadow-2xl backdrop-blur-sm"
         >
           {/* Little caret pointing at the avatar */}
           <span
             aria-hidden
-            className="absolute -top-2 right-6 h-0 w-0 border-x-8 border-b-8 border-x-transparent border-b-[#e5e5e5]"
+            className="absolute -top-2 right-3.5 h-0 w-0 md:right-6 border-x-8 border-b-8 border-x-transparent border-b-[#e5e5e5]"
           />
 
           {others.length > 0 && (
@@ -153,7 +153,7 @@ export default function ProfileMenu({ className = '' }: { className?: string }) 
               href="/profiles"
               role="menuitem"
               onClick={() => setOpen(false)}
-              className="flex w-full items-center justify-center gap-2 px-3 py-2 text-sm text-white hover:underline"
+              className="flex w-full items-center justify-center gap-2 px-3 py-2 text-sm text-white hover:underline pointer-coarse:min-h-11"
             >
               <Users className="h-4 w-4 text-[#b3b3b3]" />
               {t('profiles.switchProfile')}

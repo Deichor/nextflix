@@ -14,7 +14,13 @@ interface InstantChipProps {
   corner?: 'left' | 'right';
 }
 
-// Shows ⚡ when the title has a release TorBox has cached (it plays at once). Asks only once
+const Bolt = ({ className = '' }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" aria-hidden className={`fill-current ${className}`}>
+    <path d="M13.5 2 4 13.5h6.5L9 22l10-12h-6.5z" />
+  </svg>
+);
+
+// Shows a bolt when the title has a release TorBox has cached (it plays at once). Asks only once
 // the card's row is near the viewport; renders nothing while unknown or not cached.
 export default function InstantChip({ item, variant = 'card', className = '', corner = 'right' }: InstantChipProps) {
   const t = useT();
@@ -28,9 +34,9 @@ export default function InstantChip({ item, variant = 'card', className = '', co
     return (
       <span
         title={label}
-        className={`inline-flex items-center gap-1 whitespace-nowrap text-[#ffd338] ${className}`}
+        className={`inline-flex items-center gap-1 whitespace-nowrap text-[#e5e5e5] ${className}`}
       >
-        <span aria-hidden>⚡</span>
+        <Bolt className="h-[1.1em] w-[1.1em]" />
         {t('instant.short')}
       </span>
     );
@@ -43,9 +49,9 @@ export default function InstantChip({ item, variant = 'card', className = '', co
           role="img"
           aria-label={label}
           title={label}
-          className="pointer-events-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-black/70 px-1 text-[11px] leading-none text-[#ffd338] shadow-[0_1px_3px_rgba(0,0,0,0.6)] ring-1 ring-white/15"
+          className="pointer-events-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-black/70 px-1 text-[11px] leading-none pointer-coarse:h-6 pointer-coarse:min-w-6 pointer-coarse:text-[13px] text-[#e5e5e5] shadow-[0_1px_3px_rgba(0,0,0,0.6)] ring-1 ring-white/15"
         >
-          ⚡
+          <Bolt className="h-3 w-3 pointer-coarse:h-3.5 pointer-coarse:w-3.5" />
         </span>
       )}
     </span>
