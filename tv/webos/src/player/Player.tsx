@@ -326,7 +326,15 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
             <span className="badge">{s.quality.label}</span>
             {s.quality.dv ? <span className="badge">Dolby Vision</span> : s.quality.hdr ? <span className="badge">HDR</span> : null}
             {!!s.audioBadge && <span className="badge">{s.audioBadge}</span>}
-            {s.debrid && <span className="badge">⚡ TorBox</span>}
+            {s.debrid && (
+              <span className="badge">
+                <svg viewBox="0 0 24 24" aria-hidden="true"
+                  style={{ width: '1.1em', height: '1.1em', fill: '#e5e5e5', verticalAlign: '-0.2em', marginRight: '0.3em' }}>
+                  <path d="M13.5 2 4 13.5h6.5L9 22l10-12h-6.5z" />
+                </svg>
+                TorBox
+              </span>
+            )}
           </div>
         )}
       </div>

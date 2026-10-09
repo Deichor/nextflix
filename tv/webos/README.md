@@ -120,8 +120,10 @@ sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach 
 - Search: a chip row above the results (Up from the grid, Right from the keyboard): All / Movies / TV Shows, then
   Anime and the genres (sorted by name); OK toggles a chip, several genres must all match. Chips alone browse
   (`/api/catalog/discover`, the next page loads near the end of the grid); with text they narrow the search results.
-- Surprise me (side menu, shuffle icon): one title the profile is likely to enjoy with the reason ("Because you loved
-  …"), Play (detail page with autoplay), Details and **Something else** for the next pick.
+- Surprise me (Home: Down past the last row, a centered button; the hero explains it while focused): one title per
+  press with the reason (close to the taste "Because you loved …", a new pick in a liked genre, or "Something
+  completely different"), Play (detail page with autoplay), Details and **Something else** for the next pick. Back
+  returns the focus to the button.
 
 ## Opening intro
 

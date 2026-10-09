@@ -1,7 +1,7 @@
 import { getJson } from './http';
 import { getProfileId } from './profile';
 import { toTitle, toTitles, type MediaType, type Title } from './catalog';
-import type { MessageKey, TFunction } from './i18n';
+import type { Locale, MessageKey, TFunction } from './i18n';
 
 // ---- Search filters (same chips and rules as web/src/features/search/filters.ts) ----
 
@@ -74,16 +74,25 @@ export async function discover(f: SearchFilters, q: string, page: number, signal
 
 // ---- Surprise me ----
 
-export type SurpriseReasonKind = 'because_loved' | 'because_liked' | 'because_watched' | 'favorite_like' | 'genre' | 'trending_pick';
+export type SurpriseReasonKind =
+  | 'because_loved' | 'because_liked' | 'because_watched' | 'favorite_like' | 'genre' | 'adjacent' | 'wild_card' | 'trending_pick';
 
 export interface SurprisePick {
   title: Title;
   logo: string;
-  reason: { kind: SurpriseReasonKind; title?: string; mediaType?: MediaType; genreId?: number };
+  reason: {
+    kind: SurpriseReasonKind;
+    title?: string;
+    mediaType?: MediaType;
+    genreId?: number;
+    genreIds?: number[];
+    language?: string;
+  };
 }
 
-// The last picks of this session, sent as exclude= (the server also remembers 20 per profile)
+// The last picks of this session, sent as exclude= (the server also remembers 30 per profile)
 const recentByProfile: Record<number, string[]> = {};
+const MEMORY = 30;
 
 export async function surprise(signal?: AbortSignal): Promise<SurprisePick | null> {
   const pid = getProfileId();
@@ -94,7 +103,7 @@ export async function surprise(signal?: AbortSignal): Promise<SurprisePick | nul
   const title = toTitle(data?.title, 'movie');
   if (!title) return null;
   recent.push(title.key);
-  if (recent.length > 20) recent.shift();
+  if (recent.length > MEMORY) recent.shift();
   const r = data.reason || {};
   return {
     title,
@@ -104,6 +113,8 @@ export async function surprise(signal?: AbortSignal): Promise<SurprisePick | nul
       title: r.title || undefined,
       mediaType: r.media_type === 'tv' ? 'tv' : r.media_type === 'movie' ? 'movie' : undefined,
       genreId: typeof r.genre_id === 'number' ? r.genre_id : undefined,
+      genreIds: Array.isArray(r.genre_ids) ? r.genre_ids.filter((x: unknown) => typeof x === 'number') : undefined,
+      language: typeof r.language === 'string' ? r.language : undefined,
     },
   };
 }
@@ -115,12 +126,45 @@ const SEED_KEYS: Partial<Record<SurpriseReasonKind, [MessageKey, MessageKey]>> =
   favorite_like: ['surprise.reason.favoriteMovie', 'surprise.reason.favoriteTv'],
 };
 
-export function reasonText(t: TFunction, reason: SurprisePick['reason']): string {
+const LANGUAGES = ['ko', 'ja', 'es', 'fr', 'it', 'tr', 'hi', 'de', 'zh', 'da', 'sv', 'pt', 'ru', 'fa'];
+
+/** Turkish locative suffix with vowel harmony: "Bilim kurgu" -> "Bilim kurguda", "Suç" -> "Suçta". */
+export function trLocative(word: string): string {
+  const lower = word.toLocaleLowerCase('tr-TR');
+  let back = true;
+  for (let i = lower.length - 1; i >= 0; i--) {
+    if ('aıouâû'.indexOf(lower[i]) >= 0) break;
+    if ('eiöüî'.indexOf(lower[i]) >= 0) { back = false; break; }
+  }
+  const hard = 'çfhkpsşt'.indexOf(lower[lower.length - 1] || '-') >= 0;
+  return word + (hard ? 't' : 'd') + (back ? 'a' : 'e');
+}
+
+/** "Because you loved Dune" / "Bayıldığın Dune filmine benzediği için", "Something completely different – ...". */
+export function reasonText(t: TFunction, locale: Locale, pick: SurprisePick): string {
+  const { reason } = pick;
+  const lower = (s: string) => s.toLocaleLowerCase(locale === 'tr' ? 'tr-TR' : 'en-US');
+  // English names genres in lower case; Turkish starts the sentence with the first one
+  const lead = (s: string) => (locale === 'tr' ? s.charAt(0).toLocaleUpperCase('tr-TR') + lower(s.slice(1)) : lower(s));
   const seed = SEED_KEYS[reason.kind];
   if (seed && reason.title) return t(seed[reason.mediaType === 'tv' ? 1 : 0], { title: reason.title });
-  if (reason.kind === 'genre' && reason.genreId) {
+  if (reason.kind === 'genre') {
+    const ids = reason.genreIds && reason.genreIds.length > 0 ? reason.genreIds : reason.genreId ? [reason.genreId] : [];
+    const names = ids.map(id => genreName(t, id)).filter(Boolean);
+    if (names.length >= 2) return t('surprise.reason.genres', { first: lead(names[0]), second: lower(names[1]) });
+    if (names.length === 1) return t('surprise.reason.genre', { genre: lead(names[0]) });
+  }
+  if (reason.kind === 'adjacent' && reason.genreId) {
     const genre = genreName(t, reason.genreId);
-    if (genre) return t('surprise.reason.genre', { genre });
+    if (genre) return t('surprise.reason.adjacent', { genre: lower(genre), genreIn: trLocative(lead(genre)) });
+  }
+  if (reason.kind === 'wild_card') {
+    if (reason.language === 'ja' && pick.title.genreIds.indexOf(16) >= 0) return t('surprise.reason.wildAnime');
+    if (reason.language && LANGUAGES.indexOf(reason.language) >= 0) {
+      const language = t(`surprise.lang.${reason.language}` as MessageKey);
+      return t(pick.title.type === 'tv' ? 'surprise.reason.wildTv' : 'surprise.reason.wildMovie', { language });
+    }
+    return t('surprise.reason.wild');
   }
   return t('surprise.reason.trending');
 }

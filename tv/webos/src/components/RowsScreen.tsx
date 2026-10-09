@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { Info, Play } from 'lucide-react';
+import { Info, Play, Shuffle } from 'lucide-react';
 import { img } from '../lib/http';
 import { useI18n } from '../lib/i18n';
 import type { Title } from '../lib/catalog';
@@ -19,6 +19,8 @@ interface RowsScreenProps {
   rows: RowDef[];
   /** First data are in: focus can be restored */
   ready: boolean;
+  /** Shows "Surprise me" under the last row (home) */
+  surprise?: boolean;
   /** Called after a Continue Watching item was played */
   onPlayed?: () => void;
 }
@@ -113,7 +115,7 @@ const Hero = memo(function Hero({ featured, kicker, inRows, onOpen, onButtonsFoc
 });
 
 // Home, Movies and TV Shows: a hero with the focused title on top, rows of cards below
-export default function RowsScreen({ tab, featured, kicker, rows, ready, onPlayed }: RowsScreenProps) {
+export default function RowsScreen({ tab, featured, kicker, rows, ready, surprise, onPlayed }: RowsScreenProps) {
   const router = useRouter();
   const player = usePlayer();
   const [inRows, setInRows] = useState(false);
@@ -155,9 +157,31 @@ export default function RowsScreen({ tab, featured, kicker, rows, ready, onPlaye
           {rows.map(r => (
             <Row key={r.id} row={r} onSelectTitle={openTitle} onSelectProgress={playProgress} />
           ))}
+          {surprise && <SurpriseFooter />}
           <div className="rows-end" />
         </div>
       </div>
+    </div>
+  );
+}
+
+// Reached with Down from the last row; the hero explains it while it has focus
+function SurpriseFooter() {
+  const { t } = useI18n();
+  const router = useRouter();
+  const explain = () => setHero({ key: 'surprise', title: t('nav.surprise'), overview: t('surprise.hint'), backdrop: '', facts: [] }, true);
+  return (
+    <div className="rows-footer" data-scroll-anchor>
+      <button
+        type="button"
+        className="btn btn-secondary"
+        data-nav
+        data-nav-id="home-surprise"
+        onFocus={explain}
+        onClick={() => router.push({ name: 'surprise' })}
+      >
+        <Shuffle className="btn-icon" /> {t('nav.surprise')}
+      </button>
     </div>
   );
 }

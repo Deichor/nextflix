@@ -4,12 +4,12 @@ import Spinner from '../components/Spinner';
 import { matchPercent, yearOf } from '../lib/catalog';
 import { genreName, reasonText, surprise, type SurprisePick } from '../lib/discover';
 import { img } from '../lib/http';
-import { useT } from '../lib/i18n';
+import { useI18n } from '../lib/i18n';
 import { useEntryState, useFocusRestore, useRouter } from '../nav/router';
 
 // "Surprise me": one title the profile is likely to enjoy, full screen; "Something else" asks again
 export default function SurpriseScreen() {
-  const t = useT();
+  const { t, locale } = useI18n();
   const router = useRouter();
   // Kept on the entry, so Back from the detail page shows the same pick
   const [pick, setPick] = useEntryState<SurprisePick | null>('pick', null);
@@ -90,7 +90,7 @@ export default function SurpriseScreen() {
             )}
             <div className="surprise-reason">
               <Shuffle className="surprise-reason-icon" />
-              {reasonText(t, pick.reason)}
+              {reasonText(t, locale, pick)}
             </div>
             <div className="hero-facts">{facts.map((f, i) => <span key={i}>{f}</span>)}</div>
             {!!title.overview && <p className="surprise-overview">{title.overview}</p>}

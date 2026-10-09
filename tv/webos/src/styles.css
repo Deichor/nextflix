@@ -501,6 +501,24 @@ p {
   height: 40rem;
 }
 
+/* "Surprise me" under the last row (home). The box reaches one row up (without taking its
+   pointer), so scrolling it to the top keeps the last row visible above the button. */
+.rows-footer {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  margin-top: -20rem;
+  padding: 23rem 0 2rem;
+  pointer-events: none;
+}
+
+.rows-footer .btn {
+  pointer-events: auto;
+  margin-right: 0;
+  padding: 0 3.4rem;
+  border-radius: 2.2rem;
+}
+
 .row {
   padding-bottom: 1rem;
 }
@@ -632,7 +650,7 @@ p {
 .card-instant svg {
   width: 1.5rem;
   height: 1.5rem;
-  fill: #ffd338;
+  fill: #e5e5e5;
 }
 
 /* Focus: a scale (composited) and a static ring on a pseudo-element; no blurred shadow to repaint */
@@ -2269,4 +2287,45 @@ p {
 .surprise-empty {
   font-size: 2rem;
   color: var(--muted);
+}
+
+/* ---- Search completions and corrections ---- */
+
+.search-suggest {
+  margin-top: 1.6rem;
+}
+
+.search-suggest-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0.8rem 1.2rem;
+  font-size: 1.7rem;
+  color: var(--muted);
+  text-align: left;
+  border-radius: 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.search-suggest-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-suggest-item:focus {
+  background: #ffffff;
+  color: #000000;
+}
+
+.search-suggest-icon {
+  width: 1.6rem;
+  height: 1.6rem;
+  margin-right: 1rem;
+  flex-shrink: 0;
+}
+
+.did-you-mean {
+  margin: 0 0 1.2rem;
+  font-size: 1.7rem;
 }

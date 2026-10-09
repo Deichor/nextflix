@@ -102,8 +102,12 @@ const STALL_WINDOW_MS = 60000;
 // A stall counts once playback waited this long (waiting, so under 1 s buffered); shorter ones are hiccups
 const MIN_STALL_MS = 3000;
 const MAX_DOWNGRADES = 2;
-const UPGRADE_POLL_MS = 15000;
+// The first upgrade poll comes soon after the start (a TorBox 4K is often ready at once), then every 10 s
+const UPGRADE_FIRST_MS = 5000;
+const UPGRADE_POLL_MS = 10000;
 const UPGRADE_FOR_MS = 5 * 60 * 1000;
+// An upgrade of another codec family (no splice) this early in playback restarts on it at once
+const UPGRADE_RESTART_MS = 90 * 1000;
 const MAX_LENGTH_RETRIES = 2;
 const SIDEGRADE_FIRST_MS = 8000;
 const SIDEGRADE_POLL_MS = 15000;
@@ -1048,16 +1052,28 @@ export class PlayerEngine {
         const up = await checkUpgrade(paramsOf(this.meta), src.hash, quality);
         if (this.stale(session)) return;
         if (up && releaseHeight(up.quality) > quality && !this.upgraded && !steppedDown()) {
-          // Seamless or not at all: a restart would show the loading screen while playback is fine
-          if (await this.spliceTo(sourceOf(up), 'upgrade', up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher')) {
+          const secs = () => `${Math.round((Date.now() - started) / 1000)} s after the start`;
+          const toast: MessageKey = up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher';
+          console.info(`[upgrade] ${up.hash.slice(0, 8)}${up.debrid ? ' (TorBox)' : ''} offered ${secs()}`);
+          // Seamless where possible: a restart would show the loading screen while playback is fine
+          if (await this.spliceTo(sourceOf(up), 'upgrade', toast)) {
+            console.info(`[upgrade] ${up.hash.slice(0, 8)} spliced ${secs()}`);
             this.upgraded = true;
             return;
           }
           if (this.spliceFail === 'unsupported' && !this.stale(session)) {
-            // Another codec family cannot be spliced on this TV: taken at the next seek (a restart anyway)
-            console.info(`[upgrade] ${up.hash.slice(0, 8)} waits for the next seek (codec change)`);
             this.upgraded = true;
-            this.deferredUpgrade = { src: sourceOf(up), toast: up.quality === '2160p' ? 'player.switchedTo4k' : 'player.switchedHigher' };
+            // Another codec family cannot be spliced on this TV. Early on a short restart onto it beats
+            // the lower quality for the whole title; later it waits for the next seek (a restart anyway)
+            if (Date.now() - started < UPGRADE_RESTART_MS) {
+              console.info(`[upgrade] ${up.hash.slice(0, 8)}: codec change, restarting on it ${secs()}`);
+              this.lastSwitch = Date.now();
+              this.openSource(sourceOf(up), this.positionNow(), 'fresh', 'upgrade');
+              this.toast(toast);
+              return;
+            }
+            console.info(`[upgrade] ${up.hash.slice(0, 8)} waits for the next seek (codec change)`);
+            this.deferredUpgrade = { src: sourceOf(up), toast };
             return;
           }
           if (this.stale(session)) return;
@@ -1065,7 +1081,7 @@ export class PlayerEngine {
       }
       this.pollTimers.push(setTimeout(poll, UPGRADE_POLL_MS));
     };
-    this.pollTimers.push(setTimeout(poll, UPGRADE_POLL_MS));
+    this.pollTimers.push(setTimeout(poll, UPGRADE_FIRST_MS));
   }
 
   // ---- seamless switch (splice into the playing MediaSource) ----

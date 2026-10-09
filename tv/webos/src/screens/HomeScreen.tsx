@@ -98,6 +98,7 @@ export default function HomeScreen() {
       featured={featured}
       rows={rows}
       ready={!!feeds.data || feeds.failed}
+      surprise
       onPlayed={() => {
         invalidate('|cw');
         invalidate('|recs');

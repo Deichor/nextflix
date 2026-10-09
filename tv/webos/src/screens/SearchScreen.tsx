@@ -4,12 +4,13 @@ import Keyboard from '../components/Keyboard';
 import SideNav from '../components/SideNav';
 import Spinner from '../components/Spinner';
 import { CardImage } from '../components/Row';
-import { search, homeFeedsCached, unique, type Title } from '../lib/catalog';
+import { homeFeedsCached, unique, type Title } from '../lib/catalog';
 import {
   GENRE_CHIPS, NO_FILTERS, chipFits, discover, genreName, hasFilters,
   type SearchFilters, type TypeFilter,
 } from '../lib/discover';
 import { img, scoped } from '../lib/http';
+import { searchFiltered, searchRanked, suggestTitles } from '../lib/search';
 import { useT } from '../lib/i18n';
 import { useQuery } from '../lib/useQuery';
 import { useEntryState, useFocusRestore, useRouter } from '../nav/router';
@@ -28,6 +29,8 @@ export default function SearchScreen() {
   const [results, setResults] = useEntryState<Title[] | null>('results', null);
   const [resultsFor, setResultsFor] = useEntryState('resultsFor', '');
   const [pages, setPages] = useEntryState('pages', { page: 1, total: 1 });
+  const [didYouMean, setDidYouMean] = useEntryState('didYouMean', '');
+  const [completions, setCompletions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const moreRef = useRef(false);
   const feeds = useQuery(scoped('feeds'), homeFeedsCached);
@@ -42,16 +45,16 @@ export default function SearchScreen() {
   const wanted = `${q}#${filtersKey(filters)}`;
 
   useEffect(() => {
-    if (!q && !filtered) { setResults(null); setLoading(false); return; }
+    if (!q && !filtered) { setResults(null); setDidYouMean(''); setLoading(false); return; }
     if (wanted === resultsFor && results) return;
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       setLoading(true);
-      const load = filtered
-        ? discover(filters, q, 1, ctrl.signal).then(r => { setPages({ page: 1, total: r.totalPages }); return r.items; })
-        : search(q, ctrl.signal);
+      const load = !q
+        ? discover(filters, '', 1, ctrl.signal).then(r => { setPages({ page: 1, total: r.totalPages }); return { items: r.items, didYouMean: '' }; })
+        : filtered ? searchFiltered(filters, q, ctrl.signal) : searchRanked(q, ctrl.signal);
       load
-        .then(r => { setResults(r); setResultsFor(wanted); })
+        .then(r => { setResults(r.items); setDidYouMean(r.didYouMean); setResultsFor(wanted); })
         .catch(() => { if (!ctrl.signal.aborted) setResults([]); })
         .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
     }, q ? 400 : 150);
@@ -59,6 +62,18 @@ export default function SearchScreen() {
     // setters are stable for this entry
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wanted]);
+
+  // Title completions while typing (server typo index, debounced 150 ms)
+  useEffect(() => {
+    if (q.length < 2) { setCompletions([]); return; }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      suggestTitles(q, ctrl.signal)
+        .then(list => setCompletions(list.filter(s => s.toLowerCase() !== q.toLowerCase())))
+        .catch(() => { if (!ctrl.signal.aborted) setCompletions([]); });
+    }, 150);
+    return () => { clearTimeout(timer); ctrl.abort(); };
+  }, [q]);
 
   const loadMore = () => {
     if (!browsing || moreRef.current || !results || pages.page >= pages.total || resultsFor !== wanted) return;
@@ -111,6 +126,23 @@ export default function SearchScreen() {
           <span className="caret" />
         </div>
         <Keyboard layout="search" value={query} onChange={setQuery} max={60} />
+        {completions.length > 0 && (
+          <div className="search-suggest" data-nav-group="search-suggest">
+            {completions.map((s, i) => (
+              <button
+                key={`suggest-${i}`}
+                type="button"
+                className="search-suggest-item"
+                data-nav
+                data-nav-id={`suggest-${i}`}
+                onClick={() => setQuery(s)}
+              >
+                <Search className="search-suggest-icon" />
+                <span>{s}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="search-results" data-scroll-y="edge" data-scroll-pad="3">
         <div data-scroll-content>
@@ -159,6 +191,17 @@ export default function SearchScreen() {
             </div>
           </div>
           <div key={wanted}>
+            {!!q && !!didYouMean && !loading && (
+              <button
+                type="button"
+                className="chip did-you-mean"
+                data-nav
+                data-nav-id="did-you-mean"
+                onClick={() => setQuery(didYouMean)}
+              >
+                {t('search.didYouMean', { title: didYouMean })}
+              </button>
+            )}
             <h2 className="row-title">{heading}</h2>
             {(loading || !shown) && <Spinner className="search-spinner" />}
             {!!shown && shown.length === 0 && !loading && (
