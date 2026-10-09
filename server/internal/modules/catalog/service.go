@@ -25,10 +25,16 @@ type Service struct {
 
 	searchMu sync.Mutex
 	searches map[string]searchEntry
+	index    *TitleIndex // typo index (empty until loaded)
+	taste    tasteCache
+	local    localCache // watch and rating signals of every profile (browse ranking)
+
+	homeRelease HomeReleaseFinder // nil = TMDB dates only
 }
 
 func NewService(tm *tmdb.Client) *Service {
-	return &Service{tm: tm, seasons: map[string]seasonEntry{}, searches: map[string]searchEntry{}}
+	return &Service{tm: tm, seasons: map[string]seasonEntry{}, searches: map[string]searchEntry{},
+		index: newEmptyIndex()}
 }
 
 // Season returns a TMDB season with its episodes in lang ("en" or "tr"), cached for 6 hours.

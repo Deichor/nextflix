@@ -115,12 +115,12 @@ func TestSearchFiltered(t *testing.T) {
 	s := NewService(tmdb.New(""))
 	noArt := result("movie", 4, "ja", 16)
 	noArt.PosterPath = ""
-	s.searches["en|ghost"] = searchEntry{expires: time.Now().Add(time.Hour), results: []tmdb.SearchResult{
+	s.searches["en|5|ghost"] = searchEntry{expires: time.Now().Add(time.Hour), results: []tmdb.SearchResult{
 		result("tv", 1, "ja", 16, 10765),
 		result("movie", 2, "ja", 16, 878),
 		result("movie", 3, "en", 16, 878),
 	}}
-	res, err := s.SearchFiltered(tmdb.New(""), "Ghost", Filter{Type: "all", Anime: true, Genres: []int{878}})
+	res, err := s.RankedSearch(tmdb.New(""), "Ghost", Filter{Type: "all", Anime: true, Genres: []int{878}}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

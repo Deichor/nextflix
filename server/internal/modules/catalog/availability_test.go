@@ -2,7 +2,9 @@ package catalog
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -153,6 +155,83 @@ func TestAvailabilityHandler(t *testing.T) {
 			if v, ok := body[k]; !ok || v != nil {
 				t.Errorf("%s: %s = %v (present %v), want null", tc.url, k, v, ok)
 			}
+		}
+	}
+}
+
+type fakeHomeRelease struct {
+	found map[int]bool
+	asked []int
+}
+
+func (f *fakeHomeRelease) HomeReleaseOut(id int) bool {
+	f.asked = append(f.asked, id)
+	return f.found[id]
+}
+
+// A film TMDB lists as in cinemas whose home release is on the indexers is available; one
+// with cinema recordings only stays in_theaters. Films not worth a search are not searched.
+func TestAvailabilityWithHomeRelease(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Now()
+	day := func(d int) string { return localDay(now.AddDate(0, 0, d)) }
+	rd := func(typ int, date string) tmdb.ReleaseDate {
+		return tmdb.ReleaseDate{Country: "US", Type: typ, Date: date}
+	}
+	s := NewService(tmdb.New(""))
+	f := &fakeHomeRelease{found: map[int]bool{1368337: true}}
+	s.SetHomeReleaseFinder(f)
+	s.releaseDatesCache.items = map[int]releaseDatesEntry{}
+	for id, dates := range map[int][]tmdb.ReleaseDate{
+		1368337: {rd(tmdb.ReleaseTheatrical, day(-86)), rd(tmdb.ReleaseDigital, day(39))}, // The Odyssey
+		7:       {rd(tmdb.ReleaseTheatrical, day(-3))},                                    // cam rips only
+		8:       {rd(tmdb.ReleaseTheatrical, day(30))},                                    // in cinemas next month
+		9:       {rd(tmdb.ReleaseDigital, day(-30))},                                      // out
+	} {
+		s.releaseDatesCache.items[id] = releaseDatesEntry{dates: dates, expires: now.Add(time.Hour)}
+	}
+	r := gin.New()
+	Register(r.Group("/api"), s)
+	get := func(id int) map[string]any {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/api/availability?media_type=movie&tmdb_id="+strconv.Itoa(id), nil))
+		var body map[string]any
+		json.Unmarshal(w.Body.Bytes(), &body)
+		return body
+	}
+
+	b := get(1368337)
+	if b["status"] != StatusAvailable || b["digital_release_found"] != true || b["release_date"] != day(-86) || b["digital_date"] != day(39) {
+		t.Fatalf("odyssey: %v", b)
+	}
+	if b = get(7); b["status"] != StatusInTheaters || b["digital_release_found"] != nil {
+		t.Fatalf("cinema only: %v", b)
+	}
+	if b = get(8); b["status"] != StatusNotReleased {
+		t.Fatalf("upcoming: %v", b)
+	}
+	if b = get(9); b["status"] != StatusAvailable || b["digital_release_found"] != nil {
+		t.Fatalf("out: %v", b)
+	}
+	if fmt.Sprint(f.asked) != "[1368337 7]" {
+		t.Fatalf("searched %v", f.asked)
+	}
+
+	today := day(0)
+	for _, c := range []struct {
+		a    Availability
+		want bool
+	}{
+		{Availability{Status: StatusInTheaters}, true},
+		{Availability{Status: StatusNotReleased}, true}, // a festival premiere only
+		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(-1))}, true},
+		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(5)), DigitalDate: ptr(day(5))}, true},
+		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(5))}, false},
+		{Availability{Status: StatusAvailable}, false},
+		{Availability{Status: StatusUnknown}, false},
+	} {
+		if got := homeReleaseWorth(c.a, today); got != c.want {
+			t.Errorf("%s %s/%s: %v", c.a.Status, str(c.a.ReleaseDate), str(c.a.DigitalDate), got)
 		}
 	}
 }

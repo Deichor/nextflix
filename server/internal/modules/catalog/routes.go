@@ -13,6 +13,7 @@ func Register(api *gin.RouterGroup, s *Service) {
 	api.GET("/availability", s.availability)
 
 	api.GET("/catalog/discover", s.discover)
+	api.GET("/catalog/suggest", s.suggest)
 
 	api.GET("/tmdb/search", s.search)
 	api.GET("/tmdb/suggestions", s.suggestions)

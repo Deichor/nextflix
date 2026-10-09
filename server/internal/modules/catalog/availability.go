@@ -35,6 +35,9 @@ type Availability struct {
 	ReleaseDate    *string `json:"release_date"`
 	TheatricalDate *string `json:"theatrical_date"`
 	DigitalDate    *string `json:"digital_date"`
+	// A film TMDB lists as in cinemas (or not out) whose home release is already on the
+	// indexers: Status is available
+	DigitalReleaseFound bool `json:"digital_release_found,omitempty"`
 }
 
 var istanbul = func() *time.Location {
@@ -237,6 +240,39 @@ func (s *Service) releaseDates(movieID int) ([]tmdb.ReleaseDate, error) {
 	return dates, nil
 }
 
+// HomeReleaseFinder tells whether a home (non-cinema) release of a movie is already on the
+// indexers; TMDB's digital dates often lag the real ones. streaming implements it (wired in
+// main.go). It answers false when it found only cinema recordings or cannot tell in time.
+type HomeReleaseFinder interface {
+	HomeReleaseOut(tmdbID int) bool
+}
+
+// SetHomeReleaseFinder is called once at startup, before the server answers requests.
+func (s *Service) SetHomeReleaseFinder(f HomeReleaseFinder) { s.homeRelease = f }
+
+// homeReleaseWorth: a movie TMDB does not count as out whose home release may already exist:
+// in cinemas, or not released with a release date that has passed (or none) or a digital
+// date ahead. A film whose cinema release is still ahead is not searched.
+func homeReleaseWorth(a Availability, today string) bool {
+	switch a.Status {
+	case StatusInTheaters:
+		return true
+	case StatusNotReleased:
+		return a.ReleaseDate == nil || *a.ReleaseDate <= today || (a.DigitalDate != nil && *a.DigitalDate > today)
+	}
+	return false
+}
+
+// withHomeRelease turns a movie that is not out by TMDB's dates into an available one when
+// its home release is on the indexers.
+func (s *Service) withHomeRelease(tmdbID int, a Availability, today string) Availability {
+	if s.homeRelease == nil || !homeReleaseWorth(a, today) || !s.homeRelease.HomeReleaseOut(tmdbID) {
+		return a
+	}
+	a.Status, a.ReleaseDate, a.DigitalReleaseFound = StatusAvailable, a.TheatricalDate, true
+	return a
+}
+
 // Availability of a movie, a show (season and episode 0), a season (episode 0) or an
 // episode. TMDB failures give unknown, which never blocks playback.
 func (s *Service) Availability(mediaType string, tmdbID, season, episode int) Availability {
@@ -256,7 +292,7 @@ func (s *Service) Availability(mediaType string, tmdbID, season, episode int) Av
 				primary = d.ReleaseDate
 			}
 		}
-		return movieAvailability(dates, primary, now)
+		return s.withHomeRelease(tmdbID, movieAvailability(dates, primary, now), today)
 	case "tv":
 		if season <= 0 && episode <= 0 {
 			d, err := s.tm.GetTVDetails(tmdbID)

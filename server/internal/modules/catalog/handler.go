@@ -27,7 +27,8 @@ func fail(c *gin.Context, status int, msg string, err error) {
 	c.JSON(status, gin.H{"error": msg, "details": err.Error()})
 }
 
-// GET /api/tmdb/search?q=&type=multi|movie|tv&page=
+// GET /api/tmdb/search?q=&type=multi|movie|tv&page= – multi (default) is ranked by RankedSearch
+// (one page, did_you_mean on typos); movie and tv pass TMDB's answer through.
 func (s *Service) search(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
@@ -52,7 +53,12 @@ func (s *Service) search(c *gin.Context) {
 		}
 		c.JSON(http.StatusOK, res)
 	default:
-		res, err := s.client(c).SearchMulti(query, page)
+		// Ranked: every result is on page 1
+		if page > 1 {
+			c.JSON(http.StatusOK, DiscoverPage{Page: page, TotalPages: 1, Results: []tmdb.SearchResult{}})
+			return
+		}
+		res, err := s.RankedSearch(s.client(c), query, Filter{Type: "all"}, httpserver.ProfileID(c))
 		if err != nil {
 			fail(c, http.StatusInternalServerError, "Failed to search TMDB", err)
 			return
@@ -61,14 +67,14 @@ func (s *Service) search(c *gin.Context) {
 	}
 }
 
-// GET /api/tmdb/suggestions?q= – top 5 multi-search hits for autocomplete.
+// GET /api/tmdb/suggestions?q= – the 5 best ranked search results for the navbar dropdown.
 func (s *Service) suggestions(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
 		c.JSON(http.StatusOK, gin.H{"results": []any{}, "total_results": 0})
 		return
 	}
-	res, err := s.client(c).SearchMulti(query, 1)
+	res, err := s.RankedSearch(s.client(c), query, Filter{Type: "all"}, httpserver.ProfileID(c))
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to get suggestions", err)
 		return
@@ -77,7 +83,7 @@ func (s *Service) suggestions(c *gin.Context) {
 	if len(results) > 5 {
 		results = results[:5]
 	}
-	c.JSON(http.StatusOK, gin.H{"results": results, "total_results": len(results)})
+	c.JSON(http.StatusOK, gin.H{"results": results, "total_results": len(results), "did_you_mean": res.DidYouMean})
 }
 
 // detailsMap converts details to a JSON map and adds genre_names when genres are present.

@@ -21,8 +21,6 @@ const (
 	animeLanguage  = "ja"
 	// TMDB answers at most 500 pages
 	maxDiscoverPages = 500
-	// A search with filters reads this many TMDB search pages (20 results each)
-	searchPages      = 5
 	searchCacheTTL   = 15 * time.Minute
 	searchCacheMax   = 200
 	minDiscoverVotes = "10"
@@ -161,6 +159,8 @@ type DiscoverPage struct {
 	TotalPages   int                 `json:"total_pages"`
 	TotalResults int                 `json:"total_results"`
 	Results      []tmdb.SearchResult `json:"results"`
+	// A search only: the corrected query whose results were merged in (typo)
+	DidYouMean string `json:"did_you_mean,omitempty"`
 }
 
 // usable drops adult titles and titles without any artwork.
@@ -182,9 +182,9 @@ func mergeByPopularity(lists ...[]tmdb.SearchResult) []tmdb.SearchResult {
 	return out
 }
 
-// Browse lists titles of the filter through TMDB discover (by popularity). With type "all",
-// a page holds the movie page and the TV page of that number.
-func (s *Service) Browse(tm *tmdb.Client, f Filter, page int) (*DiscoverPage, error) {
+// browsePopular lists titles of the filter through TMDB discover (by popularity). With type
+// "all", a page holds the movie page and the TV page of that number.
+func (s *Service) browsePopular(tm *tmdb.Client, f Filter, page int) (*DiscoverPage, error) {
 	page = min(max(page, 1), maxDiscoverPages)
 	var (
 		wg                sync.WaitGroup
@@ -247,10 +247,11 @@ type searchEntry struct {
 	expires time.Time
 }
 
-// searchPool returns the first TMDB multi-search pages of query (people dropped), in TMDB's
-// order and cached for 15 minutes per language, so changing filters does not search again.
-func (s *Service) searchPool(tm *tmdb.Client, query string) ([]tmdb.SearchResult, error) {
-	key := tm.Lang() + "|" + strings.ToLower(query)
+// searchPool returns the first n TMDB multi-search pages of query (people and titles without
+// artwork dropped), in TMDB's order and cached for 15 minutes per language, so changing
+// filters does not search again. The pages are asked at once; only page 1 must answer.
+func (s *Service) searchPool(tm *tmdb.Client, query string, n int) ([]tmdb.SearchResult, error) {
+	key := tm.Lang() + "|" + strconv.Itoa(n) + "|" + strings.ToLower(query)
 	now := time.Now()
 	s.searchMu.Lock()
 	if e, ok := s.searches[key]; ok && now.Before(e.expires) {
@@ -259,26 +260,28 @@ func (s *Service) searchPool(tm *tmdb.Client, query string) ([]tmdb.SearchResult
 	}
 	s.searchMu.Unlock()
 
-	first, err := tm.SearchMulti(query, 1)
-	if err != nil {
-		return nil, err
-	}
-	pages := make([][]tmdb.SearchResult, min(max(first.TotalPages, 1), searchPages))
-	pages[0] = first.Results
+	pages := make([][]tmdb.SearchResult, n)
+	errs := make([]error, n)
 	var wg sync.WaitGroup
-	for p := 2; p <= len(pages); p++ {
+	for p := 1; p <= n; p++ {
 		wg.Add(1)
 		go func(p int) {
 			defer wg.Done()
 			res, err := tm.SearchMulti(query, p)
 			if err != nil {
-				log.Printf("catalog: search %q page %d: %v", query, p, err)
+				errs[p-1] = err
+				if p > 1 {
+					log.Printf("catalog: search %q page %d: %v", query, p, err)
+				}
 				return
 			}
 			pages[p-1] = res.Results
 		}(p)
 	}
 	wg.Wait()
+	if errs[0] != nil {
+		return nil, errs[0]
+	}
 
 	seen := map[string]bool{}
 	var out []tmdb.SearchResult
@@ -292,6 +295,7 @@ func (s *Service) searchPool(tm *tmdb.Client, query string) ([]tmdb.SearchResult
 			out = append(out, r)
 		}
 	}
+	s.learnTitles(tm.Lang(), out)
 
 	s.searchMu.Lock()
 	if len(s.searches) >= searchCacheMax {
@@ -300,21 +304,6 @@ func (s *Service) searchPool(tm *tmdb.Client, query string) ([]tmdb.SearchResult
 	s.searches[key] = searchEntry{results: out, expires: now.Add(searchCacheTTL)}
 	s.searchMu.Unlock()
 	return out, nil
-}
-
-// SearchFiltered searches query and keeps the results that pass the filter (one page).
-func (s *Service) SearchFiltered(tm *tmdb.Client, query string, f Filter) (*DiscoverPage, error) {
-	pool, err := s.searchPool(tm, query)
-	if err != nil {
-		return nil, err
-	}
-	out := []tmdb.SearchResult{}
-	for _, r := range pool {
-		if f.Match(r) {
-			out = append(out, r)
-		}
-	}
-	return &DiscoverPage{Page: 1, TotalPages: 1, TotalResults: len(out), Results: out}, nil
 }
 
 // GET /api/catalog/discover?type=all|movie|tv&genres=16,878&anime=1&q=&page=
@@ -331,9 +320,9 @@ func (s *Service) discover(c *gin.Context) {
 			c.JSON(http.StatusOK, DiscoverPage{Page: pageParam(c), TotalPages: 1, Results: []tmdb.SearchResult{}})
 			return
 		}
-		res, err = s.SearchFiltered(tm, query, f)
+		res, err = s.RankedSearch(tm, query, f, httpserver.ProfileID(c))
 	} else {
-		res, err = s.Browse(tm, f, pageParam(c))
+		res, err = s.Browse(tm, f, pageParam(c), httpserver.ProfileID(c))
 	}
 	if err != nil {
 		log.Printf("catalog: discover (lang %s): %v", httpserver.Lang(c), err)
