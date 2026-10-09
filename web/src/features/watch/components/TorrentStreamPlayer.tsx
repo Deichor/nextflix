@@ -2521,7 +2521,12 @@ function PlayerCore({
 
   // The end credits started: count down to the next episode while they play
   useEffect(() => {
-    if (skip !== 'credits') { creditsDismissedRef.current = false; return; }
+    if (skip !== 'credits') {
+      creditsDismissedRef.current = false;
+      // Seeked back out of the credits (or away from the end): no next episode countdown
+      if (!ended && countdown !== null) setCountdown(null);
+      return;
+    }
     if (!onNext || ended || countdown !== null || creditsDismissedRef.current || !playing) return;
     if (readPlayerPrefs(getActiveProfileId()).autoplayNext === false) return;
     setCountdownAt('credits');

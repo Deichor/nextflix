@@ -12,6 +12,7 @@ import (
 	"nextflix/internal/modules/catalog"
 	"nextflix/internal/modules/images"
 	"nextflix/internal/modules/notifications"
+	"nextflix/internal/modules/playbacklog"
 	"nextflix/internal/modules/profiles"
 	"nextflix/internal/modules/progress"
 	"nextflix/internal/modules/providers"
@@ -98,6 +99,7 @@ func run() error {
 	catalogSvc.SetRatings(searchRatings(ratingsSvc))
 	ratingsSvc.OnChange(catalogSvc.InvalidateTaste)
 	catalogSvc.SetLocalSignals(localSignals(profilesSvc, progressSvc, ratingsSvc))
+	progressSvc.SetNextEpisode(catalogSvc.NextEpisode)
 	recommendationsSvc.SetSimilar(similarTitles(catalogSvc))
 
 	imagesSvc := images.NewService(images.Config{
@@ -165,6 +167,7 @@ func run() error {
 	streaming.Register(api, streamingSvc)
 	subtitles.Register(api, subtitlesSvc)
 	segments.Register(api, segmentsSvc)
+	playbacklog.Register(api, playbacklog.NewService(os.Getenv("PLAYBACK_LOG_DIR")))
 
 	log.Printf("Nextflix server listening on :%s", cfg.Port)
 	if err := httpserver.Run(ctx, r, cfg.Port); err != nil {

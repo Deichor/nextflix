@@ -20,6 +20,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - TORRSERVER_URL=http://torrserver:8090
       - TV_APP_DIR=/app/tv
+      # TV playback diagnostics, one file per day kept 14 days (scripts/playback-log.sh)
+      - PLAYBACK_LOG_DIR=/app/data/playback-logs
       - JACKETT_URL=http://jackett:9117
     volumes:
       # SQLite lives in a named volume (WAL/mmap is unreliable on /mnt/c bind mounts)

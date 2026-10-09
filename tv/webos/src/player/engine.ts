@@ -17,6 +17,7 @@ import { BufferMonitor, bufferedEnd, type BufferVerdict } from './bufferHealth';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuffer';
 import { lengthsMatch, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
+import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
 // The stream is a live fragmented MP4 requested at `t` that really starts at `offset`
@@ -274,6 +275,8 @@ export class PlayerEngine {
   private saveTimer: ReturnType<typeof setInterval>;
   private countdownTimer?: ReturnType<typeof setInterval>;
   private toastTimer?: Timer;
+  // Playback diagnostics (playbackLog.ts); null when switched off
+  private plog: PlaybackLog | null = null;
 
   constructor(video: HTMLVideoElement, req: PlayRequest, locale: Locale) {
     this.video = video;
@@ -313,6 +316,7 @@ export class PlayerEngine {
       next: null,
     };
     this.bindVideo();
+    this.plog = PlaybackLog.create(video, () => this.positionNow(), () => this.logContext());
     this.saveTimer = setInterval(() => { if (this.state.playing) this.persist(); }, 10000);
     this.healthTimer = setInterval(() => this.sampleHealth(), 1000);
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -366,6 +370,16 @@ export class PlayerEngine {
 
   private stale(session: number) {
     return this.destroyed || session !== this.session;
+  }
+
+  private logContext(): LogContext {
+    const m = this.meta;
+    return {
+      type: m.media_type, tmdb: m.tmdb_id, s: m.season, e: m.episode, title: m.title,
+      src: this.hash ? `${this.hash.slice(0, 8)}:${this.index}` : '',
+      mode: this.splitMode ? 'split' : this.noMse ? 'src' : 'muxed',
+      debrid: !!this.source?.debrid, q: this.state.quality?.label || '', dur: Math.round(this.state.duration),
+    };
   }
 
   // ---- item: resolve the source ----
@@ -466,6 +480,9 @@ export class PlayerEngine {
 
   private async openSource(src: StreamSource, startAt: number, origin: Origin, reason = 'open') {
     const prev = this.source && this.source.hash.toLowerCase() !== src.hash.toLowerCase() ? { src: this.source, origin: this.origin, duration: this.state.duration } : null;
+    // Sent first: queued events belong to the previous source's context
+    this.plog?.flush();
+    this.plog?.note('open', { why: reason, origin, to: `${src.hash.slice(0, 8)}:${src.index}`, at: startAt, debrid: !!src.debrid });
     this.stopStream();
     const session = ++this.session;
     // Counted from the open: a slow probe (the header from a weak swarm) counts too
@@ -628,6 +645,7 @@ export class PlayerEngine {
     this.detach();
     const split = this.wantsSplit(this.state.audioTracks, this.state.audio);
     console.info(`[restart] ${reason} t=${target.toFixed(1)} ${this.hash.slice(0, 8)}:${this.index} ${split ? 'split' : this.noMse ? 'src' : 'muxed'}`);
+    this.plog?.note('restart', { why: reason, at: target, mode: split ? 'split' : this.noMse ? 'src' : 'muxed', recoveries: this.recoveries });
     // Split streams carry the file's timestamps: position = currentTime
     this.splitMode = split;
     this.offset = split ? 0 : target;
@@ -688,6 +706,7 @@ export class PlayerEngine {
             return;
           }
           if (isNaN(t)) console.info(`[restart] no seek point for t=${target.toFixed(1)}: positions may be off by a keyframe interval`);
+          this.plog?.note('seekpoint', { at: target, fix: isNaN(t) ? 'none' : t - target, attempt });
           this.offset = isNaN(t) ? target : t;
           this.exact = true;
         });
@@ -740,6 +759,7 @@ export class PlayerEngine {
   private onStreamFail(seq: number, e: MseFailure) {
     if (seq !== this.seekSeq || this.destroyed || this.state.phase !== 'ready') return;
     console.warn('[player] stream failed:', e.message);
+    this.plog?.note('stream-fail', { msg: String(e.message).slice(0, 60), played: this.hasPlayed });
     this.mse = null;
     if (this.hasPlayed) {
       this.recover();
@@ -816,6 +836,7 @@ export class PlayerEngine {
     const duration = this.state.duration;
     // The stream ended well before the file did: ffmpeg or TorrServer dropped it
     if (duration > 0 && this.positionNow() < duration - 30) {
+      this.plog?.note('early-end');
       this.recover();
       return;
     }
@@ -828,6 +849,7 @@ export class PlayerEngine {
 
   private onError() {
     if (!this.video.getAttribute('src') || this.state.phase !== 'ready') return;
+    this.plog?.note('error', { code: this.video.error?.code ?? 0, played: this.hasPlayed });
     if (this.hasPlayed) {
       this.recover();
       return;
@@ -863,6 +885,7 @@ export class PlayerEngine {
     this.stallConfirmTimer = setTimeout(() => {
       if (seq !== this.seekSeq || this.destroyed || !this.hasPlayed || v.ended || (v.paused && !this.hold)) return;
       if (v.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && v.currentTime > from) return;
+      this.plog?.note('buffering', { rs: v.readyState, seeking: v.seeking });
       this.set({ buffering: true });
       if (!v.seeking && !this.hold) this.startHold('stall');
     }, STALL_CONFIRM_MS);
@@ -874,6 +897,7 @@ export class PlayerEngine {
   private startHold(kind: HoldKind) {
     this.clearHold();
     this.hold = { kind, since: kind === 'stall' ? Date.now() : null, ahead: 0 };
+    this.plog?.note('hold', { kind });
     this.set({ holding: true });
     const v = this.video;
     v.preload = 'auto'; // keep downloading while paused
@@ -909,6 +933,7 @@ export class PlayerEngine {
       atEnd: dur > 0 && end >= 0 && this.offset + end >= dur - 1,
     });
     if (!done) return;
+    this.plog?.note('hold-end', { kind: h.kind, ahead, waited: h.since === null ? 0 : now - h.since });
     this.clearHold();
     v.play().catch(e => { if (e?.name !== 'AbortError') this.set({ playing: false }); });
   }
@@ -1054,6 +1079,7 @@ export class PlayerEngine {
     poll.next = now + poll.delay;
     poll.delay = Math.min(PROACTIVE_POLL_MAX_MS, poll.delay * 1.5);
     console.info(`[health] ${h.state} ahead=${h.ahead.toFixed(1)} growth=${h.growth === null ? '-' : h.growth.toFixed(2)}`);
+    this.plog?.note('health', { state: h.state, ahead: h.ahead, growth: h.growth ?? undefined });
     this.askSidegrade(h.state === 'critical' ? 'critical' : 'draining');
   }
 
@@ -1257,10 +1283,12 @@ export class PlayerEngine {
     const res = await mse.splice(urls, tsOffset, t0 - this.offset, readyS);
     if (!res.ok) {
       console.info(`[splice] ${reason} dropped: ${res.reason}`);
+      this.plog?.note('splice-drop', { why: reason, res: res.reason });
       this.spliceFail = res.reason;
       return null;
     }
     console.info(`[splice] ${reason} committed at ${(res.cut + this.offset).toFixed(2)} (now ${this.positionNow().toFixed(2)}) ${mse.mime}`);
+    this.plog?.note('splice', { why: reason, to: `${hash.slice(0, 8)}:${index}`, audio: n, cut: res.cut + this.offset });
     return res.cut;
   }
 
@@ -1361,6 +1389,7 @@ export class PlayerEngine {
         return;
       }
       console.info(`[splice] ${reason} ${passed ? 'done' : 'not reached'} at ${this.positionNow().toFixed(2)} ${v.videoWidth}x${v.videoHeight} frames=${frames() - frames0}`);
+      this.plog?.note('splice-end', { why: reason, ok: passed, ms: Date.now() - started, frames: frames() - frames0 });
       if (old && old !== this.current) {
         releaseTorrents([old]);
         this.played.delete(old);
@@ -1399,7 +1428,8 @@ export class PlayerEngine {
     if (!this.video.paused) this.video.pause();
   }
 
-  seekTo(t: number) {
+  /** `why` names the seek in the playback log (user, skip-intro ...) */
+  seekTo(t: number, why = 'user') {
     const duration = this.state.duration;
     if (!this.hash || duration <= 0) return;
     const target = Math.max(0, Math.min(duration - 1, t));
@@ -1407,6 +1437,7 @@ export class PlayerEngine {
     const rel = target - this.offset;
     // Already buffered: seek in place, no new stream
     if (!this.state.ended && rel >= 0 && inRanges(v.buffered, rel, 0.5) && inRanges(v.seekable, rel, 0)) {
+      markSeek(why);
       v.currentTime = rel;
       if (Math.abs(v.currentTime - rel) < 1) {
         this.set({ position: target });
@@ -1421,7 +1452,7 @@ export class PlayerEngine {
       this.toast(up.toast);
       return;
     }
-    this.restartAt(target, 'seek');
+    this.restartAt(target, why === 'user' ? 'seek' : `seek ${why}`);
   }
 
   // Atmos only when the track is copied (muxed, or on its own in split mode); converted audio is 5.1 at most
@@ -1459,6 +1490,8 @@ export class PlayerEngine {
     this.set({ subId: id, cues: [] });
     if (!id) return;
     const session = this.session;
+    let loads = 0;
+    let wasPartial = false;
     // A live embedded track (big file) is read from the playing position on: ask again while it grows
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
       if (this.stale(session) || this.state.subId !== id) return;
@@ -1469,6 +1502,14 @@ export class PlayerEngine {
         if (alt) this.applySubtitle(alt);
         return;
       }
+      // The first cues, and the final file replacing a partial one (live track done, or timed to the file)
+      if (loads++ === 0 || (wasPartial && !f.partial)) {
+        const prev = this.state.cues[0]?.start;
+        const first = f.cues[0]?.start;
+        this.plog?.note(loads === 1 ? 'subs' : 'subs-swap', { id: id.slice(0, 12), cues: f.cues.length, partial: f.partial,
+          shift: prev !== undefined && first !== undefined ? first - prev : undefined });
+      }
+      wasPartial = f.partial;
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
       if (f.partial) this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
     });
@@ -1673,6 +1714,8 @@ export class PlayerEngine {
     if (!next) return;
     // Leaving from the end credits: this episode counts as watched
     if (opts.fromCredits && !this.state.ended) this.persist({ finished: true });
+    this.plog?.note('next', { credits: !!opts.fromCredits });
+    this.plog?.flush();
     this.stopCountdown();
     if (this.deferredUpgrade) {
       releaseTorrents([this.deferredUpgrade.src.hash.toLowerCase()]);
@@ -1757,6 +1800,9 @@ export class PlayerEngine {
   destroy() {
     if (this.destroyed) return;
     this.persist();
+    this.plog?.note('exit');
+    this.plog?.destroy();
+    this.plog = null;
     this.destroyed = true;
     this.cancelResolve();
     this.stopStream();

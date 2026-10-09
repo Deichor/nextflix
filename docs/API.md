@@ -54,7 +54,7 @@ Progress:
 | Method | Path | Notes |
 |---|---|---|
 | PUT | `/api/stream-progress` | body = Progress without `id`/`updated_at` → 200 Progress. Upsert key `(profile_id, media_type, tmdb_id, season, episode)`; movies use season 0, episode 0 |
-| GET | `/api/stream-progress?profile_id=` | Continue Watching row: newest first, one entry per title, finished entries (>= 92 %) excluded, max 20 |
+| GET | `/api/stream-progress?profile_id=` | Continue Watching row: newest first, one entry per title, finished entries (>= 92 %) excluded; a show whose newest episode is finished shows the next aired episode instead (its saved row, or a new one with `id` 0 and position 0), max 20 |
 | GET | `/api/stream-progress/item?profile_id=&media_type=&tmdb_id=&season=&episode=` | 200 Progress or 404 |
 | GET | `/api/stream-progress/title?profile_id=&media_type=tv&tmdb_id=` | every entry of one title for the profile, finished ones included (per-episode progress bars) |
 | DELETE | `/api/stream-progress?profile_id=&media_type=&tmdb_id=` | 204; removes all episodes of that title |
@@ -627,3 +627,11 @@ is timed to it; the ids stay the same for the same file.
 
 Files are converted to UTF-8 WebVTT once and cached forever under `/app/data/subtitles` (`SUBTITLE_CACHE_DIR`), keyed by
 provider and file id, so a cached file never counts against a provider quota again.
+
+## Playback log (`modules/playbacklog`)
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/playback-log` | Playback diagnostics from the TV player, written to the server log and to daily files under `PLAYBACK_LOG_DIR` (UTC, kept 14 days, at most 50 MB a day). JSON body (any content type; the TV sends `text/plain` to skip the CORS preflight), at most 32 KB: `{sid, seq, client, ctx: {type, tmdb, s, e, title, src: "<hash8>:<index>", mode: muxed\|split\|src, debrid, q, dur}, dropped, events: [{t: <epoch ms>, k: <kind>, p: <file position s>, x: {<field>: number\|string\|bool}}]}`, at most 200 events. One `playback: <sid> <client> #<seq> ...` header line plus one line per event; invalid events are skipped, strings are reduced to safe tokens. 204; 400 bad shape, 413 too big, 429 more than a burst of 8 batches, then one per 4 s, per client IP |
+
+Event kinds (`tv/webos/src/player/playbackLog.ts`, engine): `wait` (a `waiting` until it played again: `d` ms, `end`, buffered `ahead`, `rs` readyState, `ns` networkState, `seeking`, `start`), `freeze` (media time fell behind the wall clock by `ms` without a `waiting`), `jump` (position moved by `by` s without a seek), `drops` (over 5 frames dropped in ~2 s), `late` (the 250 ms timer fired `ms` late: a long main-thread task), `stalled`, `seek` (`why`: `user`, `skip-intro`, `gap`, `align-start`, `align-split`, `splice-stuck` or `unmarked`), `restart` / `open` (`why`), `seekpoint` (`fix`), `buffering`, `hold` / `hold-end`, `health`, `splice` / `splice-end` / `splice-drop`, `subs` / `subs-swap`, `stream-fail`, `error`, `early-end`, `ended`, `next`, `exit`, `quota` (a SourceBuffer was full), `ranges` (each SourceBuffer's ranges near the playhead at a `waiting`), and a `summary` every 60 s (`ahead_min`, `ahead_avg`, `dropped`, `decoded`, `waits`, `freezes`, `jumps`, `late`, `late_max`). Batches go every 30 s and on pause, end, next episode and exit (`keepalive`). Off: `PLAYBACK_LOG = false` in `playbackLog.ts`, or localStorage `nfx-tv:playback-log` = `off` on the TV. Read with `scripts/playback-log.sh [days] [filter]` (e.g. `2 S02E09`).

@@ -9,13 +9,20 @@ import (
 	"gorm.io/gorm"
 )
 
+// NextEpisodeFunc gives the episode after season/episode of a show when it is out.
+type NextEpisodeFunc func(tvID, season, episode int) (int, int, bool)
+
 type Service struct {
-	db *gorm.DB
+	db   *gorm.DB
+	next NextEpisodeFunc
 }
 
 func NewService(db *gorm.DB) *Service {
 	return &Service{db: db}
 }
+
+// SetNextEpisode lets Continue Watching offer the next episode of a finished one.
+func (s *Service) SetNextEpisode(f NextEpisodeFunc) { s.next = f }
 
 var (
 	ErrNotFound       = errors.New("No progress found")
@@ -47,13 +54,21 @@ func (s *Service) Save(row StreamProgress) (*StreamProgress, error) {
 	return findByKey(s.db, row.ProfileID, row.MediaType, row.TmdbID, row.Season, row.Episode)
 }
 
-// ContinueWatching returns the newest unfinished entry per title, newest first.
+// ContinueWatching returns the newest unfinished entry per title, newest first. A show whose
+// newest episode is finished comes with the next episode instead (its saved position, if any).
 func (s *Service) ContinueWatching(profileID uint) ([]StreamProgress, error) {
 	rows, err := listByProfile(s.db, profileID, 1000)
 	if err != nil {
 		return nil, err
 	}
-	// The newest entry decides for each title; a finished one hides the title
+	saved := make(map[string]StreamProgress, len(rows))
+	for _, r := range rows {
+		key := fmt.Sprintf("%s:%d:%d:%d", r.MediaType, r.TmdbID, r.Season, r.Episode)
+		if _, ok := saved[key]; !ok {
+			saved[key] = r
+		}
+	}
+	// The newest entry decides for each title; a finished movie (or last episode) hides it
 	seen := make(map[string]bool)
 	out := make([]StreamProgress, 0, continueWatchingLimit)
 	for _, r := range rows {
@@ -63,7 +78,20 @@ func (s *Service) ContinueWatching(profileID uint) ([]StreamProgress, error) {
 		}
 		seen[key] = true
 		if r.finished() {
-			continue
+			if r.MediaType != "tv" || s.next == nil {
+				continue
+			}
+			ns, ne, ok := s.next(r.TmdbID, r.Season, r.Episode)
+			if !ok {
+				continue
+			}
+			if p, ok := saved[fmt.Sprintf("tv:%d:%d:%d", r.TmdbID, ns, ne)]; ok && !p.finished() {
+				p.UpdatedAt = r.UpdatedAt
+				r = p
+			} else {
+				r = StreamProgress{ProfileID: r.ProfileID, MediaType: "tv", TmdbID: r.TmdbID, Season: ns, Episode: ne,
+					Title: r.Title, PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, UpdatedAt: r.UpdatedAt}
+			}
 		}
 		out = append(out, r)
 		if len(out) >= continueWatchingLimit {

@@ -229,9 +229,14 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   const skipShown = skip === 'intro' && !overlay ? 'intro' : creditsCard && !overlay ? 'credits' : null;
   const creditsDismissed = useRef(false);
   useEffect(() => {
-    if (skip !== 'credits') { creditsDismissed.current = false; return; }
+    if (skip !== 'credits') {
+      creditsDismissed.current = false;
+      // Seeked back out of the credits (or away from the end): no next episode countdown
+      if (!s?.ended) engineRef.current?.stopCountdown();
+      return;
+    }
     if (!creditsDismissed.current && s?.playing) engineRef.current?.creditsStarted();
-  }, [skip, s?.playing]);
+  }, [skip, s?.playing, s?.ended]);
   // The Skip / Next button takes the focus when it appears and gives it back when it goes
   useEffect(() => {
     if (panel) return;
@@ -352,7 +357,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
       {skipShown === 'intro' && !panel && (
         <div className="player-skip">
           <button type="button" className="btn btn-skip" data-nav data-nav-id="pl-skip" onFocus={() => setZone('skip')}
-            onClick={() => { const i = skipSegs?.intro; if (i) engine?.seekTo(i.end); }}>
+            onClick={() => { const i = skipSegs?.intro; if (i) engine?.seekTo(i.end, 'skip-intro'); }}>
             <ChevronsRight className="btn-icon" /> {t('player.skipIntro')}
           </button>
         </div>

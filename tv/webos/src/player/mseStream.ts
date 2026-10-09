@@ -1,4 +1,5 @@
 import { KeyframeScanner, initSegmentEnd, mimeCandidates, parseCodecs, type TrackCodec } from './mp4Codecs';
+import { logNote, markSeek } from './playbackLog';
 
 // Feeds /play streams (live fragmented MP4) to a <video> through Media Source Extensions.
 // LG webOS reads the metadata of such a stream given as `src` but decodes no frame; the same bytes
@@ -78,12 +79,6 @@ function aheadEnd(r: TimeRanges, t: number): number {
     if (t < r.end(i) && t >= r.start(i) - 0.5) return r.end(i);
   }
   return t;
-}
-
-function bufferedSeconds(r: TimeRanges): number {
-  let s = 0;
-  for (let i = 0; i < r.length; i++) s += r.end(i) - r.start(i);
-  return s;
 }
 
 const FAMILIES: Record<string, string> = { avc1: 'avc', avc3: 'avc', hvc1: 'hevc', hev1: 'hevc', dvh1: 'dv', dvhe: 'dv', mp4a: 'aac' };
@@ -258,8 +253,40 @@ class Lane {
   // Bytes per second of media, from what was appended
   appended = 0;
   mediaFrom = -1;
+  // Bytes of each append and the buffered end after it: what the SourceBuffer holds, counted exactly
+  // (the bitrate varies a lot, an average rate times the buffered seconds overshoots the TV's limit)
+  private spans: { end: number; bytes: number }[] = [];
+  private pending = 0;
 
   constructor(readonly kind: LaneKind, public feed: Feed) {}
+
+  appending(bytes: number) {
+    this.appended += bytes;
+    this.pending += bytes;
+  }
+
+  /** After an operation finished: the bytes of the last append end where the buffer ends now */
+  settledAppend() {
+    const b = this.sb?.buffered;
+    if (this.pending === 0 || !b || b.length === 0) return;
+    this.spans.push({ end: b.end(b.length - 1), bytes: this.pending });
+    this.pending = 0;
+  }
+
+  /** Bytes held: appends whose data was not removed yet (one partly removed counts whole) */
+  held(): number {
+    const b = this.sb?.buffered;
+    const start = b && b.length > 0 ? b.start(0) : Infinity;
+    while (this.spans.length > 0 && this.spans[0].end <= start) this.spans.shift();
+    return this.spans.reduce((n, s) => n + s.bytes, this.pending);
+  }
+
+  /** Data from t on was removed (splice) */
+  heldUntil(t: number) {
+    const i = this.spans.findIndex(s => s.end > t);
+    if (i >= 0) this.spans.length = i + 1;
+    this.pending = 0;
+  }
 
   get budgetKey(): 'video' | 'audio' {
     return this.kind === 'audio' ? 'audio' : 'video';
@@ -444,6 +471,7 @@ export class MseStream {
     if (this.stopped) return;
     const b = lane.sb!.buffered;
     if (b.length > 0 && lane.mediaFrom < 0) lane.mediaFrom = b.start(0);
+    lane.settledAppend();
     const v = this.video;
     if (!this.aligned && v.buffered.length > 0) {
       this.aligned = true;
@@ -451,9 +479,13 @@ export class MseStream {
       if (this.split) {
         // Split streams start on the keyframe before the asked position: play from that position
         const at = this.startAt > start && this.startAt < v.buffered.end(v.buffered.length - 1) ? this.startAt : start;
-        if (Math.abs(v.currentTime - at) > 0.05) v.currentTime = at;
+        if (Math.abs(v.currentTime - at) > 0.05) {
+          markSeek('align-split');
+          v.currentTime = at;
+        }
       } else if (start > v.currentTime + 0.01 && start < 10) {
         // Copied video may start a little after 0: start at the first buffered frame, not before it
+        markSeek('align-start');
         v.currentTime = start;
       }
     }
@@ -475,12 +507,10 @@ export class MseStream {
     }
     // Never past the plan or the byte budget: over its limit the TV's own garbage collection also
     // drops data ahead of the playhead, and playback stops there (measured on an LG TV)
-    const rate = lane.byteRate();
-    if (rate > 0 && lane.feed.queued > 0) {
+    if (lane.feed.queued > 0) {
       const t = this.video.currentTime;
-      const held = rate * bufferedSeconds(sb.buffered);
-      const full = held + MAX_APPEND > budgets[lane.budgetKey];
-      if (full || aheadEnd(sb.buffered, t) - t > lane.plan().ahead + 1) {
+      const full = lane.held() + MAX_APPEND > budgets[lane.budgetKey];
+      if (full || (lane.byteRate() > 0 && aheadEnd(sb.buffered, t) - t > lane.plan().ahead + 1)) {
         const kf = full ? lane.keyframeBefore(t - MIN_BEHIND_S) : 0;
         if (kf > 0 && sb.buffered.length > 0 && kf > sb.buffered.start(0) + 0.5) {
           lane.evictTo = kf;
@@ -495,7 +525,7 @@ export class MseStream {
     if (data) {
       try {
         sb.appendBuffer(data as Uint8Array<ArrayBuffer>);
-        lane.appended += data.byteLength;
+        lane.appending(data.byteLength);
       } catch (e: any) {
         lane.feed.putBack(data);
         if (e?.name === 'QuotaExceededError') this.onQuota(lane);
@@ -516,10 +546,9 @@ export class MseStream {
 
   // The buffer is full: plan with less from now on, drop what was played and try again
   private onQuota(lane: Lane) {
-    const sb = lane.sb!;
-    const rate = lane.byteRate();
-    const held = rate * bufferedSeconds(sb.buffered);
+    const held = lane.held();
     const key = lane.budgetKey;
+    logNote('quota', { lane: lane.kind, mb: Math.round(held / 1048576), budget: Math.round(budgets[key] / 1048576) });
     if (held > 0) budgets[key] = Math.max((key === 'audio' ? 2 : 8) * 1024 * 1024, Math.min(budgets[key], held * 0.85));
     lane.feed.setPaused(true);
     const kf = lane.keyframeBefore(this.video.currentTime - 1);
@@ -551,8 +580,24 @@ export class MseStream {
   }
 
   private onWaiting = () => {
+    this.logRanges();
     this.jumpGap();
   };
+
+  /** Each SourceBuffer's ranges near the playhead, to tell an audio hole from a video one */
+  private logRanges() {
+    const t = this.video.currentTime;
+    const near = (r: TimeRanges) => {
+      const out: string[] = [];
+      for (let i = 0; i < r.length; i++) {
+        if (r.end(i) > t - 30 && r.start(i) < t + 120) out.push(`${r.start(i).toFixed(2)}-${r.end(i).toFixed(2)}`);
+      }
+      return out.join(' ');
+    };
+    const x: Record<string, string | number> = { t: Math.round(t * 100) / 100 };
+    for (const lane of this.lanes) if (lane.sb) x[lane.kind] = near(lane.sb.buffered);
+    logNote('ranges', x);
+  }
 
   /** Plays over a small hole in the buffer (a splice boundary, the start of split streams) */
   private jumpGap() {
@@ -564,6 +609,7 @@ export class MseStream {
     }
     for (let i = 0; i < r.length; i++) {
       if (r.start(i) > t && r.start(i) - t <= MAX_GAP_S) {
+        markSeek('gap', { gap: r.start(i) - t });
         v.currentTime = r.start(i) + 0.01;
         return;
       }
@@ -666,8 +712,11 @@ export class MseStream {
           .filter(k => k < at);
         lane.feed = feed;
         lane.tsOffset = job.tsOffset;
+        lane.heldUntil(at);
+        // The rate counts the new stream only: its bytes over its media from the cut on (the old
+        // data before the cut would make it look several times smaller and overfill the buffer)
         lane.appended = 0;
-        lane.mediaFrom = -1;
+        lane.mediaFrom = at;
         feed.setMaxQueued(MAX_QUEUED);
       }
     } catch (e: any) {
@@ -705,6 +754,7 @@ export class MseStream {
       if (still >= 1000) {
         jumped = true;
         console.info(`[splice] stuck at ${t.toFixed(3)}: seek to the cut ${cut.toFixed(3)}`);
+        markSeek('splice-stuck', { cut });
         v.currentTime = cut + 0.001;
       }
     }, 100);

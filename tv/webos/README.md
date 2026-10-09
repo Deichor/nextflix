@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.10_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.12_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 
@@ -159,6 +159,8 @@ animation.
   ec-3); a type the TV refuses falls back to `src`. Every seek is a new request into a new MediaSource. Each
   SourceBuffer keeps to its byte budget (75 MB video, 15 MB audio; the TV refuses ~79 / ~18 MB, and past its limit
   it also drops data ahead of the playhead): up to 2 min ahead (resumes below 1.5 min), up to a minute behind.
+  The bytes held are counted per append (not average bitrate × buffered seconds, which a dense scene of a VBR
+  stream pushes past the limit), and after a splice the bitrate counts only the new stream.
 - Split mode (the server's probe says `split: true` and the track is E-AC-3 / AC-3): `play?track=video` and
   `track=audio` go into two SourceBuffers on the file's timeline, so E-AC-3 and its Atmos reach the TV untouched.
   An older server gets the muxed request with converted audio. `localStorage nfx-tv:split` = `always` / `never`

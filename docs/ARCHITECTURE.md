@@ -8,13 +8,13 @@ server/                     Go 1.24, gin, gorm + SQLite, go-redis v8   (module n
   cmd/nextflix/main.go      wiring only
   internal/platform/        config, database, httpserver, cache, tmdb, upstream, torbox
   internal/modules/         profiles, progress, ratings, recommendations, top10, catalog, providers,
-                            notifications, streaming, subtitles, segments, images
+                            notifications, streaming, subtitles, segments, images, playbacklog
 web/                        Next.js 15 (App Router), React 19, TypeScript
   src/app/                  thin routes: export { default } from '@/features/...'
   src/features/<domain>/    screens, components, api/store files of one domain
   src/shared/               lib (api, profile, image), i18n, navigation, hooks, ui, types
 deploy/                     docker-compose.yml, server.Dockerfile, web.Dockerfile, config/*.env.example
-scripts/                    check-backend.sh, check-frontend.sh, tidy-backend.sh, migrate-from-homeflix.sh
+scripts/                    check-backend.sh, check-frontend.sh, tidy-backend.sh, playback-log.sh, migrate-from-homeflix.sh
 docs/                       this folder
 ```
 
@@ -48,6 +48,7 @@ docs/                       this folder
 | `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
 | `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
+| `playbacklog` | `POST /api/playback-log`: playback diagnostics from the TV player (waits, freezes, dropped frames, seeks) written as `playback: ...` log lines and daily files, rate limited per IP; read them with `scripts/playback-log.sh` (see [API.md](API.md#playback-log-modulesplaybacklog)) | daily files in `PLAYBACK_LOG_DIR`, 14 days |
 
 A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and `routes.go` with
 `func Register(api *gin.RouterGroup, s *Service)`. `catalog`, `providers` and `images` have no model or repository; `images.Register` takes the engine itself because its route lives outside `/api`.
