@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"nextflix/internal/platform/tmdb"
 )
@@ -174,40 +175,54 @@ func (c tmdbCatalog) fillTrending(lang string, items []trendingResult) {
 	}
 }
 
-// Discover lists the most popular titles of a genre plus well-rated ones (TMDB discover, 24 h cache).
-func (c tmdbCatalog) Discover(lang, mediaType string, genre int) ([]Item, error) {
+// Explore runs one TMDB discover query (page 1, 24 h cache).
+func (c tmdbCatalog) Explore(lang string, q ExploreQuery) ([]Item, error) {
 	tm := c.tm.WithLang(lang)
-	base := url.Values{"include_adult": {"false"}, "with_genres": {strconv.Itoa(genre)}}
-	queries := []url.Values{
-		{"sort_by": {"popularity.desc"}, "vote_count.gte": {"100"}},
-		{"sort_by": {"vote_average.desc"}, "vote_count.gte": {"1000"}},
+	v := url.Values{"include_adult": {"false"}, "sort_by": {q.Sort}}
+	if q.Sort == "" {
+		v.Set("sort_by", "vote_average.desc")
 	}
-	var out []Item
-	var errs []error
-	for _, q := range queries {
-		for k, v := range base {
-			q[k] = v
+	join := func(ids []int) string {
+		parts := make([]string, len(ids))
+		for i, id := range ids {
+			parts[i] = strconv.Itoa(id)
 		}
-		if mediaType == "tv" {
-			res, err := tm.DiscoverTVPage(q)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			out = append(out, fromTVs(res.Results)...)
-		} else {
-			res, err := tm.DiscoverMoviePage(q)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			out = append(out, fromMovies(res.Results)...)
+		return strings.Join(parts, ",")
+	}
+	if len(q.Genres) > 0 {
+		v.Set("with_genres", join(q.Genres))
+	}
+	if len(q.WithoutGenres) > 0 {
+		v.Set("without_genres", join(q.WithoutGenres))
+	}
+	if q.Language != "" {
+		v.Set("with_original_language", q.Language)
+	}
+	if q.MinVotes > 0 {
+		v.Set("vote_count.gte", strconv.Itoa(q.MinVotes))
+	}
+	date := "primary_release_date"
+	if q.MediaType == "tv" {
+		date = "first_air_date"
+	}
+	if q.FromYear > 0 {
+		v.Set(date+".gte", fmt.Sprintf("%d-01-01", q.FromYear))
+	}
+	if q.ToYear > 0 {
+		v.Set(date+".lte", fmt.Sprintf("%d-12-31", q.ToYear))
+	}
+	if q.MediaType == "tv" {
+		res, err := tm.DiscoverTVPage(v)
+		if err != nil {
+			return nil, err
 		}
+		return fromTVs(res.Results), nil
 	}
-	if len(errs) == len(queries) {
-		return nil, errors.Join(errs...)
+	res, err := tm.DiscoverMoviePage(v)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	return fromMovies(res.Results), nil
 }
 
 func (c tmdbCatalog) Logo(lang, mediaType string, id int) (string, error) {

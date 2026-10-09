@@ -53,7 +53,7 @@ func NewService(ratings RatingsSource, catalog Catalog) *Service {
 		inflight: map[cacheKey]*call{},
 		surprise: surpriseState{
 			pools:  map[cacheKey]surprisePool{},
-			recent: map[uint][]titleKey{},
+			recent: map[uint][]surprisePick{},
 			rnd:    rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0x9e3779b97f4a7c15)),
 		},
 	}

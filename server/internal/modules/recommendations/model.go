@@ -69,10 +69,22 @@ type Catalog interface {
 	Related(lang, mediaType string, id int) (recs, similar []Item, err error)
 	Genres(mediaType string, id int) ([]int, error)
 	Trending(lang string) ([]Item, error)
-	// Discover returns popular and acclaimed titles of one TMDB genre (mediaType "movie" or "tv").
-	Discover(lang, mediaType string, genre int) ([]Item, error)
+	// Explore returns page 1 of a TMDB discover query.
+	Explore(lang string, q ExploreQuery) ([]Item, error)
 	// Logo returns the file path of a title logo in lang (else English, else language-less) or "".
 	Logo(lang, mediaType string, id int) (string, error)
+}
+
+// ExploreQuery is one TMDB discover list. Zero fields are not sent.
+type ExploreQuery struct {
+	MediaType     string // "movie" or "tv"
+	Genres        []int  // all of them (AND)
+	WithoutGenres []int
+	Language      string // original language
+	FromYear      int
+	ToYear        int
+	MinVotes      int
+	Sort          string // TMDB sort_by; "vote_average.desc" when empty
 }
 
 type titleKey struct {

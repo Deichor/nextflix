@@ -14,6 +14,7 @@ type fakeCatalog struct {
 	related  map[titleKey]relatedLists
 	genres   map[titleKey][]int
 	trending []Item
+	explore  func(q ExploreQuery) []Item
 	calls    int
 }
 
