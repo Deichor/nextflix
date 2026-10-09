@@ -8,6 +8,7 @@ export type Route =
   | { name: 'setup' }
   | { name: 'profiles' }
   | { name: 'addProfile'; count: number }
+  | { name: 'surprise' }
   | { name: Tab }
   | { name: 'detail'; id: number; type: MediaType; autoplay?: boolean };
 

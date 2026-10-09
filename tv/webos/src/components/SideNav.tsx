@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Film, Home, Search, Settings, Tv } from 'lucide-react';
+import { Film, Home, Search, Settings, Shuffle, Tv } from 'lucide-react';
 import { useT, type MessageKey } from '../lib/i18n';
 import { getProfile } from '../lib/profile';
 import { useRouter, type Tab } from '../nav/router';
@@ -55,6 +55,16 @@ export default function SideNav({ active }: { active: Tab }) {
             <span className="sidenav-label">{t(label)}</span>
           </button>
         ))}
+        <button
+          type="button"
+          className="sidenav-item"
+          data-nav
+          data-nav-id="nav-surprise"
+          onClick={() => router.push({ name: 'surprise' })}
+        >
+          <Shuffle className="sidenav-icon" />
+          <span className="sidenav-label">{t('nav.surprise')}</span>
+        </button>
       </div>
     </nav>
   );

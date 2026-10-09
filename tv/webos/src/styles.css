@@ -614,6 +614,27 @@ p {
   background: var(--red);
 }
 
+/* TorBox has the title cached: it plays at once */
+.card-instant {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.72);
+  box-shadow: 0 0 0 0.1rem rgba(255, 255, 255, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-instant svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  fill: #ffd338;
+}
+
 /* Focus: a scale (composited) and a static ring on a pseudo-element; no blurred shadow to repaint */
 .card::after,
 .episode-still::after {
@@ -2098,4 +2119,154 @@ p {
   font-size: 1.6rem;
   color: rgba(255, 255, 255, 0.8);
   pointer-events: none;
+}
+
+/* ---- Search filters ---- */
+
+.search-chips {
+  overflow: hidden;
+  margin: -0.6rem 4rem 1.4rem 0;
+  padding: 0.6rem 0;
+}
+
+.search-chips-content {
+  display: flex;
+  align-items: center;
+  padding-right: 30rem;
+}
+
+.search-chips .chip {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.search-chips-sep {
+  flex-shrink: 0;
+  width: 0.2rem;
+  height: 2.6rem;
+  margin: 0 1.6rem 0 0.6rem;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.chip-check {
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-right: 0.6rem;
+}
+
+/* ---- Surprise me ---- */
+
+.surprise-screen {
+  background: #000000;
+}
+
+.surprise-bg {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 78%;
+  height: 100%;
+  object-fit: cover;
+  animation: surprise-in 0.5s ease both;
+}
+
+@keyframes surprise-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.surprise-shade {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background:
+    linear-gradient(90deg, #000000 22%, rgba(0, 0, 0, 0.85) 38%, rgba(0, 0, 0, 0.2) 70%, rgba(0, 0, 0, 0) 100%),
+    linear-gradient(0deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0) 35%);
+}
+
+.surprise-body {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--pad);
+  width: 62rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: 14rem;
+}
+
+.surprise-kicker {
+  margin-bottom: 2rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.surprise-logo {
+  max-width: 44rem;
+  max-height: 14rem;
+  object-fit: contain;
+  object-position: left bottom;
+  margin-bottom: 2rem;
+}
+
+.surprise-title {
+  font-size: 5rem;
+  font-weight: 800;
+  line-height: 1.1;
+  margin-bottom: 2rem;
+}
+
+.surprise-reason {
+  display: flex;
+  align-items: center;
+  font-size: 2rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.surprise-reason-icon {
+  width: 2.2rem;
+  height: 2.2rem;
+  margin-right: 1rem;
+  flex-shrink: 0;
+  color: var(--red);
+}
+
+.surprise-overview {
+  margin-top: 1.6rem;
+  font-size: 1.7rem;
+  line-height: 1.5;
+  color: #e5e5e5;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.surprise-buttons {
+  display: flex;
+  margin-top: 3rem;
+}
+
+.surprise-buttons .btn {
+  margin-right: 1.4rem;
+}
+
+.surprise-spinner {
+  position: absolute;
+  top: 50%;
+  right: -12rem;
+  margin: -2.5rem 0 0;
+}
+
+.surprise-empty {
+  font-size: 2rem;
+  color: var(--muted);
 }

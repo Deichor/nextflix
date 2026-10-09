@@ -415,6 +415,11 @@ export function releaseTitle(params: ResolveParams, delaySec = 0): void {
   beacon(`/api/torrent-stream/release?${q.toString()}`);
 }
 
+/** A paused player keeps its file ready on the server (stream guard, TorBox link and connection) */
+export function keepSourceAlive(hash: string, index: number): void {
+  if (/^[0-9a-f]{40}$/i.test(hash)) beacon(`/api/torrent-stream/keepalive?hash=${hash.toLowerCase()}&index=${index}`);
+}
+
 /** Drops torrents a closing player used (the server never drops one that is playing again). */
 export function releaseTorrents(hashes: string[]): void {
   const list = Array.from(new Set(hashes.map(h => h.toLowerCase()).filter(h => /^[0-9a-f]{40}$/.test(h)))).slice(0, 10);

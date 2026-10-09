@@ -15,7 +15,7 @@ tv/webos/
     App.tsx           screens, Back key, player overlay, exit dialog
     nav/              spatial.ts (D-pad focus engine), router.tsx (screen stack + focus restore)
     lib/              api client, catalog, streaming, subtitles, i18n (en / tr), webOS helpers
-    screens/          Setup, Profiles, Add Profile, Home, Movies, TV Shows, Search, Detail, Settings
+    screens/          Setup, Profiles, Add Profile, Home, Movies, TV Shows, Search, Surprise, Detail, Settings
     player/           engine.ts (resolve / probe / play / seek / upgrade), Player UI, panel, subtitle overlay
     components/       rows, cards, hero, side menu, on-screen keyboard
   scripts/            build.sh, check.sh, dev.sh, ares.sh, smoke.sh (+ smoke.mjs, finalize.mjs)
@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.5_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.6_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 
@@ -109,6 +109,19 @@ sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach 
 | Player | OK play / pause, Left / Right seek 10 s; a second press (or holding the key: 30 s, then 60 s steps) opens scrub mode with a strip of preview frames, where OK seeks to the shown time, Back cancels and Up / Down close (15 s without a key: closed, no seek; playback goes on underneath). Up shows the buttons (play, ±10 s, next episode, Audio & Subtitles), Back closes |
 | Media keys | Play, Pause, Play/Pause, Stop (closes), Rewind / Fast forward (seek) |
 | Magic Remote | pointing focuses, click selects, clicking the progress bar seeks |
+
+## Keyboard, search filters and Surprise me
+
+- On-screen keyboard (`components/Keyboard.tsx`): names (Add Profile) use the Turkish alphabet order with q, w, x
+  in their Latin places, 9 keys per row (`a b c ç d e f g ğ` / `h ı i j k l m n o` / `ö p q r s ş t u ü` /
+  `v w x y z ' - .`), then the digits and Shift, Space, Delete, Clear. Search uses 6 keys per row: the Latin order
+  with an English profile, the Turkish order (7 rows, digits last) with a Turkish one. The server address keeps its
+  own layout (digits and `. : / - _` first).
+- Search: a chip row above the results (Up from the grid, Right from the keyboard): All / Movies / TV Shows, then
+  Anime and the genres (sorted by name); OK toggles a chip, several genres must all match. Chips alone browse
+  (`/api/catalog/discover`, the next page loads near the end of the grid); with text they narrow the search results.
+- Surprise me (side menu, shuffle icon): one title the profile is likely to enjoy with the reason ("Because you loved
+  …"), Play (detail page with autoplay), Details and **Something else** for the next pick.
 
 ## Opening intro
 

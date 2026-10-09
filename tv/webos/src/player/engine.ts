@@ -4,7 +4,7 @@ import { getProfileId } from '../lib/profile';
 import { seasonEpisodes, tvSeasons, isPlaceholderEpisodeName, type SeasonInfo } from '../lib/catalog';
 import {
   StreamError, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
-  playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, runtimeCheckQuery,
+  keepSourceAlive, playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, runtimeCheckQuery,
   saveProgress, sourceOf, titleProgress, writePlayerPrefs,
   type Availability, type PlayRequest, type QualityCap, type ResolveParams, type ResolvedSource, type StreamMeta, type StreamSource, restrictToSafeAudio,
 } from '../lib/stream';
@@ -91,6 +91,12 @@ export interface PlayerState {
 const STALL_MS = 12000;
 const FIRST_START_MS = 30000;
 const MAX_RECOVERIES = 3;
+// A failed source is resolved again (without it) this many times per item before an error shows
+const MAX_AUTO_REFRESH = 3;
+// While the viewer pauses the server keeps the file ready; after a long pause a stall restarts quickly
+const KEEPALIVE_MS = 15000;
+const LONG_PAUSE_MS = 10000;
+const RESUME_STALL_MS = 2500;
 const LONG_STALL_MS = 8000;
 const STALL_WINDOW_MS = 60000;
 // A stall counts once playback waited this long (waiting, so under 1 s buffered); shorter ones are hiccups
@@ -174,7 +180,7 @@ export class PlayerEngine {
   // source
   private origin: Origin = 'given';
   private source?: StreamSource;
-  private autoRefreshed = false;
+  private autoRefreshes = 0;
   private avoid: string[] = [];
   private lengthRetries = 0;
   private cap?: QualityCap;
@@ -221,6 +227,10 @@ export class PlayerEngine {
   private recoveries = 0;
   private stallTimer?: Timer;
   private stallArmed = false;
+  // The viewer's pause (0 = none), its keep-alive timer, and the last Play after a long pause
+  private pausedAt = 0;
+  private keepAliveTimer?: ReturnType<typeof setInterval>;
+  private resumedAt = 0;
   private stallResetTimer?: Timer;
   private stall: { start: number; seek: boolean } | null = null;
   private stallTimes: number[] = [];
@@ -390,11 +400,15 @@ export class PlayerEngine {
     this.resolveTick = undefined;
   }
 
-  /** A failed source: a reused one (saved / cached / given) is resolved again once. */
+  /** A failed source is resolved again (up to MAX_AUTO_REFRESH times per item); a fresh one is avoided. */
   private sourceFailed(position: number, auto: boolean): boolean {
-    const reused = this.origin !== 'fresh';
-    if (auto && (!reused || this.autoRefreshed)) return false;
-    if (auto) this.autoRefreshed = true;
+    if (auto && this.autoRefreshes >= MAX_AUTO_REFRESH) return false;
+    if (auto) {
+      this.autoRefreshes++;
+      // A fresh source that failed is not picked again; a reused one gets a fresh resolve
+      const failed = this.source?.hash.toLowerCase();
+      if (this.origin === 'fresh' && failed && this.avoid.indexOf(failed) < 0) this.avoid = [...this.avoid, failed];
+    }
     this.startItem({ refresh: true, startAt: position });
     return true;
   }
@@ -570,7 +584,7 @@ export class PlayerEngine {
     // A borderline or unmeasured swarm starts only with a larger buffer
     this.clearHold();
     // Only the first stream of a source holds; seeks and restarts play at once
-    if (this.holdSource !== this.source && needsStartHold(this.source?.ratio)) {
+    if (this.holdSource !== this.source && needsStartHold(this.source?.ratio) && !this.source?.debrid) {
       this.holdSource = this.source;
       this.startHold('start');
     }
@@ -651,11 +665,20 @@ export class PlayerEngine {
 
   private bindVideo() {
     const v = this.video;
-    v.addEventListener('play', () => this.set({ playing: true }));
+    v.addEventListener('play', () => {
+      this.set({ playing: true });
+      clearInterval(this.keepAliveTimer);
+      if (this.pausedAt && Date.now() - this.pausedAt >= LONG_PAUSE_MS) this.resumedAt = Date.now();
+      this.pausedAt = 0;
+    });
     v.addEventListener('pause', () => {
       if (this.hold) return; // paused by the buffer hold, not the viewer
       this.set({ playing: false });
       this.persist();
+      if (v.ended) return;
+      this.pausedAt = Date.now();
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = setInterval(() => { if (this.hash) keepSourceAlive(this.hash, this.index); }, KEEPALIVE_MS);
     });
     v.addEventListener('waiting', () => {
       // A real stall (still waiting with under 1 s buffered after MIN_STALL_MS) with a faster source
@@ -732,7 +755,9 @@ export class PlayerEngine {
   private armStall() {
     clearTimeout(this.stallTimer);
     this.stallArmed = true;
-    const ms = (this.hasPlayed ? STALL_MS : FIRST_START_MS) * (1 + this.recoveries);
+    // Right after a long pause a stalled stream has probably died meanwhile: restart it quickly
+    const base = !this.hasPlayed ? FIRST_START_MS : Date.now() - this.resumedAt < 60000 ? RESUME_STALL_MS : STALL_MS;
+    const ms = base * (1 + this.recoveries);
     this.stallTimer = setTimeout(() => {
       this.stallArmed = false;
       // A paused player is not stalled (a buffer hold is)
@@ -788,11 +813,11 @@ export class PlayerEngine {
   private recover() {
     this.disarmStall();
     if (this.recoveries >= MAX_RECOVERIES) {
-      this.set({ reconnecting: false, fatal: { key: 'player.connectionLost' } });
+      // Out of restarts: another source first, an error only when that is out of tries too
+      if (!this.sourceFailed(this.positionNow(), true)) this.set({ reconnecting: false, fatal: { key: 'player.connectionLost' } });
       return;
     }
     this.recoveries++;
-    this.set({ reconnecting: true });
     this.restartAt(this.positionNow(), 'stall');
   }
 
@@ -1530,7 +1555,7 @@ export class PlayerEngine {
     this.meta = { ...this.meta, season: next.season, episode: next.episode, episode_title: undefined, runtime: undefined };
     this.startAt = undefined;
     this.given = undefined;
-    this.autoRefreshed = false;
+    this.autoRefreshes = 0;
     this.avoid = [];
     this.lengthRetries = 0;
     this.set({ meta: this.meta, ended: false });
@@ -1601,6 +1626,7 @@ export class PlayerEngine {
     this.stopStream();
     clearInterval(this.saveTimer);
     clearInterval(this.healthTimer);
+    clearInterval(this.keepAliveTimer);
     if (this.countdownTimer) clearInterval(this.countdownTimer);
     clearTimeout(this.toastTimer);
     document.removeEventListener('visibilitychange', this.onVisibility);

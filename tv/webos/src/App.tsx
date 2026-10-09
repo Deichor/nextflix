@@ -19,6 +19,7 @@ import ProfilesScreen from './screens/ProfilesScreen';
 import SearchScreen from './screens/SearchScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import SetupScreen from './screens/SetupScreen';
+import SurpriseScreen from './screens/SurpriseScreen';
 import TvShowsScreen from './screens/TvShowsScreen';
 
 const TABS = ['home', 'search', 'movies', 'tv', 'settings'];
@@ -34,6 +35,7 @@ function Screen({ entry, onPickProfile }: { entry: Entry; onPickProfile: (p: Pro
     case 'movies': return <MoviesScreen />;
     case 'tv': return <TvShowsScreen />;
     case 'settings': return <SettingsScreen />;
+    case 'surprise': return <SurpriseScreen />;
     case 'detail': return <DetailScreen id={r.id} type={r.type} autoplay={r.autoplay} />;
   }
 }

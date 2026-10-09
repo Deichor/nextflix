@@ -4,6 +4,7 @@ import { matchPercent, yearOf, type Title } from '../lib/catalog';
 import { episodeLabel, progressPercent, type StreamProgress } from '../lib/stream';
 import { useI18n, type I18n } from '../lib/i18n';
 import { setHero, type HeroItem } from './heroStore';
+import { useInstant, type InstantItem } from './instant';
 
 export type RowDef =
   | { id: string; title: string; variant: 'backdrop' | 'rank'; items: Title[] | undefined }
@@ -203,6 +204,7 @@ const TitleCard = memo(function TitleCard({ t, rank, navId, index, show, onFocus
         <span className="rank-number">{rank}</span>
         <span className="card card-poster">
           <CardImage src={img(t.poster || t.backdrop, 'w342')} show={show} />
+          <InstantBadge item={{ type: t.type, tmdb_id: t.id, title: t.title }} show={show} />
         </span>
       </button>
     );
@@ -210,6 +212,7 @@ const TitleCard = memo(function TitleCard({ t, rank, navId, index, show, onFocus
   return (
     <button type="button" className="card card-backdrop" data-nav data-nav-id={navId} onFocus={focus} onClick={select}>
       <CardImage src={img(t.backdrop || t.poster, 'w500')} show={show} />
+      <InstantBadge item={{ type: t.type, tmdb_id: t.id, title: t.title }} show={show} />
       <span className="card-caption">{t.title}</span>
     </button>
   );
@@ -226,6 +229,7 @@ const ContinueCard = memo(function ContinueCard({ p, label, navId, index, show, 
       onClick={() => onSelectAt(index)}
     >
       <CardImage src={img(p.backdrop_path || p.poster_path, 'w500')} show={show} />
+      <InstantBadge item={{ type: p.media_type, tmdb_id: p.tmdb_id, title: p.title, season: p.season || undefined, episode: p.episode || undefined }} show={show} />
       <span className="card-caption">
         {p.title}
         {!!label && <span className="card-caption-sub">{label}</span>}
@@ -234,3 +238,15 @@ const ContinueCard = memo(function ContinueCard({ p, label, navId, index, show, 
     </button>
   );
 });
+
+/** Lightning bolt in the card corner: the title plays at once from the TorBox cache. */
+function InstantBadge({ item, show }: { item: InstantItem; show: boolean }) {
+  const i18n = useI18n();
+  const on = useInstant(item, show);
+  if (!on) return null;
+  return (
+    <span className="card-instant" aria-label={i18n.t('instant.label')}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2 4 13.5h6.5L9 22l10-12h-6.5z" /></svg>
+    </span>
+  );
+}

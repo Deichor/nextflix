@@ -15,10 +15,12 @@ interface KeyboardProps {
   max?: number;
 }
 
+// Rows of equal length where possible, so Up / Down keep the column
 const SEARCH_ROWS = ['abcdef', 'ghijkl', 'mnopqr', 'stuvwx', 'yz1234', '567890'];
-const SEARCH_TR = 'çğıöşü';
+// Turkish alphabetical order (q, w, x in their Latin places): ç after c, ğ after g, ı before i ...
+const SEARCH_ROWS_TR = ['abcçde', 'fgğhıi', 'jklmno', 'öpqrsş', 'tuüvwx', 'yz1234', '567890'];
 const URL_ROWS = ['1234567890', '.:/-_abcde', 'fghijklmno', 'pqrstuvwxy', 'z'];
-const TEXT_ROWS = ['abcdefghij', 'klmnopqrst', "uvwxyz'-.", 'çğıöşü', '1234567890'];
+const TEXT_ROWS = ['abcçdefgğ', 'hıijklmno', 'öpqrsştuü', "vwxyz'-.", '1234567890'];
 
 // Turkish casing (i -> İ) only with the Turkish UI; ı is always I
 function upper(ch: string, locale: Locale): string {
@@ -68,7 +70,7 @@ export default function Keyboard({ layout, value, onChange, max = 120 }: Keyboar
     return false;
   }), [layout, max]);
 
-  const rows = layout === 'url' ? URL_ROWS : text ? TEXT_ROWS : locale === 'tr' ? [...SEARCH_ROWS, SEARCH_TR] : SEARCH_ROWS;
+  const rows = layout === 'url' ? URL_ROWS : text ? TEXT_ROWS : locale === 'tr' ? SEARCH_ROWS_TR : SEARCH_ROWS;
 
   return (
     <div className={`kbd kbd-${layout}`} data-nav-group={`kbd-${layout}`}>
