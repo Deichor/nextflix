@@ -112,7 +112,7 @@ Row: `{id, title, reason, items: [Item]}`. Item:
 ```
 
 `id` is the TMDB id. Movies carry `release_date`, TV shows `first_air_date` (the other key is absent). `genre_ids`
-is always an array.
+is always an array. `original_language` (ISO 639-1) is sent when TMDB lists it.
 
 | Row `id` | `title` | `reason` |
 |---|---|---|
@@ -131,6 +131,34 @@ A profile without any `like`/`love`/favorite (or when TMDB returns nothing) gets
   { "id": "top-picks", "title": "Top Picks for You", "reason": "top_picks", "items": [ { "id": 670292, "media_type": "movie", "title": "The Creator", "...": "..." } ] },
   { "id": "because-movie-27205", "title": "Because you loved Inception", "reason": "because_loved", "items": [ "..." ] }
 ] }
+```
+
+### Surprise me
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/recommendations/surprise?profile_id=N[&exclude=movie-27205,tv-1396]` | 200 `{title, reason}`: one title the profile is likely to enjoy, different on every call (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#surprise-me)). `exclude` lists `<media_type>-<tmdb_id>` (or `:`) keys the client showed lately; the server also skips the profile's last 20 picks, rated / favorited titles and titles with any watch progress. 400 without a profile, 404 `{error}` when nothing is left (TMDB unreachable), `Cache-Control: no-store`. Titles follow `X-Lang` |
+
+`title` is an Item (above, plus `original_language`) with `logo_path` (`""` when TMDB has no logo; profile language,
+then English, then language-less). `reason`:
+
+| `kind` | Fields | Meaning |
+|---|---|---|
+| `because_loved` | `title`, `media_type`, `tmdb_id` | found through a title rated "Love this!" |
+| `because_liked` | `title`, `media_type`, `tmdb_id` | found through a title rated "I like this" |
+| `favorite_like` | `title`, `media_type`, `tmdb_id` | found through a favorite without a rating |
+| `because_watched` | `title`, `media_type`, `tmdb_id` | found through a title from the watch history |
+| `genre` | `genre_id` (TMDB genre id) | from the profile's favorite genres |
+| `trending_pick` | – | trending this week (exploration, or a profile without history) |
+
+The seed `title` is stored text (the language it was saved in). Clients build the sentence: "Because you loved
+Dune" / "Bayıldığın Dune filmine benzediği için" (`media_type` picks "filmine" / "dizisine").
+
+```json
+{ "title": { "id": 1408, "media_type": "tv", "title": "Queen of the South", "overview": "...", "poster_path": "/p.jpg",
+    "backdrop_path": "/b.jpg", "logo_path": "/l.png", "vote_average": 7.6, "first_air_date": "2016-06-23",
+    "genre_ids": [80, 18], "original_language": "en" },
+  "reason": { "kind": "because_loved", "title": "Breaking Bad", "media_type": "tv", "tmdb_id": 1396 } }
 ```
 
 ## Top 10 (`modules/top10`)
@@ -174,10 +202,39 @@ the Turkish TMDB details (cached 24 h); ranks are unchanged and titles without a
 | GET | `/api/tmdb/tv/:id/recommendations` |
 | GET | `/api/tmdb/tv/:id/season/:season` |
 | GET | `/api/tmdb/:id/related` |
+| GET | `/api/catalog/discover` (see [Discover](#discover-search-filters)) |
 
 All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search not at all). With `X-Lang: tr`,
 `/api/tmdb/movie/:id/images` lists only Turkish, English and language-less images (`include_image_language=tr,en,null`),
 and details videos include English trailers (`include_video_language=tr,en,null`).
+
+### Discover (search filters)
+
+`GET /api/catalog/discover?type=all|movie|tv&genres=16,878&anime=1&q=&page=` → 200
+`{page, total_pages, total_results, results: [SearchResult]}` (the normalized `/api/tmdb/search` shape: TV `name` /
+`first_air_date` come as `title` / `release_date`, with `media_type`, `genre_ids`, `original_language`, `popularity`).
+
+- `genres`: comma-separated TMDB movie genre ids (TV-only ids are accepted too), combined with **AND**. They are mapped per
+  media type: Action and Adventure → Action & Adventure (10759), Sci-Fi and Fantasy → Sci-Fi & Fantasy (10765), War →
+  War & Politics (10768), Thriller → Mystery (9648), Kids → Family for movies. History, Horror, Music, Romance and
+  TV Movie have no TV genre and Reality / News / Soap / Talk no movie genre: a selection containing one of them only
+  returns the other media type.
+- `anime=1`: Animation (16) and `original_language` `ja`, combinable with genres.
+- `type` (default `all`) limits the media type.
+- Without `q`: TMDB `/discover/movie` and `/discover/tv` (`sort_by=popularity.desc`, `vote_count.gte=10`, no adult
+  titles), cached 24 h per language and query. With `type=all` a page holds that page of both lists merged by
+  popularity (up to 40 results); `total_pages` is the larger of the two (max 500). Infinite scroll asks `page=2, 3…`.
+- With `q`: the first 5 TMDB multi-search pages of `q` (people and titles without artwork dropped, cached 15 min per
+  language), filtered by the selection, in TMDB's order, as one page (`total_pages: 1`; `page > 1` answers `[]`).
+- Titles without poster and backdrop are dropped. 502 `{error}` when TMDB fails.
+
+```
+GET /api/catalog/discover?genres=878&anime=1           (X-Lang: tr)
+→ 200 {"page":1,"total_pages":70,"total_results":1877,"results":[{"id":65733,"title":"Doraemon","media_type":"tv",
+        "genre_ids":[10759,16,35,10765,10762,10751],"original_language":"ja", ...}, ...]}
+GET /api/catalog/discover?q=ghost&anime=1               → 10 results (Ghost in the Shell, Ghost Hound, ...)
+GET /api/catalog/discover?type=tv&genres=27             → 200 {"page":1,"total_pages":0,"total_results":0,"results":[]}
+```
 
 ### Availability
 
@@ -240,10 +297,12 @@ GET /api/availability?media_type=movie&tmdb_id=27205                       (Ince
 | GET | `/api/torrent-stream/sidegrade?<same query as resolve>&current=<hash>&current_q=[&draining=1][&critical=1][&avoid=<hash>,<hash>]` | 200 resolve result of a different torrent of at least `current_q` that keeps up now (measured within 45 s; a spare the resolve kept warm) and, when `current`'s last measurement kept up too, delivers ≥ 1.5× its rate / need; while `current` starves (or with `critical=1`) also one of a lower resolution that keeps up (the playing resolution or higher first). A spare that does not keep up is never offered. 204 otherwise (then it measures the spares in the background). At most one per title every 2 minutes; spares exist only until 60 s after the pick without playback or 3 minutes into playback (or after their arrival / the last `draining=1` poll, whichever is later). `draining=1`: the player's buffer drains; when no spare is left to measure, the server searches for alternatives in the background (at most every 3 min per title, capped at the playing resolution, without `current` and `avoid`; its checks wait while a stream starts) and a pick that finished good (never the search's "best so far" cap answer) is offered on a later poll under the same rules. `critical=1` (buffer under 6 s, implies `draining`): a lower resolution that keeps up is fine too. `avoid=` (≤ 5): torrents the player found slow, never offered (spares among them are dropped). 400 for an invalid `current` |
 | GET | `/api/torrent-stream/subalt?<same query as resolve>&current=<hash>[&current_q=][&lang=tr][&avoid=]` | 200 resolve result (with `format.subs`) of another release of the title whose subtitles include `lang` (default: the profile's, `X-Lang`): checked for the same client caps, kept up when measured (within 30 min), of a fitting length, of the playing resolution, a higher one or one step lower (not below 720p unless playing below; no 4K without `hevc=1`; `maxq` holds). 204 otherwise; then the server scans up to 3 untried candidates' headers in the background (one scan server-wide, at most every 10 min per title) and answers 204 with `Retry-After: 30` while it runs. The player calls it when the playing file has no subtitle in the profile's language; the cached source is not changed. 400 for an invalid `current` |
 | GET | `/api/torrent-stream/upgrade?<same query as resolve>&current=<hash>&current_q=<2160\|1080\|720\|480>` | 200 resolve result of a higher resolution than the playing `current` once its swarm keeps up (delivered rate ≥ 1.3× its bitrate from a finished measurement, duration verified; resolutions are the probed ones, and for the cached source the server's probed resolution wins over `current_q`); 204 otherwise (also for requests without `hevc=1`, with `maxq`, or `current_q=2160`). Without a running background warm-up it starts one upgrade search for the title (at most every 10 min); `failed=<reason>`: the player's last switch to an offered upgrade failed (logged; it tries once more); 400 for an invalid `current` |
+| POST | `/api/torrent-stream/instant` | body `{items: [{type: "movie"\|"tv", tmdb_id, title?, year?, season?, episode?}]}` (≤ 100, invalid items dropped) → 200 `{enabled, results: {"movie:123": true\|false\|null}}`: whether the title has a release TorBox has cached (the "⚡" card chip). Answers at once from memory; `null` = unknown (being checked, or the check failed: asked again after 10 min); titles without a fresh answer are queued for the background check. With TorBox off `enabled: false` and every answer `null`, nothing is queued. TV shows are checked by `season` / `episode` (default S01E01). See [ARCHITECTURE.md](ARCHITECTURE.md#instant-play-hints) |
 | GET | `/api/torrent-stream/files?magnet=` | `{hash, name, files: [{id, name, path, size}]}`; adds the torrent to TorrServer, except a TorBox source, whose known files are listed without TorrServer |
 | GET | `/api/torrent-stream/probe?hash=&index=` | `{duration, video_codec, width, height, hdr, dolby_vision, direct, audio_tracks: [{index, language, title, codec, channels, default, direct, split_direct}], split, expected_runtime?, duration_mismatch?}`; `direct` = sent untouched to this client (takes `hevc`, `acodecs` like play); `split_direct` = sent untouched in a `track=audio` stream (`acodecs` plus `split_acodecs`); `split: true` = play takes `track=` (clients detect split support from it); `default` = the track's default disposition in the file. With `type` and `tmdb_id` (plus `season`, `episode`; or `runtime` minutes) it adds `expected_runtime` (minutes) and `duration_mismatch` (same rule as resolve) |
 | GET | `/api/torrent-stream/play?hash=&index=&t=<sec>&audio=<n>&acodecs=&hevc=1` | live fragmented MP4; seeking = new request with a new `t`. Audio tracks whose codec is in `acodecs` and fits MP4 (aac, opus, flac, mp3, ac3, eac3) are copied; others are re-encoded to Opus (when `acodecs` has `opus`) or AAC at 48 kHz, 5.1 for multichannel sources (7.1 → 5.1, 384 kbps), stereo 160 kbps (Opus) / 256 kbps (AAC). Without `acodecs` only AAC is copied. `track=video` / `track=audio` (split mode, see [Split streams](#split-streams)): only that elementary stream (`audio/mp4` for audio), on the file's own timeline; also copies the `split_acodecs` codecs; 400 for another `track` |
 | GET | `/api/torrent-stream/seekpoint?hash=&index=&t=&audio=&acodecs=&hevc=1` | `{t, exact?}`: where a play stream requested at `t` really starts. Streams with copied video or audio start on the keyframe before `t` (`track=` and `split_acodecs` as in play: a split pair copies the split-only codecs too) |
+| POST | `/api/torrent-stream/keepalive?hash=&index=` | 204; a player paused by the viewer sends it every 15 s. The torrent counts as playing for the stream guard and playback priority (as if its `play` stream had just ended), its title's 15 min hold is renewed, and a TorBox file keeps a fresh link and a live CDN connection (a one-byte read, at most every 20 s), so the restart after a long pause starts at once. Made for `navigator.sendBeacon`; 400 for an invalid hash |
 | GET | `/api/torrent-stream/thumb?hash=&index=&t=<sec>[&w=<px>]` | Trick play frame: `image/jpeg` of the keyframe at or before `t` snapped down to the 10 s grid (`X-Thumb-T` = the grid time), `w` (64-1280, default 320) rounded up to 160 / 240 / 320 / 480 / 640, HDR tone-mapped to SDR. 200 with `Cache-Control: public, max-age=31536000, immutable` and `X-Cache: HIT\|MISS`. 204 + `Retry-After: 2` (`X-Thumb-Wait` says why) when the file's pieces must not be read now: its stream is starting (probe running, or the newest play stream has not sent its first bytes), or another torrent plays or starts; cached frames are always served. 504 + `Retry-After` when the frame is not ready within 6 s (the job goes on up to 15 s, so a retry is usually a hit), 404 when ffmpeg finds no frame there (remembered 1 min), 400 for an invalid hash / index / `t` (not 0-86400, or past the probed end) / `w`. See [ARCHITECTURE.md](ARCHITECTURE.md#trick-play-thumbnails) |
 | POST | `/api/torrent-stream/thumb/prefetch?hash=&index=&t=<sec>,<sec>…[&w=]` | 202 `{queued, cached}` or `{queued: 0, skipped: <why>}`; makes up to 12 frames (grid times) in the background, one at a time and only while no viewer waits for a frame. Only while the torrent's play stream runs steadily (flowing, older than 30 s, no other torrent starting); otherwise nothing is queued. 400 for invalid times or more than 12 |
 | GET | `/api/settings/indexer` | 200 `{id, jackett_url, api_key_set, min_seeders, preferred_quality, bitsearch_enabled, created_at, updated_at}`; the API key is never returned |

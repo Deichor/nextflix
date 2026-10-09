@@ -39,12 +39,12 @@ docs/                       this folder
 | `profiles` | Profile CRUD, max 5, per-profile UI `language` (`en`/`tr`, default `en`), seeds "Home" on first start, delete cascades through cleaners | `profiles` |
 | `progress` | Continue watching, per-episode progress | `stream_progress` |
 | `ratings` | Per-profile ratings (`dislike`/`like`/`love`) and Favorites (replaces My List), one-time My List migration, change hook; see [Ratings and Favorites](#ratings-and-favorites) | `title_ratings`, `rating_migrations` (`my_list_items` is kept, read-only) |
-| `recommendations` | Per-profile rows built from ratings + TMDB recommendations/similar; see [Recommendations](#recommendations) | – (memory cache) |
+| `recommendations` | Per-profile rows built from ratings + TMDB recommendations/similar, and the "Surprise me" pick (ratings + watch history); see [Recommendations](#recommendations), [Surprise me](#surprise-me) | – (memory cache) |
 | `top10` | Netflix weekly Top 10 (Turkey and global) mapped to TMDB; see [Top 10](#top-10) | `top10_lists`, `top10_titles` |
-| `catalog` | TMDB lists, details, search, related titles, seasons | – |
+| `catalog` | TMDB lists, details, search, related titles, seasons, search filters (`/api/catalog/discover`, see [Search filters](#search-filters)) | – |
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
-| `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
+| `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
 | `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 
@@ -73,8 +73,8 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 4. Context cancelled by SIGINT/SIGTERM.
 5. `progress`, `ratings`, then `profiles` with both as cleaners, plus `EnsureDefault`; `ratings.MigrateMyList()`
    (one time, logged) and `go ratings.Backfill(ctx)`; `recommendations` (ratings adapter + TMDB catalog, hooked to
-   `ratings.OnChange`); `top10` (`Start(ctx)` loads stored lists and refreshes in the background).
-6. `catalog`, `providers` (both on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings`.
+   `ratings.OnChange`), plus the watch history (`SetHistory(watchHistory(progress))`); `top10` (`Start(ctx)` loads stored lists and refreshes in the background).
+6. `catalog`, `providers` (both on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
 7. `httpserver.New`, `images.Register(r, …)` on the root, `api := r.Group("/api")`, every other module's `Register`, `httpserver.Run`.
 
 ## Web
@@ -84,6 +84,7 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 | `home` | `/` |
 | `catalog` | `/movies`, `/tv-shows`, `/new-popular`, `/tmdb-movie/[id]` |
 | `search` | `/search` |
+| `surprise` | – ("Surprise me" button and modal, used by `home` and `search`) |
 | `favorites` | `/favorites` (`/my-list` redirects here) |
 | `notifications` | `/notifications` |
 | `profiles` | `/profiles` (and `ProfileGate`, which forces a profile pick on every page) |
@@ -506,10 +507,26 @@ speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `pl
 - Playback: hash / index keep naming the file on every endpoint (`probe`, `play`, `seekpoint`, `thumb`, subtitles).
   `fileURL` maps a debrid source to a loopback proxy (`http://127.0.0.1:<random>/f/<hash>/<index>`, not reachable from
   the LAN) that reads the TorBox link with `Range`: the link is cached 2 h (TorBox opens it for 3 h) and requested
-  again on a 401 / 403 / 404 / 410; a reset, cut or stalled (20 s) upstream read is resumed at the next byte on a new
-  connection, so ffmpeg / ffprobe see one unbroken file and keep their own `-reconnect` flags. The subtitle module
-  reads through the same proxy (moviehash range reads, embedded and live tracks, subtitle files of the torrent from
-  TorBox's list), wired in `main.go`.
+  again on a 401 / 403 / 404 / 410. The subtitle module reads through the same proxy (moviehash range reads, embedded
+  and live tracks, subtitle files of the torrent from TorBox's list), wired in `main.go`.
+- Proxy chunks (`debrid_proxy.go`): one CDN connection gives ~18 MB/s and every new range costs 0.2-0.9 s before its
+  first byte, and ffmpeg reads the header, the end and the cues of an MKV on separate connections before every seek
+  (4 sequential requests, 2.2 s of first-byte waits for a 4K file). So the file is read in bounded chunks: a reader's
+  position starts a 4 MB chunk, a reader that read 1 MB gets the next 8 MB chunk fetched ahead, from 4 MB on 3 of
+  them in parallel (keep-alive pool, ≤ 8 idle connections, 90 s). Chunks are shared by every reader of the file and
+  stay cached (LRU over all files, 256 MB, chunks in use never evicted), so the header / index / cue reads before a
+  seek, the data around a paused position and a restart at the same spot never go out again. Readers get bytes as
+  they arrive (no wait for the whole chunk). A chunk fetch without headers after 4 s or without bytes for 5 s is
+  tried again on a new connection (DPI stalls) and resumed at its next byte, up to 6 failures / 2 link refreshes;
+  a reader whose chunk gave up tries one new chunk, then ends (ffmpeg reconnects). Measured on Big Buck Bunny 4K
+  x265 MKV (7.1 GB, 96 Mbit/s, `copy` to fMP4): first fMP4 bytes at t=0 1.75 s → 0.77 s, at t=300 4.2 s → 1.0 s
+  (0.07 s again at the same spot), t=100 4.8 s → 1.2 s; 10 s of media at t=300 10.6 s → 5.9 s (line bound:
+  ~25 MB/s over 4 connections); Big Buck Bunny 1080p MP4: t=300 1.4 s → 0.14 s.
+- A file whose CDN reads gave up (after those retries) is marked broken for 2 min: `fileURL` then gives TorrServer's
+  URL for it (the same file by path and size), so the player's silent restart plays the same release from the swarm
+  (logged `torbox: <hash>:<i> could not be read, playing it from the swarm`). The TorBox transport remembers the
+  address each host last connected to and dials it when the name does not resolve (Docker's DNS answers
+  `server misbehaving` / times out now and then); TLS still checks the host name.
 - TorrServer never loads a debrid source: its stat (pings, release names) and `files` (a player re-adding a saved
   or offered source) are answered from what is known, it is not
   saved to TorrServer's DB, and a cached debrid source is re-warmed by fetching its link and header. After a restart
@@ -522,6 +539,43 @@ speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `pl
 - Players: the web player shows a small "⚡ TorBox" badge next to the quality badge for a debrid source.
 - Live check: `go test -tags live -run TestLiveTorBox -v ./internal/modules/streaming/` with `TORBOX_API_KEY` (and
   ffmpeg) checks the account read-only with the public-domain Big Buck Bunny torrent.
+
+### Instant play hints
+
+Title cards show a small "⚡" (tooltip "Anında açılır" / "Instant") when the title has a release TorBox has cached,
+so Play starts from the CDN at once (`instant.go`, `POST /api/torrent-stream/instant`).
+
+- Check per title: the resolve search without TorrServer (`searchTitle`: Jackett and Bitsearch, TMDB's English title,
+  year and other names, the same early cut; slower indexers may add results for up to 12 s more), ranked by `tsRankAll`
+  for a browser client. The best 20 hashes, leaving out cinema recordings, other years (ranking rejects them) and
+  releases below 720p, go to one `checkcached` call (the shared 30 min answer cache, so a Play right after reuses it).
+  Any cached → true; none → false; nothing usable found → false; a hash TorBox did not answer (failure, pause) or a
+  failed search → unknown. TV shows are checked by S01E01 (the episode a Continue Watching card names, when given);
+  season packs count. A title that is not out yet is false without a search.
+- Answers are kept per title (`movie:<id>` / `tv:<id>`) in memory: true 6 h, false 1 h; an expired one is still
+  served (up to 24 h) while it is checked again. Unknown answers are retried after 10 min at the earliest.
+- The endpoint never waits: it answers what is known and queues the rest (a client's titles before prewarm ones,
+  ≤ 300 queued). Two workers check one title each. Before a check and every second during it the gate is asked:
+  a stream plays (or ended < 20 s ago), a stream starts, a resolve job runs (Play, a detail-page prefetch) or TorBox
+  is paused → the check waits, and a running one is cancelled and queued again at the front.
+- Prewarm (`StartInstant`, wired in `main.go` with the Top 10 of Turkey and global and TMDB's top 10 trending movies
+  and shows of the week): 2 min after start and then every 10 min, only while nothing is queued or running and the
+  gate is open, titles without a fresh answer are queued, at most 60 an hour.
+- TorBox off (no key or disabled): every answer is null and nothing is searched.
+- Web (`shared/lib/instant.ts`, `shared/ui/InstantChip.tsx`): cards ask once their row is near the viewport; the asks
+  of one render are batched into one POST (150 ms debounce, ≤ 100 titles); unknown titles still on screen are asked
+  again after 20 s, twice at most; known answers are reused for 10 min. Home and catalog cards and Continue Watching
+  show the chip in the image corner, the hover preview "⚡ Instant" next to the quality badges, the detail page
+  "⚡ Anında" next to Play. The TV app (`tv/webos/src/components/instant.ts`, `Row.tsx`) does the same for the cards
+  that load their image (an SVG bolt, the TV has no emoji font).
+- Measured from a test server on `nextflix_default` (27 titles: Top 10 Turkey movies and shows plus 7 others):
+  one check took 0.8-4 s (13 s for a title without a cached release, which waits for the slower indexers); all 27
+  were known 40 s after the first request (2 at a time); 26 of 27 had a cached release (10-20 of the best 20 for
+  popular titles, 1 of 2 for small Turkish shows). The endpoint answers in 1-2 ms, first call or cached. A first
+  visit of the web home page (fresh server) asked 145 titles in 5 POSTs (rows as they came near) and re-asked them
+  in 2 POSTs after 20 s, when 24 chips showed; the server checked 146 titles in about 4 minutes (127 cached,
+  19 not, none unknown), and a second visit showed 171 chips at once from 3 POSTs. A detail-page prefetch paused the checks (`waiting while a resolve runs`, one
+  running check stopped and queued again).
 
 ### Trick play thumbnails
 
@@ -652,16 +706,39 @@ with `maxq=1080`, then `720`. A probe that reports `duration_mismatch` re-resolv
 While a sidegrade loads in the hidden slot (below), a stall does not step down: the step down waits for that
 preparation and runs only if it fails.
 
-A stream that breaks before its first frame (an element error: the server dropped or cut it) is restarted silently at
-the same position once per torrent; if that fails too the title is resolved again once (`refresh`, the failed torrent
-in `avoid`), and only then "Playback failed" shows. A stream that ended well before the file end restarts silently
-(up to 3 times, then "connection lost"). An active element that ends up paused with no media at all (`readyState` 0, not a hold, not a viewer's pause, which keeps its data) for two 3 s checks restarts the stream at the last position the same way.
+Recovery chain (web `TorrentStreamPlayer.tsx`; the TV engine has the same restarts, chain and pause keep-alive,
+without the kept frame): a stream that breaks before its first frame (an
+element error: the server dropped or cut it) is restarted silently at the same position once per torrent; a stream
+that broke after playing (element error, ended well before the file end, stall watchdog, a paused element left without
+media) restarts silently up to 3 times. After that the source is replaced: the title is resolved again (`refresh`, a
+fresh torrent in `avoid`), up to 3 times per item. A TorBox file whose CDN reads gave up is meanwhile served from
+TorrServer by the server (see Debrid), so the silent restart already plays the same release from the swarm. An error
+shows only when the whole chain failed, with Retry; for a TorBox source it is neutral ("Playback could not start" /
+"stopped and could not be resumed"), never the "not enough peers" wording. While the chain runs the screen keeps one
+state: the last frame stays on screen, dimmed, under the empty video (a canvas in the parent, so it survives the
+new PlayerCore of a replaced source) with a small spinner and "Switching source…" / "Kaynak değiştiriliyor…", or the
+plain loading screen when no frame was shown yet; no toasts per attempt, no error screens between attempts. Every
+restart keeps the last frame the same way (seeks, audio track changes). The loading overlay shows only after 400 ms
+without frames and goes once frames ran 300 ms (`useSteady`), and the kept frame goes once the new stream played
+0.3 s. Restarts log `[nextflix] restart: <reason>` to the console. Browser tests: with localStorage `nfx-debug=1`,
+`window.__nfxFailPlays = n` makes the next n play streams fail.
+
+Pause: while the viewer pauses, the player sends `POST /keepalive` every 15 s (the server keeps the torrent guarded
+and prioritized, the title held, and a TorBox file's link and CDN connection warm). A restart while paused (the
+stream died) only gets the new stream ready (`preload=auto`, no autoplay), so Play starts at once. After a pause of
+10 s or more a dead element restarts on Play right away; a stall within 5 minutes after such a resume restarts at
+once when nothing arrived since the resume (the browser only played what it had cached: Chrome keeps ~25 s of a
+progressive stream beyond `buffered`), else after 2.5 s without buffer growth (also for a stream that delivered nothing
+for 10 s) instead of the usual 12 s. Measured with a stream frozen during a 150 s pause (ffmpeg stopped): resume
+plays at once, the stall when the cache runs dry lasts 2.8 s (torrent, Night of the Living Dead) / 3.9 s (TorBox
+4K re-encoded) before frames run again; a healthy stream resumes at once.
 
 Adaptive start buffer (`web/src/features/watch/startBuffer.ts`, ported to `tv/webos/src/player/startBuffer.ts`):
-a source whose resolve health (`rate / need`) is below 2×, or unknown (saved progress, given sources), starts paused
-(`preload=auto`, still downloading) until 20 s are buffered ahead, at most 10 s after the first frames were playable
-(`readyState` ≥ HAVE_FUTURE_DATA); a source at 2× or more starts at once. After a stall (`waiting` once playback
-started, not while seeking) any source is held paused until 8 s are buffered, at most 12 s. Either hold also ends
+a source whose resolve health (`rate / need`) is below 1.3× starts paused (`preload=auto`, still downloading) until
+8 s are buffered ahead, at most 4 s after the first frames were playable (`readyState` ≥ HAVE_FUTURE_DATA); a
+source at 1.3× or more, an unmeasured one and a TorBox source (line speed) start at once. Only the first stream of a
+source holds; seeks and restarts play at once. After a stall (`waiting` once playback started, not while seeking)
+any source is held paused until 4 s are buffered, at most 6 s. Either hold also ends
 when the buffer reaches the end of the file or the browser stopped fetching with ≥ 2 s buffered. The normal loading
 screen shows with a small "Buffering for smooth playback…" line. A hold counts as a stall for the watchdog (only a
 buffer that stopped growing restarts the stream), the long-stall step down and the seamless switch (`stalled()`);
@@ -879,6 +956,52 @@ modified or dropped. Migrated rows have no title or artwork; `Backfill` fills em
 Results are cached in memory per profile for 30 minutes (empty results are not cached). `ratings.OnChange`
 invalidates the profile; a computation that started before the change is not cached. Concurrent requests of one
 profile share one computation.
+
+## Surprise me
+
+`GET /api/recommendations/surprise` (`recommendations/surprise.go`) answers one title per press:
+
+1. Taste: ratings and watch history become weighted titles: `love` 3, `like` 2, favorite without a rating 1.2
+   (+0.5 on top of love / like), finished title 1.0, started title 0.4 (a rated title ignores its history),
+   `dislike` −3; all times the recency factor of [Recommendations](#recommendations). History comes from
+   `progress.Service.History` through `recommendations.SetHistory` (adapter `watchHistory` in `main.go`).
+2. Candidates: TMDB recommendations and similar titles of the 8 strongest positive titles (support = weight × list
+   weight × position decay, as for the rows), the 3 genres with the highest affinity (≥ 0.2; genre sums of the 40 most
+   recent taste titles scaled to [−1, 1]) through TMDB discover (popular and well-rated titles of that genre, movie
+   and/or TV depending on the genre id; support 0.8 × affinity), and `/trending/all/week` (support 0.3, exploration).
+   The strongest single contribution decides the `reason`.
+3. Penalties: what the 5 most recent dislikes recommend counts against a candidate; a candidate whose penalty reaches
+   its support, or whose genres average below −0.35 affinity (a disliked genre), is dropped. So are rated / favorited
+   and adult titles, titles without backdrop or poster and titles with fewer than 50 votes.
+4. Score = support − penalty + 1.5 × genre affinity + the quality prior. The ranked pool is cached 30 min per profile
+   and language and dropped by `Invalidate` (any rating change).
+5. Each press removes titles with any watch progress (read fresh), the client's `exclude` list and the profile's last
+   20 picks (server memory), then samples one of the best 40 with a softmax over the scores scaled to [0, 1]
+   (temperature 0.35: the best is about 17 times as likely as the 40th). When every candidate was shown lately the
+   memory starts over. A profile without taste gets trending titles (`trending_pick`).
+6. The logo comes from TMDB images (profile language, English, language-less).
+
+Clients: web `features/surprise` (`SurpriseButton` + `SurpriseModal`: backdrop, logo, reason, overview, Play /
+Details / Something else; Play on the home page uses the page's player, elsewhere the detail page with `?play=1`;
+the last 20 picks of the tab go out as `exclude`), on the home billboard (`home/components/HomeSurprise`) and next to
+the search field. TV: side menu item "Surprise me" → `screens/SurpriseScreen.tsx` (full screen; Play opens the detail
+page with autoplay, the pick survives Back).
+
+## Search filters
+
+`GET /api/catalog/discover` (`catalog/discover.go`, see [API.md](API.md#discover-search-filters)) backs the genre
+chips of both search pages. A `Filter` holds the type (`all` / `movie` / `tv`), genres (AND) and the Anime flag
+(Animation + `original_language` `ja`). Clients send TMDB movie genre ids; `filterGenres` maps every one to its TV
+counterpart (Action / Adventure → Action & Adventure, Sci-Fi / Fantasy → Sci-Fi & Fantasy, War → War & Politics,
+Thriller → Mystery, Kids → Family for movies) or to none (History, Horror, Music, Romance; Reality only exists for TV),
+which rules that media type out. Without a query the filter becomes TMDB discover queries (`with_genres` joined with
+commas = AND), movie and TV pages merged by popularity; with a query the first 5 multi-search pages (cached 15 min) are
+filtered with the same mapping (`Filter.Match`).
+
+Web (`features/search`): type toggle (All / Movies / TV), chips sorted by their localized names (chips that cannot
+match the type are hidden and dropped), filters in the URL (`/search?q=&type=&genres=&anime=1`), infinite scroll while
+browsing. TV (`screens/SearchScreen.tsx`, `lib/discover.ts`): a horizontally scrolling chip row above the results
+(type chips, Anime, genres), OK toggles; the next browse page loads when focus nears the end of the grid.
 
 ## Top 10
 
