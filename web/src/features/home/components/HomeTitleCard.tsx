@@ -8,6 +8,7 @@ import { TitleItem, img, matchPercent, yearOf } from '@/features/home/feeds';
 import { progressPercent } from '@/features/watch/api';
 import { useFormat, useT } from '@/shared/i18n';
 import TmdbImage from '@/shared/ui/TmdbImage';
+import InstantChip from '@/shared/ui/InstantChip';
 
 export type CardVariant = 'backdrop' | 'poster';
 
@@ -81,6 +82,8 @@ function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardPro
               <p className="text-white text-xs sm:text-sm font-bold leading-tight line-clamp-2 drop-shadow">{item.title}</p>
             </div>
           )}
+
+          {playable && <InstantChip item={{ type: item.media_type, tmdb_id: item.id, title: item.title, year }} />}
 
           {pct > 0 && (
             <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[#5a5a5a]/80">

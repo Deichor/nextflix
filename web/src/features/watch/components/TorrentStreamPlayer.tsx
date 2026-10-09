@@ -59,6 +59,7 @@ import {
   holdPlaying,
   releaseTitle,
   releaseTorrents,
+  keepSourceAlive,
   ResolveParams,
   Availability,
   StreamApiError,
@@ -130,6 +131,19 @@ const STALL_MS = 12000;
 // The first start may wait for peers, so it gets more time
 const FIRST_START_MS = 30000;
 const MAX_RECOVERIES = 3;
+// A failed source is resolved again (without it) this many times per item before an error shows
+const MAX_AUTO_REFRESH = 3;
+// Pause keep-alive and the check after a long pause (the stream may have died meanwhile)
+const KEEPALIVE_MS = 15000;
+const LONG_PAUSE_MS = 10000;
+const RESUME_CHECK_MS = 2500;
+// A stream without new data this long counts as dead once playback stalls
+const QUIET_STREAM_MS = 10000;
+// How long after a long pause a stall still counts as a stream that died during it
+const AFTER_PAUSE_MS = 5 * 60 * 1000;
+// The loading overlay shows after this long without frames and hides once frames ran this long
+const LOADING_SHOW_MS = 400;
+const LOADING_HIDE_MS = 300;
 // Adaptive quality: two stalls within STALL_WINDOW_MS, or one longer than LONG_STALL_MS, on a
 // 1080p+ source re-resolve with a lower cap (4K -> 1080p -> 720p, never lower, never back up)
 const LONG_STALL_MS = 8000;
@@ -188,6 +202,32 @@ const videoQuality = (w: number, h: number) => (w >= 3200 || h >= 1800 ? 2160 : 
 
 // The cap below a source of this quality, or null when it is already 720p or lower
 const lowerCap = (quality: number): QualityCap | null => (quality >= 2160 ? 1080 : quality >= 1080 ? 720 : null);
+
+// `on` with hysteresis: turns true after it held onMs, false after it was off for offMs (no flicker
+// of the loading overlay between quick restarts)
+function useSteady(on: boolean, onMs: number, offMs: number): boolean {
+  const [value, setValue] = useState(on);
+  useEffect(() => {
+    if (on === value) return;
+    const timer = setTimeout(() => setValue(on), on ? onMs : offMs);
+    return () => clearTimeout(timer);
+  }, [on, value, onMs, offMs]);
+  return value;
+}
+
+// Browser tests: with localStorage nfx-debug=1, `window.__nfxFailPlays = n` makes the next n play streams fail
+const debugFailPlay = () => {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as { __nfxFailPlays?: number };
+  try {
+    if (localStorage.getItem('nfx-debug') !== '1') return false;
+  } catch {
+    return false;
+  }
+  if (!w.__nfxFailPlays || w.__nfxFailPlays <= 0) return false;
+  w.__nfxFailPlays--;
+  return true;
+};
 
 const formatTime = (s: number) => {
   if (!isFinite(s) || s < 0) s = 0;
@@ -297,7 +337,12 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // Set right before bumping `attempt`: resolve again skipping caches (or play switchTo), resuming at startAt.
   // wrongLength: the last file did not have the title's length.
   const retryRef = useRef<{ refresh: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }>({ refresh: false });
-  const autoRefreshedRef = useRef(false);
+  const autoRefreshesRef = useRef(0);
+  // A recovery chain runs (restart, fallback, resolve without the failed source): one stable
+  // overlay until frames run again, over the last frame when one was shown (frameRef)
+  const [recovering, setRecovering] = useState(false);
+  const frameRef = useRef<HTMLCanvasElement | null>(null);
+  const [frameShown, setFrameShown] = useState(false);
   // Torrents of the wrong length for the current item; the server never picks them again
   const avoidRef = useRef<string[]>([]);
   const lengthRetriesRef = useRef(0);
@@ -337,7 +382,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   metaRef.current = item.meta;
 
   useEffect(() => {
-    autoRefreshedRef.current = false;
+    autoRefreshesRef.current = 0;
+    setRecovering(false);
+    setFrameShown(false);
     avoidRef.current = [];
     lengthRetriesRef.current = 0;
     pendingStepDownRef.current = null;
@@ -416,6 +463,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         setPhase('ready');
       } catch (e: any) {
         if (cancelled || e?.name === 'AbortError') return;
+        setRecovering(false);
+        setFrameShown(false);
         if (e instanceof StreamApiError && e.status === 425) {
           setUnreleased(e.availability || { status: 'not_released', release_date: null });
           setPhase('error');
@@ -436,13 +485,37 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemKey, attempt]);
 
+  // Draws the active video's current frame into the canvas under the player (kept while it restarts)
+  const freezeFrame = useCallback((v: HTMLVideoElement | null) => {
+    const c = frameRef.current;
+    if (!c || !v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !v.videoWidth) return;
+    const scale = Math.min(1, 1280 / v.videoWidth);
+    c.width = Math.round(v.videoWidth * scale);
+    c.height = Math.round(v.videoHeight * scale);
+    try {
+      c.getContext('2d')?.drawImage(v, 0, 0, c.width, c.height);
+      setFrameShown(true);
+    } catch {
+      /* no frame to keep */
+    }
+  }, []);
+  const onRecovering = useCallback(() => setRecovering(true), []);
+  // Frames run again (or the chain ended in an error): the frozen frame and the recovery state go
+  const onRecovered = useCallback(() => {
+    setRecovering(false);
+    setFrameShown(false);
+  }, []);
+
   // Called by PlayerCore when the source fails (auto) or the user presses Try Again.
   // Returns false when nothing was retried, so PlayerCore shows its error.
   // A fresh source that failed even after its silent restart is resolved again once, without it.
   const retrySource = useCallback((position: number, auto: boolean) => {
     const reused = resolved.origin !== 'fresh';
-    if (auto && (!item.meta || autoRefreshedRef.current)) return false;
-    if (auto) autoRefreshedRef.current = true;
+    if (auto && (!item.meta || autoRefreshesRef.current >= MAX_AUTO_REFRESH)) return false;
+    if (auto) {
+      autoRefreshesRef.current++;
+      setRecovering(true);
+    }
     const failed = resolved.source?.hash?.toLowerCase();
     if (auto && !reused && failed && !avoidRef.current.includes(failed)) avoidRef.current = [...avoidRef.current, failed];
     retryRef.current = { refresh: !!item.meta, startAt: position };
@@ -920,7 +993,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const displayTitle = item.meta?.title || title || '';
   const subtitle = subtitleOf(item.meta, locale);
   // A cached resolve answers almost instantly, so wait a moment before showing the overlay
-  const showResolving = phase === 'resolving' && resolveElapsed >= 300;
+  const showResolving = phase === 'resolving' && resolveElapsed >= 300 && !recovering;
   const errorText = resolveError === 'player.noSource' || resolveError === 'player.nothingToPlay'
     ? t(resolveError === 'player.noSource' ? 'player.noSourceHint' : 'player.nothingToPlay')
     : resolveError;
@@ -936,6 +1009,11 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // Portal to body so transformed ancestors can't trap the fixed overlay
   return createPortal(
     <div ref={containerRef} className="fixed inset-0 z-[100] bg-black flex items-center justify-center select-none">
+      {/* The last frame stays (dimmed) under an empty video while a stream restarts or the source changes */}
+      <canvas
+        ref={frameRef}
+        className={`absolute inset-0 w-full h-full object-contain pointer-events-none transition-opacity duration-150 ${frameShown ? 'opacity-50' : 'opacity-0'}`}
+      />
       {phase === 'ready' && (
         <PlayerCore
           key={resolved.n}
@@ -949,6 +1027,11 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           onNext={next ? playNext : undefined}
           onPrefetchNext={isTv ? prefetchNext : undefined}
           onSourceFailed={retrySource}
+          recovering={recovering}
+          frameShown={frameShown}
+          freezeFrame={freezeFrame}
+          onRecovering={onRecovering}
+          onRecovered={onRecovered}
           onStruggling={item.meta ? struggling : undefined}
           onBufferHealth={item.meta ? onBufferHealth : undefined}
           onWrongLength={item.meta ? replaceWrongLength : undefined}
@@ -1030,6 +1113,13 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         </>
       )}
 
+      {phase === 'resolving' && recovering && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+          <Loader2 className={`${frameShown ? 'w-8 h-8' : 'w-12 h-12'} text-red-600 animate-spin mb-3`} />
+          <p className="text-white/70 text-sm">{t('player.switchingSource')}</p>
+        </div>
+      )}
+
       {phase !== 'ready' && (
         <BackButton label={t('player.back')} onClick={onClose} className="absolute top-4 left-4 md:top-6 md:left-6 z-10" />
       )}
@@ -1051,6 +1141,15 @@ interface PlayerCoreProps {
   onPrefetchNext?: (position: number, duration: number) => void;
   /** The source failed; returns true when the parent retries with another source */
   onSourceFailed: (position: number, auto: boolean) => boolean;
+  /** A recovery chain runs (the parent shows one stable overlay until onRecovered) */
+  recovering?: boolean;
+  /** The parent shows the last frame under the (empty) video */
+  frameShown?: boolean;
+  /** Keep this video's current frame on screen while its stream restarts */
+  freezeFrame?: (v: HTMLVideoElement | null) => void;
+  onRecovering?: () => void;
+  /** Frames run again, or the chain ended in an error */
+  onRecovered?: () => void;
   /** Playback keeps stalling; quality is the source's resolution class (2160/1080/720/480, 0 when unknown) */
   onStruggling?: (quality: number) => void;
   /** The probe says this file is not the whole title; returns true when the parent looks for another */
@@ -1080,7 +1179,8 @@ interface PlayerCoreProps {
 // that really starts at `startPoint.t`, so the shown time adds that offset. Seeks inside
 // what is already buffered happen natively; anything else restarts the stream.
 function PlayerCore({
-  magnet, source, startAt, meta, title, subtitle, nextLabel, onNext, onPrefetchNext, onSourceFailed, onStruggling, onWrongLength,
+  magnet, source, startAt, meta, title, subtitle, nextLabel, onNext, onPrefetchNext, onSourceFailed, recovering = false, frameShown = false,
+  freezeFrame, onRecovering, onRecovered, onStruggling, onWrongLength,
   onBufferHealth, positionRef, qualityRef, switchRef, onSwitched, onSubtitleState, subAlt, wantSubLangRef, onClose, fullscreen,
   toggleFullscreen,
 }: PlayerCoreProps) {
@@ -1128,7 +1228,6 @@ function PlayerCore({
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
-  const [reconnecting, setReconnecting] = useState(false);
   const [status, setStatus] = useState<MessageKey>('player.connecting');
   const [error, setError] = useState('');
   const [muted, setMuted] = useState(false);
@@ -1153,8 +1252,34 @@ function PlayerCore({
   // buffered; `since` is when the wait counts from (null until the first frames are playable)
   const holdRef = useRef<{ kind: HoldKind; since: number | null; ahead: number } | null>(null);
   const [holding, setHolding] = useState(false);
-  const startHoldRef = useRef(false);
-  startHoldRef.current = needsStartHold(shownSource?.ratio);
+  // The file whose first stream got its start hold (only the first stream of a source holds;
+  // a TorBox source never does: it delivers at line speed)
+  const startHeldRef = useRef('');
+  const shownSourceRef = useRef(shownSource);
+  shownSourceRef.current = shownSource;
+  // Pause handling: when the viewer paused (0 = playing), a restart that keeps the element
+  // paused, and the resume check after a long pause
+  const viewerPausedAtRef = useRef(0);
+  const startPausedRef = useRef(false);
+  const resumeCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Frames must run this far past the 'playing' position before a restart or recovery counts as done
+  const advanceFromRef = useRef<number | null>(null);
+  const recoveringRef = useRef(recovering);
+  recoveringRef.current = recovering;
+  const onRecoveredRef = useRef(onRecovered);
+  onRecoveredRef.current = onRecovered;
+  const freezeFrameRef = useRef(freezeFrame);
+  freezeFrameRef.current = freezeFrame;
+  const onSourceFailedRef = useRef(onSourceFailed);
+  onSourceFailedRef.current = onSourceFailed;
+  // When the viewer last resumed after a long pause (the stall watchdog is quicker for a while)
+  const resumedAtRef = useRef(0);
+  // When the active element last received data ('progress')
+  const lastDataRef = useRef(Date.now());
+  const onRecoveringRef = useRef(onRecovering);
+  onRecoveringRef.current = onRecovering;
+  const frameShownRef = useRef(frameShown);
+  frameShownRef.current = frameShown;
   const blockedRef = useRef(false);
   blockedRef.current = !!error || ended;
   // The running seamless switch preparation, if any
@@ -1337,8 +1462,10 @@ function PlayerCore({
     setBuffering(true);
     setEnded(false);
     if (stallTimer.current) clearTimeout(stallTimer.current);
-    // Drop the old stream now so its download doesn't compete with the new position
+    // Drop the old stream now so its download doesn't compete with the new position; its last
+    // frame stays on screen (dimmed) until the new stream's frames run
     const v = videoRef.current;
+    freezeFrameRef.current?.(v);
     if (v && v.getAttribute('src')) {
       v.removeAttribute('src');
       v.load();
@@ -1372,6 +1499,13 @@ function PlayerCore({
       }
     })();
   }, [apiUrl, beginStall, knownPosRef]);
+
+  // Stops the resume check after a long pause
+  const clearResumeCheck = useCallback(() => {
+    if (resumeCheckRef.current) clearTimeout(resumeCheckRef.current);
+    resumeCheckRef.current = null;
+  }, []);
+  useEffect(() => clearResumeCheck, [clearResumeCheck]);
 
   // 2) Probe the chosen file for duration, video info and audio tracks
   useEffect(() => {
@@ -1422,7 +1556,9 @@ function PlayerCore({
         restartAt(start > 0 && (dur <= 0 || start < dur - 10) ? start : 0);
       } catch (e: any) {
         if (cancelled) return;
-        if (!onSourceFailed(startRef.current, true)) setError(e.message || tRef.current('player.couldNotRead'));
+        if (sourceFailed('probe failed', startRef.current)) return;
+        setError(shownSourceRef.current?.debrid ? tRef.current('player.playbackFailedNeutral') : e.message || tRef.current('player.couldNotRead'));
+        onRecoveredRef.current?.();
       }
     })();
     return () => { cancelled = true; };
@@ -1604,26 +1740,50 @@ function PlayerCore({
     stallTimer.current = null;
   }, []);
 
-  const recover = useCallback(() => {
+  // The whole recovery chain failed: only now an error shows (a neutral one for TorBox, whose
+  // failures have nothing to do with peers)
+  const failChain = useCallback((key: 'player.connectionLost' | 'player.playbackFailed') => {
+    const debrid = !!shownSourceRef.current?.debrid;
+    setError(tRef.current(debrid ? (key === 'player.connectionLost' ? 'player.connectionLostNeutral' : 'player.playbackFailedNeutral') : key));
+    onRecoveredRef.current?.();
+  }, []);
+
+  // The source failed for good: the parent resolves again without it (one stable overlay over
+  // the last frame meanwhile); false when it is out of tries
+  const sourceFailed = useCallback((why: string, position = stateRef.current.position): boolean => {
+    console.info(`[nextflix] restart: ${why}: trying another source`);
+    freezeFrameRef.current?.(videoRef.current);
+    onRecoveringRef.current?.();
+    return onSourceFailedRef.current(position, true);
+  }, []);
+
+  // A broken stream restarts silently at the position (a paused viewer stays paused, the restart
+  // only gets the stream ready), up to MAX_RECOVERIES times; then the source is replaced, and only
+  // when that is out of tries the error shows
+  const recover = useCallback((why: string) => {
     clearStall();
     if (recoveries.current >= MAX_RECOVERIES) {
-      setReconnecting(false);
-      setError(tRef.current('player.connectionLost'));
+      if (!sourceFailed(`${why} (${MAX_RECOVERIES} restarts)`)) failChain('player.connectionLost');
       return;
     }
     recoveries.current++;
-    setReconnecting(true);
+    console.info(`[nextflix] restart: ${why}`);
+    startPausedRef.current = viewerPausedAtRef.current > 0;
     restartAt(stateRef.current.position);
-  }, [clearStall, restartAt]);
+  }, [clearStall, restartAt, sourceFailed, failChain]);
 
   const armStall = useCallback(() => {
     clearStall();
     if (stallResetTimer.current) clearTimeout(stallResetTimer.current);
-    const base = hasPlayed.current ? STALL_MS : FIRST_START_MS;
+    // A stall right after a long pause, or on a stream that delivered nothing for a while (the
+    // browser played what it had cached), is a stream that died: restart it quickly
+    const now = Date.now();
+    const dead = now - resumedAtRef.current < AFTER_PAUSE_MS || now - lastDataRef.current > QUIET_STREAM_MS;
+    const base = !hasPlayed.current ? FIRST_START_MS : dead ? RESUME_CHECK_MS : STALL_MS;
     stallTimer.current = setTimeout(() => {
       const v = videoRef.current;
       // A paused player isn't stalled (a buffer hold is); the watchdog is armed again on the next 'waiting'
-      if (v && (!v.paused || holdRef.current)) recover();
+      if (v && (!v.paused || holdRef.current)) recover('stalled');
     }, base * (1 + recoveries.current));
   }, [clearStall, recover]);
 
@@ -1687,18 +1847,35 @@ function PlayerCore({
       adoptRef.current.url = '';
       return;
     }
-    setBuffering(true);
+    // A restart while the viewer paused only gets the stream ready; Play then starts at once
+    const keepPaused = startPausedRef.current;
+    startPausedRef.current = false;
     setEnded(false);
     hasPlayed.current = false;
-    v.src = src;
+    advanceFromRef.current = null;
+    lastDataRef.current = Date.now();
+    v.src = debugFailPlay() ? src.replace(/hash=[0-9a-f]+/, 'hash=debug-fail') : src;
     // A source change must never leave the element muted or at another volume
     v.muted = mutedRef.current;
     v.volume = volumeRef.current;
-    // A borderline or unmeasured swarm starts only with a larger buffer
     clearHold();
-    // Only the first stream of a source holds; seeks and restarts play at once
-    if (startHoldRef.current) { startHoldRef.current = false; startHold('start'); }
-    else v.play().catch(e => { if (e?.name !== 'AbortError') setPlaying(false); });
+    if (keepPaused) {
+      v.preload = 'auto';
+      setBuffering(false);
+      return;
+    }
+    setBuffering(true);
+    // A borderline swarm starts only with a larger buffer: the first stream of a source, never a
+    // seek or restart, and never a TorBox source (it delivers at line speed)
+    const s = shownSourceRef.current;
+    const key = `${hashRef.current}:${fileRef.current?.id ?? ''}`;
+    if (needsStartHold(s?.ratio) && !s?.debrid && startHeldRef.current !== key) {
+      startHeldRef.current = key;
+      startHold('start');
+    } else {
+      startHeldRef.current = key;
+      v.play().catch(e => { if (e?.name !== 'AbortError') setPlaying(false); });
+    }
     armStall();
     // stream.n restarts the same URL
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1883,7 +2060,6 @@ function PlayerCore({
     setStream(s => ({ t: p.t, n: (s?.n ?? 0) + 1 }));
     setCurrent(el.currentTime);
     setBuffering(false);
-    setReconnecting(false);
     setEnded(false);
     setShownSource(p.source);
     // Subtitles are listed again for the new file and the default pick runs again (as on a new source)
@@ -2004,15 +2180,58 @@ function PlayerCore({
     const timer = setInterval(() => {
       const v = videoRef.current;
       const dead = !!v && v.paused && v.readyState === HTMLMediaElement.HAVE_NOTHING && everPlayed.current &&
-        !blockedRef.current && !holdRef.current && !finishFadeRef.current;
+        v.networkState !== HTMLMediaElement.NETWORK_LOADING && !blockedRef.current && !holdRef.current && !finishFadeRef.current;
       deadChecks = dead ? deadChecks + 1 : 0;
       if (deadChecks >= 2) {
         deadChecks = 0;
-        recover();
+        recover('no media');
       }
     }, 3000);
     return () => clearInterval(timer);
   }, [recover]);
+
+  // While the viewer pauses, the server keeps the file ready (stream guard, TorBox link and connection)
+  useEffect(() => {
+    if (playing || !hash || !file || error || ended) return;
+    const timer = setInterval(() => {
+      if (viewerPausedAtRef.current) keepSourceAlive(hashRef.current, fileRef.current?.id ?? 0);
+    }, KEEPALIVE_MS);
+    return () => clearInterval(timer);
+  }, [playing, hash, file, error, ended]);
+
+  // Play after the viewer's pause. After a long one the stream may have died meanwhile (an idle
+  // connection dropped, ffmpeg or TorrServer gone): a dead element restarts at once, and one
+  // whose buffer does not grow within RESUME_CHECK_MS restarts at the position, instead of
+  // waiting for the stall watchdog.
+  const resumed = () => {
+    const pausedAt = viewerPausedAtRef.current;
+    viewerPausedAtRef.current = 0;
+    clearResumeCheck();
+    if (!pausedAt || Date.now() - pausedAt < LONG_PAUSE_MS) return;
+    resumedAtRef.current = Date.now();
+    const v = videoRef.current;
+    if (!v || blockedRef.current) return;
+    if (v.error || (v.readyState === HTMLMediaElement.HAVE_NOTHING && v.networkState !== HTMLMediaElement.NETWORK_LOADING)) {
+      recover('dead after a long pause');
+      return;
+    }
+    const startEnd = bufferedEnd(v.buffered, v.currentTime);
+    const t0 = Date.now();
+    const check = () => {
+      resumeCheckRef.current = null;
+      const el = videoRef.current;
+      if (el !== v || el.paused || blockedRef.current) return;
+      const end = bufferedEnd(el.buffered, el.currentTime);
+      if (end > startEnd + 0.5) return; // data flows again
+      const ahead = end >= 0 ? end - el.currentTime : 0;
+      if (Date.now() - t0 >= RESUME_CHECK_MS && ahead < 1.5) {
+        recover('no data after a long pause');
+        return;
+      }
+      if (Date.now() - t0 < 20000) resumeCheckRef.current = setTimeout(check, 500);
+    };
+    resumeCheckRef.current = setTimeout(check, 500);
+  };
 
   useEffect(() => {
     if (!switchNote) return;
@@ -2039,7 +2258,7 @@ function PlayerCore({
   const handleEnded = () => {
     // The stream ended well before the file did: ffmpeg or TorrServer dropped it
     if (duration > 0 && stateRef.current.position < duration - 30) {
-      recover();
+      recover('ended early');
       return;
     }
     clearStall();
@@ -2054,7 +2273,7 @@ function PlayerCore({
     const v = videoRef.current;
     if (!src || !v?.getAttribute('src')) return;
     if (hasPlayed.current) {
-      recover();
+      recover('stream error');
       return;
     }
     clearStall();
@@ -2063,10 +2282,12 @@ function PlayerCore({
     const h = hashRef.current;
     if (h && startRetriedRef.current !== h) {
       startRetriedRef.current = h;
+      console.info('[nextflix] restart: failed before its first frame');
+      startPausedRef.current = viewerPausedAtRef.current > 0;
       restartAt(stateRef.current.position);
       return;
     }
-    if (!onSourceFailed(stateRef.current.position, true)) setError(tRef.current('player.playbackFailed'));
+    if (!sourceFailed('failed before its first frame')) failChain('player.playbackFailed');
   };
 
   const retry = () => {
@@ -2096,6 +2317,8 @@ function PlayerCore({
   const remaining = duration - position;
   const showNextButton = !!onNext && duration > 0 && !error && countdown === null &&
     remaining <= Math.min(120, Math.max(40, duration * 0.04));
+  // The loading overlay comes only after LOADING_SHOW_MS without frames and goes once they ran LOADING_HIDE_MS
+  const loadingShown = useSteady(buffering, LOADING_SHOW_MS, LOADING_HIDE_MS);
   const playable = !!file && duration > 0 && !error;
   // Paused by the viewer: the controls (and the Back button) stay up
   const controlsVisible = showControls || panelOpen || (playable && !playing && !buffering && countdown === null);
@@ -2124,11 +2347,26 @@ function PlayerCore({
               i === activeSlot ? 'opacity-100 z-[1]' : i === fadingSlot ? 'opacity-100 z-0' : 'opacity-0 z-0 pointer-events-none'
             }`}
             playsInline
-            onPlay={e => { if (isActive(e)) setPlaying(true); }}
-            onPause={e => { if (isActive(e) && !holdRef.current) { setPlaying(false); persist(); } }}
+            onPlay={e => { if (isActive(e)) { setPlaying(true); resumed(); } }}
+            onPause={e => {
+              if (!isActive(e) || holdRef.current) return;
+              setPlaying(false);
+              persist();
+              // A viewer's pause (not the end, not a restart): keep-alives run until Play
+              if (!e.currentTarget.ended) viewerPausedAtRef.current = Date.now();
+            }}
             onWaiting={e => {
               if (!isActive(e)) return;
               setBuffering(true);
+              // The browser played what it had cached since a long pause and nothing arrived since:
+              // the old stream is gone, restart at once
+              const since = resumedAtRef.current;
+              if (hasPlayed.current && !e.currentTarget.seeking && since > 0 && Date.now() - since < AFTER_PAUSE_MS &&
+                  lastDataRef.current < since) {
+                resumedAtRef.current = 0;
+                recover('no data since the pause');
+                return;
+              }
               armStall();
               if (hasPlayed.current) beginStall(false);
               // Resume only with a few seconds buffered, not at the first frame
@@ -2137,8 +2375,8 @@ function PlayerCore({
             onPlaying={e => {
               if (!isActive(e)) return;
               setBuffering(false);
-              setReconnecting(false);
               clearStall();
+              advanceFromRef.current = e.currentTarget.currentTime;
               endStall();
               hasPlayed.current = true;
               everPlayed.current = true;
@@ -2153,10 +2391,21 @@ function PlayerCore({
               v.volume = volumeRef.current;
             }}
             onSeeked={e => { if (isActive(e) && nativeSeekTimer.current) clearTimeout(nativeSeekTimer.current); }}
-            onTimeUpdate={e => { if (isActive(e)) setCurrent(e.currentTarget.currentTime); }}
+            onTimeUpdate={e => {
+              if (!isActive(e)) return;
+              const now = e.currentTarget.currentTime;
+              setCurrent(now);
+              // Frames run again: the kept frame and a recovery chain are done
+              const from = advanceFromRef.current;
+              if (from !== null && now - from >= LOADING_HIDE_MS / 1000) {
+                advanceFromRef.current = null;
+                if (frameShownRef.current || recoveringRef.current) onRecoveredRef.current?.();
+              }
+            }}
             onEnded={e => { if (isActive(e)) handleEnded(); }}
             onError={e => { if (isActive(e)) handleError(); }}
             onSuspend={e => { if (isActive(e)) suspendSeenRef.current = true; }}
+            onProgress={e => { if (isActive(e)) lastDataRef.current = Date.now(); }}
           />
         ))}
       </div>
@@ -2188,7 +2437,7 @@ function PlayerCore({
       )}
 
       {/* Loading / buffering / error overlay */}
-      {(error || (buffering && !ended && (file || files.length <= 1))) && (
+      {(error || ((loadingShown || recovering) && !ended && (file || files.length <= 1))) && (
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
           {error ? (
             <div className="pointer-events-auto text-center px-6">
@@ -2204,9 +2453,9 @@ function PlayerCore({
             </div>
           ) : (
             <>
-              <Loader2 className="w-12 h-12 text-red-600 animate-spin mb-3" />
-              <p className="text-white/70 text-sm">{t(reconnecting ? 'player.reconnecting' : duration > 0 ? 'player.buffering' : status)}</p>
-              {holding && !reconnecting && <p className="text-white/40 text-xs mt-1">{t('player.smoothBuffering')}</p>}
+              <Loader2 className={`${frameShown ? 'w-8 h-8' : 'w-12 h-12'} text-red-600 animate-spin mb-3`} />
+              <p className="text-white/70 text-sm">{t(recovering ? 'player.switchingSource' : duration > 0 ? 'player.buffering' : status)}</p>
+              {holding && !recovering && <p className="text-white/40 text-xs mt-1">{t('player.smoothBuffering')}</p>}
             </>
           )}
         </div>

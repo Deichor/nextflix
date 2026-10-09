@@ -6,6 +6,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { ExternalLink, Volume2, VolumeX } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import RedLoader from '@/shared/ui/RedLoader';
+import InstantChip from '@/shared/ui/InstantChip';
 import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
 import WatchButton, { formatRemaining, useAvailability } from '@/features/watch/components/WatchButton';
 import SeasonEpisodes from '@/features/watch/components/SeasonEpisodes';
@@ -484,6 +485,11 @@ const TMDBMoviePage: React.FC = () => {
 
           <div className="flex items-center gap-2 md:gap-3">
             <WatchButton onClick={handleWatch} availability={availability} resume={!!resumeInfo} detail={resumeInfo?.label || (nextUp ? episodeLabel(nextUp.season, nextUp.episode, locale) : undefined)} />
+            <InstantChip
+              variant="label"
+              className="text-sm font-bold drop-shadow md:text-base"
+              item={{ type: mediaDetails.media_type, tmdb_id: mediaDetails.id, title: mediaDetails.title, year }}
+            />
             <RatingButtons item={rateItem} size="md" />
             {!!mediaDetails.homepage && (
               <a

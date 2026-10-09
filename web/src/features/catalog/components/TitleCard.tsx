@@ -13,6 +13,7 @@ import { useSourceQuality } from '@/features/watch/useSourceQuality';
 import { useAvailability, useUnavailableLabel } from '@/features/watch/components/WatchButton';
 import { tmdbImage } from '@/shared/lib/image';
 import TmdbImage from '@/shared/ui/TmdbImage';
+import InstantChip from '@/shared/ui/InstantChip';
 
 export type CardVariant = 'poster' | 'backdrop';
 
@@ -281,6 +282,9 @@ export function HoverPreview({ state, info, variant = 'backdrop', onPlay, onOpen
           {badges.map(b => (
             <span key={b} className="rounded-sm border border-white/40 px-1 text-[10px] leading-tight text-white/85">{b}</span>
           ))}
+          {!unavailable && (
+            <InstantChip variant="label" className="text-[11px]" item={src?.tmdb_id ? { type: src.type, tmdb_id: src.tmdb_id, title: src.title, year: src.year } : null} />
+          )}
         </div>
         {info.genres.length > 0 && (
           <p className="mt-1.5 truncate text-xs text-white/85">
@@ -359,6 +363,8 @@ export default function TitleCard({ item, variant = 'poster', onPlay, progress =
               <p className="line-clamp-1 text-xs font-bold text-white drop-shadow md:text-sm">{item.title}</p>
             </div>
           )}
+
+          <InstantChip item={{ type: item.mediaType, tmdb_id: item.id, title: item.title, year: item.year }} />
 
           {progress > 0 && (
             <div className="absolute inset-x-2 bottom-1.5 h-[3px] bg-[#5a5a5a]/90">

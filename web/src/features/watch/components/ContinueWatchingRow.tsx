@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, Play, X } from 'lucide-react';
 import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
 import { useActiveProfile } from '@/shared/lib/profile';
 import { useLocale, useT } from '@/shared/i18n';
+import InstantChip from '@/shared/ui/InstantChip';
 import {
   PlayRequest,
   StreamProgress,
@@ -136,6 +137,10 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
                           <Play className="w-5 h-5 text-white fill-current translate-x-0.5" />
                         </span>
                       </div>
+                      <InstantChip
+                        corner="left"
+                        item={{ type: p.media_type, tmdb_id: p.tmdb_id, title: p.title, season: p.season || undefined, episode: p.episode || undefined }}
+                      />
                       <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[#5a5a5a]/80">
                         <div className="h-full bg-[#E50914]" style={{ width: `${pct}%` }} />
                       </div>

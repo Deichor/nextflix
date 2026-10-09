@@ -61,6 +61,13 @@ export function ImageRowGate({ value, children }: { value: RowGate; children: Re
   return <RowGateContext.Provider value={value}>{children}</RowGateContext.Provider>;
 }
 
+/** For card extras (badges): true once the card's row is near the viewport, or `el` itself outside a row. */
+export function useRowNear(el: Element | null): boolean {
+  const row = useContext(RowGateContext);
+  const near = useNearViewport(el, !row);
+  return row ? row.near : near;
+}
+
 interface TmdbImageProps {
   /** TMDB path ("/abc.jpg"), /tmdb-img URL or image.tmdb.org URL; other URLs are used as-is */
   src?: string | null;
