@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, ArrowLeft, CalendarClock, MessageSquare, Pause, Play, RotateCcw, RotateCw, SkipForward } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CalendarClock, Clapperboard, MessageSquare, Pause, Play, RotateCcw, RotateCw, SkipForward } from 'lucide-react';
 import Spinner from '../components/Spinner';
 import { img } from '../lib/http';
 import { useI18n } from '../lib/i18n';
@@ -37,6 +37,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   const [visible, setVisible] = useState(true);
   const [zone, setZone] = useState<'timeline' | 'buttons'>('timeline');
   const [panel, setPanel] = useState(false);
+  const [styling, setStyling] = useState(false);
   const [preview, setPreview] = useState<number | null>(null);
   const previewRef = useRef<number | null>(null);
   const repeatRef = useRef(0);
@@ -148,8 +149,10 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
 
   const closePanel = useCallback(() => {
     setPanel(false);
+    setStyling(false);
+    reveal();
     requestAnimationFrame(() => focusById('pl-audio'));
-  }, []);
+  }, [reveal]);
 
   // All keys go to the player while it is open
   useEffect(() => pushKeyHandler(e => {
@@ -233,10 +236,18 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     : null;
 
   return (
-    <div className={`player ${controls ? 'show-controls' : ''} ${preview !== null && thumbFile ? 'is-scrubbing' : ''}`} ref={rootRef} data-nav-layer="player" onMouseMove={reveal}>
+    <div className={`player ${controls ? 'show-controls' : ''} ${preview !== null && thumbFile ? 'is-scrubbing' : ''} ${styling ? 'is-styling' : ''}`} ref={rootRef} data-nav-layer="player" onMouseMove={reveal}>
       <video ref={videoRef} className="player-video" playsInline onClick={() => engine?.togglePlay()} />
 
-      {playable && s.subId && s.cues.length > 0 && <SubtitleOverlay cues={s.cues} time={subtitleTime} raised={!!controls} />}
+      {playable && ((s.subId && s.cues.length > 0) || styling) && (
+        <SubtitleOverlay
+          cues={s.subId ? s.cues : []}
+          time={subtitleTime}
+          raised={!!controls && !styling}
+          sample={styling ? t('subStyle.sample') : undefined}
+          previewing={styling}
+        />
+      )}
 
       {(overlay === 'resolving' || overlay === 'loading' || overlay === 'error' || overlay === 'unreleased') && (
         <div className="player-cover">
@@ -335,6 +346,13 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
                 TorBox
               </span>
             )}
+            {s.cinema && (
+              <span className="badge">
+                <Clapperboard aria-hidden="true"
+                  style={{ width: '1.1em', height: '1.1em', color: '#e5e5e5', verticalAlign: '-0.2em', marginRight: '0.3em' }} />
+                {t('cinema.badge')}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -410,6 +428,8 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
           onSubtitle={id => engine?.setSubtitle(id)}
           subAlt={s.subAlt}
           onSubAlt={() => engine?.switchSubAlt()}
+          onClose={closePanel}
+          onStyling={setStyling}
         />
       )}
     </div>

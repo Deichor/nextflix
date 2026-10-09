@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { activeCues, type Cue } from '../lib/subtitles';
+import { subStyleClass, useSubtitleStyle } from '../lib/subtitleStyle';
 
-const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', lrm: '', rlm: '' };
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', lrm: '', rlm: '' };
 const decode = (s: string) => s.replace(/&(#\d+|[a-z]+);/gi, (m, e: string) => {
   if (e[0] === '#') return String.fromCharCode(Number(e.slice(1)));
   return ENTITIES[e.toLowerCase()] ?? m;
@@ -35,13 +36,39 @@ function renderCue(text: string, key: number): React.ReactNode {
       </span>,
     );
   });
-  return <span key={key} className="cue">{out}</span>;
+  // .cue-box carries the background box (one per line, see styles.css)
+  return <span key={key} className="cue"><span className="cue-box">{out}</span></span>;
+}
+
+const SCRIM_HOLD_MS = 1500;
+
+/** Static subtitle look for previews (Settings): the sample text with the profile's style. */
+export function SubtitleSample({ text }: { text: string }) {
+  const style = useSubtitleStyle();
+  return (
+    <>
+      {style.window !== 'none' && <div className={`subtitle-scrim scrim-${style.window} is-on`} />}
+      <div className={`subtitles ${subStyleClass(style)}`}>
+        <p className="subtitles-text">{renderCue(text, 0)}</p>
+      </div>
+    </>
+  );
 }
 
 // Same timing rule as the web player: the cue for (stream offset + video time - delay),
-// looked up every frame so it stays right across stream restarts
-export default function SubtitleOverlay({ cues, time, raised }: { cues: Cue[]; time: () => number; raised: boolean }) {
+// looked up every frame so it stays right across stream restarts.
+// `sample` shows while no cue does (live preview of the appearance settings).
+export default function SubtitleOverlay({ cues, time, raised, sample, previewing }: {
+  cues: Cue[];
+  time: () => number;
+  raised: boolean;
+  sample?: string;
+  previewing?: boolean;
+}) {
+  const style = useSubtitleStyle();
   const [shown, setShown] = useState<Cue[]>([]);
+  const [scrim, setScrim] = useState(false);
+  const on = shown.length > 0 || !!sample;
 
   useEffect(() => {
     if (cues.length === 0) { setShown([]); return; }
@@ -60,10 +87,21 @@ export default function SubtitleOverlay({ cues, time, raised }: { cues: Cue[]; t
     return () => cancelAnimationFrame(raf);
   }, [cues, time]);
 
-  if (shown.length === 0) return null;
+  // The dimmed band stays through short gaps between cues instead of blinking
+  useEffect(() => {
+    if (on) { setScrim(true); return; }
+    const id = setTimeout(() => setScrim(false), SCRIM_HOLD_MS);
+    return () => clearTimeout(id);
+  }, [on]);
+
   return (
-    <div className={`subtitles ${raised ? 'is-raised' : ''}`}>
-      <p className="subtitles-text">{shown.map((c, i) => renderCue(c.text, i))}</p>
-    </div>
+    <>
+      {style.window !== 'none' && <div className={`subtitle-scrim scrim-${style.window} ${scrim ? 'is-on' : ''}`} />}
+      {on && (
+        <div className={`subtitles ${subStyleClass(style)} ${raised ? 'is-raised' : ''} ${previewing ? 'is-previewing' : ''}`}>
+          <p className="subtitles-text">{shown.length > 0 ? shown.map((c, i) => renderCue(c.text, i)) : renderCue(sample || '', 0)}</p>
+        </div>
+      )}
+    </>
   );
 }

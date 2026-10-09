@@ -15,10 +15,11 @@ interface KeyboardProps {
   max?: number;
 }
 
-// Rows of equal length where possible, so Up / Down keep the column
-const SEARCH_ROWS = ['abcdef', 'ghijkl', 'mnopqr', 'stuvwx', 'yz1234', '567890'];
+// Rows of equal length where possible, so Up / Down keep the column; the digits get their own narrower row
+const SEARCH_ROWS = ['abcdefghi', 'jklmnopqr', 'stuvwxyz', '1234567890'];
 // Turkish alphabetical order (q, w, x in their Latin places): ç after c, ğ after g, ı before i ...
-const SEARCH_ROWS_TR = ['abcçde', 'fgğhıi', 'jklmno', 'öpqrsş', 'tuüvwx', 'yz1234', '567890'];
+const SEARCH_ROWS_TR = ['abcçdefg', 'ğhıijklm', 'noöpqrsş', 'tuüvwxyz', '1234567890'];
+const DIGITS = '1234567890';
 const URL_ROWS = ['1234567890', '.:/-_abcde', 'fghijklmno', 'pqrstuvwxy', 'z'];
 const TEXT_ROWS = ['abcçdefgğ', 'hıijklmno', 'öpqrsştuü', "vwxyz'-.", '1234567890'];
 
@@ -71,6 +72,8 @@ export default function Keyboard({ layout, value, onChange, max = 120 }: Keyboar
   }), [layout, max]);
 
   const rows = layout === 'url' ? URL_ROWS : text ? TEXT_ROWS : locale === 'tr' ? SEARCH_ROWS_TR : SEARCH_ROWS;
+  // Search keys share the row width: a short letter row is padded so the columns stay aligned
+  const cols = layout === 'search' ? Math.max(...rows.filter(r => r !== DIGITS).map(r => r.length)) : 0;
 
   return (
     <div className={`kbd kbd-${layout}`} data-nav-group={`kbd-${layout}`}>
@@ -89,6 +92,9 @@ export default function Keyboard({ layout, value, onChange, max = 120 }: Keyboar
               {text && shift ? upper(ch, locale) : ch}
             </button>
           ))}
+          {row !== DIGITS && row.length < cols && ' '.repeat(cols - row.length).split('').map((_, i) => (
+            <span key={`gap-${i}`} className="kbd-gap" />
+          ))}
         </div>
       ))}
       <div className="kbd-row">
@@ -105,14 +111,14 @@ export default function Keyboard({ layout, value, onChange, max = 120 }: Keyboar
           </button>
         )}
         {layout !== 'url' && (
-          <button type="button" className="kbd-key kbd-wide" data-nav data-nav-id="kbd-space" onClick={() => type(' ')}>
+          <button type="button" className="kbd-key kbd-wide kbd-space" data-nav data-nav-id="kbd-space" onClick={() => type(' ')}>
             {t('keyboard.space')}
           </button>
         )}
-        <button type="button" className="kbd-key kbd-wide" data-nav data-nav-id="kbd-del" onClick={del} aria-label={t('keyboard.delete')}>
+        <button type="button" className="kbd-key kbd-wide kbd-del" data-nav data-nav-id="kbd-del" onClick={del} aria-label={t('keyboard.delete')}>
           <Delete className="kbd-icon" />
         </button>
-        <button type="button" className="kbd-key kbd-wide" data-nav data-nav-id="kbd-clear" onClick={() => set('')}>
+        <button type="button" className="kbd-key kbd-wide kbd-clear" data-nav data-nav-id="kbd-clear" onClick={() => set('')}>
           {t('keyboard.clear')}
         </button>
       </div>

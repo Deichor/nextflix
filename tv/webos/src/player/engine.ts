@@ -76,6 +76,8 @@ export interface PlayerState {
   quality: { label: string; hdr: boolean; dv: boolean } | null;
   /** The source plays from TorBox (debrid) */
   debrid: boolean;
+  /** The source is a cinema recording (played with cinema=1) */
+  cinema: boolean;
   /** "Atmos" / "7.1" / "5.1" for the selected track as it reaches the TV */
   audioBadge: string;
   subs: SubtitleItem[] | null;
@@ -287,6 +289,7 @@ export class PlayerEngine {
       quality: null,
       audioBadge: '',
       debrid: false,
+      cinema: false,
       subs: null,
       subId: null,
       cues: [],
@@ -442,7 +445,7 @@ export class PlayerEngine {
     this.set({
       phase: 'ready', error: null, unreleased: null, fatal: null, ended: false, buffering: true, reconnecting: false,
       status: 'player.connecting', duration: 0, position: startAt, audioTracks: [], audio: 0,
-      quality: qualityOf(null, src), audioBadge: '', subs: null, subId: null, cues: [], debrid: !!src.debrid,
+      quality: qualityOf(null, src), audioBadge: '', subs: null, subId: null, cues: [], debrid: !!src.debrid, cinema: !!src.cinema,
     });
 
     // TorrServer may have dropped a saved torrent since
@@ -1208,7 +1211,7 @@ export class PlayerEngine {
         ? { codec: probe.video_codec || '', width: probe.width, height: probe.height || 0, hdr: !!probe.hdr, dolbyVision: Number(probe.dolby_vision) || 0, direct: !!probe.direct }
         : null;
       this.videoHeight = video ? videoQuality(video.width, video.height) : 0;
-      this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid });
+      this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid, cinema: !!src.cinema });
       this.health.reset();
       this.loadSubtitles(next);
       this.scheduleUpgrade(next);

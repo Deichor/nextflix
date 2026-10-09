@@ -255,10 +255,10 @@ export async function movieLogo(id: number, lang: string): Promise<string> {
   }
 }
 
-export async function related(id: number, type: MediaType, year?: number): Promise<Title[]> {
-  const y = year ? `&year=${year}` : '';
-  const data = await getJson(`/api/tmdb/${id}/related?type=${type}&limit=12${y}`);
-  return toTitles(data?.results, type).filter(t => t.id !== id);
+/** "More Like This" from the server's matcher (collection first; profile via X-User-ID). */
+export async function related(id: number, type: MediaType, _year?: number): Promise<Title[]> {
+  const data = await getJson(`/api/catalog/${type}/${id}/similar?limit=24`);
+  return toTitles(data?.results, type).filter(t => !(t.id === id && t.type === type));
 }
 
 export interface EpisodeInfo {

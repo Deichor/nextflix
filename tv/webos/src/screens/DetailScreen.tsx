@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarClock, Heart, Play, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { CalendarClock, Clapperboard, Heart, Play, ThumbsDown, ThumbsUp } from 'lucide-react';
 import DoubleThumbsUp from '../components/DoubleThumbsUp';
 import Row, { CardImage } from '../components/Row';
 import Spinner from '../components/Spinner';
@@ -194,6 +194,8 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
   useEffect(() => () => clearTimeout(seasonTimer.current), []);
 
   const [caption, setCaption] = useState('');
+  // "Watch the cinema recording anyway": the first press warns, the second plays
+  const [cinemaAsk, setCinemaAsk] = useState(false);
 
   useFocusRestore(!!d || det.failed, d ? 'detail-play' : 'detail-retry');
   // A retry that succeeds lands on Play
@@ -287,7 +289,29 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
                 <button type="button" className="btn btn-disabled" data-nav data-nav-id="detail-play" onFocus={() => setCaption('')}>
                   <CalendarClock className="btn-icon" /> {unavailable}
                 </button>
-              ) : (
+              ) : null}
+              {d.type === 'movie' && availability?.status === 'in_theaters' && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  data-nav
+                  data-nav-id="detail-cinema"
+                  onFocus={() => setCaption(cinemaAsk ? t('cinema.confirm') : '')}
+                  onBlur={() => setCinemaAsk(false)}
+                  onClick={() => {
+                    if (!cinemaAsk) {
+                      setCinemaAsk(true);
+                      setCaption(t('cinema.confirm'));
+                      return;
+                    }
+                    setCinemaAsk(false);
+                    open({ meta: { ...metaOf(d), cinema: true } });
+                  }}
+                >
+                  <Clapperboard className="btn-icon" /> {t(cinemaAsk ? 'cinema.play' : 'cinema.watchAnyway')}
+                </button>
+              )}
+              {!unavailable && (
                 <button
                   type="button"
                   className="btn btn-primary"

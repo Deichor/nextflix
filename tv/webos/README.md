@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.7_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.8_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 
@@ -107,6 +107,7 @@ sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach 
 | Everywhere | arrows move, OK selects, Back goes back (on Home: side menu, then "Exit?") |
 | Rows | Left from the first card opens the side menu; focus comes back to the same card after Back |
 | Player | OK play / pause, Left / Right seek 10 s; a second press (or holding the key: 30 s, then 60 s steps) opens scrub mode with a strip of preview frames, where OK seeks to the shown time, Back cancels and Up / Down close (15 s without a key: closed, no seek; playback goes on underneath). Up shows the buttons (play, ±10 s, next episode, Audio & Subtitles), Back closes |
+| Audio & Subtitles | Up / Down move, OK picks; Back, Left past the audio column, a Magic Remote click outside the panel (it never reaches the video, so no play / pause) or 15 s without a key or pointer move close it. In **Subtitle appearance** (last row of the subtitle list) Left / Right or OK change the focused value with a live preview, Back returns to the lists |
 | Media keys | Play, Pause, Play/Pause, Stop (closes), Rewind / Fast forward (seek) |
 | Magic Remote | pointing focuses, click selects, clicking the progress bar seeks |
 
@@ -114,12 +115,17 @@ sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach 
 
 - On-screen keyboard (`components/Keyboard.tsx`): names (Add Profile) use the Turkish alphabet order with q, w, x
   in their Latin places, 9 keys per row (`a b c ç d e f g ğ` / `h ı i j k l m n o` / `ö p q r s ş t u ü` /
-  `v w x y z ' - .`), then the digits and Shift, Space, Delete, Clear. Search uses 6 keys per row: the Latin order
-  with an English profile, the Turkish order (7 rows, digits last) with a Turkish one. The server address keeps its
-  own layout (digits and `. : / - _` first).
-- Search: a chip row above the results (Up from the grid, Right from the keyboard): All / Movies / TV Shows, then
-  Anime and the genres (sorted by name); OK toggles a chip, several genres must all match. Chips alone browse
+  `v w x y z ' - .`), then the digits and Shift, Space, Delete, Clear. Search uses compact keys sharing the column
+  width: the Turkish order in 4 rows of 8 with a Turkish profile, the Latin order in rows of 9 with an English one,
+  then a row of 10 digits and Space, Delete, Clear. The server address keeps its own layout (digits and `. : / - _`
+  first).
+- Search: the left column holds the field, the keyboard, the title completions and the filters: All / Movies / TV
+  Shows in one row, then Anime and the genres (sorted by name) in a 3-column grid (chosen: white with a check). It
+  scrolls with the focus when taller than the screen (a fade at the bottom while more is below); Up / Down move to
+  the nearest element there. OK toggles a filter, several genres must all match. Filters alone browse
   (`/api/catalog/discover`, the next page loads near the end of the grid); with text they narrow the search results.
+  The results use the full height on the right (4 columns); Right from the left column enters them, Left from the
+  first column returns to the element last focused on the left.
 - Surprise me (Home: Down past the last row, a centered button; the hero explains it while focused): one title per
   press with the reason (close to the taste "Because you loved …", a new pick in a liked genre, or "Something
   completely different"), Play (detail page with autoplay), Details and **Something else** for the next pick. Back
@@ -170,6 +176,13 @@ animation.
   profile's language the list is fetched again after 8 s and 20 s (slower providers finish later). A subtitle file
   that brings no cues (e.g. an OpenSubtitles quota answer) is replaced by the next one of the language, another
   provider first. A TorBox (debrid) source shows a "⚡ TorBox" badge.
+- Subtitle appearance (`lib/subtitleStyle.ts`, in the player panel and in Settings): size (small / medium / large /
+  extra large: 0.8 / 1 / 1.25 / 1.5 × the old size), background (none / see-through box / black box, one box per
+  line), dimming (none / light / dark: a static gradient band over the bottom 40 % that fades in while cues show and
+  stays through gaps under 1.5 s), edge (shadow / outline from eight hard text-shadows / none), color (white /
+  yellow / cyan) and position (bottom / a bit higher). Defaults are the old look. No blur or backdrop-filter. Stored
+  per profile in localStorage `hfx-player:<profileId>` (`subSize` like the web app, the rest in `subStyle`); the
+  server keeps no per-profile subtitle look, so web and TV do not share it.
 - Trick play (`player/TrickPlay.tsx`): while Left / Right scrub, the frame at the target time shows large in the
   middle with the frames one and two steps away at the sides (server `GET /thumb`, see
   `docs/ARCHITECTURE.md#trick-play-thumbnails`); frames not loaded yet show their time and seeking never waits for

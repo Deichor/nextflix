@@ -185,6 +185,8 @@ export interface ResolvedSource {
   /** Plays from a debrid service (TorBox) instead of the swarm */
   debrid?: boolean;
   source?: string;
+  /** A cinema recording (resolved with cinema=1) */
+  cinema?: boolean;
 }
 
 /** What resolve knows about the release (docs/API.md "Playback capabilities") */
@@ -215,6 +217,8 @@ export interface StreamSource {
   /** Swarm rate / needed bitrate measured by the resolve (undefined: not measured) */
   ratio?: number;
   debrid?: boolean;
+  /** A cinema recording of a film still in cinemas */
+  cinema?: boolean;
 }
 
 export const sourceOf = (r: ResolvedSource): StreamSource => ({
@@ -229,6 +233,7 @@ export const sourceOf = (r: ResolvedSource): StreamSource => ({
   format: r.format,
   ratio: healthRatio(r.health),
   debrid: r.debrid === true || r.source === 'torbox',
+  cinema: r.cinema === true,
 });
 
 export interface StreamMeta {
@@ -243,6 +248,8 @@ export interface StreamMeta {
   year?: number;
   runtime?: number;
   original_language?: string;
+  /** Play a cinema recording of a film that is only in cinemas (resolve with cinema=1) */
+  cinema?: boolean;
 }
 
 export interface PlayRequest {
@@ -263,10 +270,13 @@ export interface ResolveParams {
   tmdb_id?: number;
   runtime?: number;
   maxq?: QualityCap;
+  /** A cinema recording of a film only in cinemas (the viewer asked for it) */
+  cinema?: boolean;
 }
 
 export const paramsOf = (m: StreamMeta, maxq?: QualityCap): ResolveParams => ({
   type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, maxq,
+  cinema: m.cinema,
 });
 
 function resolveQuery(p: ResolveParams): URLSearchParams {
@@ -279,6 +289,7 @@ function resolveQuery(p: ResolveParams): URLSearchParams {
   if (p.tmdb_id && p.tmdb_id > 0) q.set('tmdb_id', String(p.tmdb_id));
   if (p.runtime && p.runtime > 0) q.set('runtime', String(Math.round(p.runtime)));
   if (p.maxq) q.set('maxq', String(p.maxq));
+  if (p.cinema) q.set('cinema', '1');
   return q;
 }
 
@@ -571,6 +582,8 @@ export interface PlayerPrefs {
   audioLang?: string;
   sub?: 'off' | { lang: string; id?: string };
   subSize?: string;
+  /** Subtitle look besides the size (lib/subtitleStyle.ts) */
+  subStyle?: Record<string, string>;
   autoplayNext?: boolean;
 }
 

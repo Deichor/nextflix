@@ -4,9 +4,13 @@ import { getServer } from '../lib/config';
 import { useT, type MessageKey } from '../lib/i18n';
 import { readIntroPrefs, writeIntroPrefs, type IntroPrefs } from '../lib/intro';
 import { getProfileId } from '../lib/profile';
+import {
+  DEFAULT_SUB_STYLE, SUB_STYLE_OPTIONS, cycleSubtitleStyle, subStyleValueLabel, useSubtitleStyle, writeSubtitleStyle,
+} from '../lib/subtitleStyle';
 import { getHdrMode, playbackCaps, readPlayerPrefs, setHdrMode, writePlayerPrefs, type HdrMode } from '../lib/stream';
 import { deviceInfo, type DeviceInfo } from '../lib/webos';
 import { useFocusRestore, useRouter } from '../nav/router';
+import { SubtitleSample } from '../player/SubtitleOverlay';
 
 const HDR_MODES: HdrMode[] = ['auto', 'on', 'off'];
 const HDR_LABEL: Record<HdrMode, MessageKey> = { auto: 'settings.hdrAuto', on: 'settings.hdrOn', off: 'settings.hdrOff' };
@@ -19,6 +23,9 @@ export default function SettingsScreen() {
   const [autoplay, setAutoplay] = useState(readPlayerPrefs(pid).autoplayNext !== false);
   const [intro, setIntro] = useState(readIntroPrefs());
   const [device, setDevice] = useState<DeviceInfo | null>(null);
+  const subStyle = useSubtitleStyle();
+  // The preview shows while a subtitle appearance row has the focus
+  const [subFocus, setSubFocus] = useState(false);
   const caps = playbackCaps();
   useEffect(() => { deviceInfo().then(setDevice); }, []);
   useFocusRestore(true, 'settings-server');
@@ -43,7 +50,7 @@ export default function SettingsScreen() {
       <div className="settings-body" data-scroll-y="edge" data-scroll-pad="4">
         <div data-scroll-content>
           <h1 className="page-title">{t('settings.title')}</h1>
-          <div className="settings-list" data-nav-group="settings">
+          <div className="settings-list" data-nav-group="settings" onFocus={e => setSubFocus((e.target as HTMLElement).hasAttribute('data-sub-style'))}>
             <button type="button" className="setting" data-nav data-nav-id="settings-server" onClick={() => router.push({ name: 'setup' })}>
               <span className="setting-name">{t('settings.server')}</span>
               <span className="setting-value">{getServer()}</span>
@@ -73,6 +80,24 @@ export default function SettingsScreen() {
               <span className="setting-name">{t('settings.introSound')}</span>
               <span className="setting-value">{t(intro.sound ? 'settings.on' : 'settings.off')}</span>
             </button>
+            <h2 className="settings-section">{t('subStyle.title')}</h2>
+            {SUB_STYLE_OPTIONS.map(o => (
+              <button
+                key={o.key}
+                type="button"
+                className="setting"
+                data-nav
+                data-nav-id={`settings-sub-${o.key}`}
+                data-sub-style
+                onClick={() => writeSubtitleStyle(cycleSubtitleStyle(subStyle, o.key, 1))}
+              >
+                <span className="setting-name">{t(o.label)}</span>
+                <span className="setting-value">{t(subStyleValueLabel(subStyle, o.key))}</span>
+              </button>
+            ))}
+            <button type="button" className="setting" data-nav data-nav-id="settings-sub-reset" data-sub-style onClick={() => writeSubtitleStyle(DEFAULT_SUB_STYLE)}>
+              <span className="setting-name">{t('subStyle.reset')}</span>
+            </button>
           </div>
           <dl className="settings-info">
             <dt>{t('settings.device')}</dt>
@@ -84,6 +109,11 @@ export default function SettingsScreen() {
           </dl>
         </div>
       </div>
+      {subFocus && (
+        <div className="sub-preview">
+          <SubtitleSample text={t('subStyle.sample')} />
+        </div>
+      )}
     </div>
   );
 }

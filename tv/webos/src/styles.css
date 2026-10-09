@@ -1070,20 +1070,90 @@ p {
   background: rgba(255, 255, 255, 0.28);
 }
 
+.kbd-search .kbd-row {
+  margin-bottom: 0.5rem;
+}
+
+.kbd-search .kbd-key,
+.kbd-search .kbd-gap {
+  flex: 1 1 0;
+  width: auto;
+  height: 3.4rem;
+  margin-right: 0.5rem;
+  font-size: 1.6rem;
+}
+
+.kbd-search .kbd-key:last-child,
+.kbd-search .kbd-gap:last-child {
+  margin-right: 0;
+}
+
+.kbd-search .kbd-wide {
+  padding: 0;
+  font-size: 1.3rem;
+}
+
+.kbd-search .kbd-space {
+  flex-grow: 2;
+}
+
+.kbd-search .kbd-clear {
+  flex-grow: 1.6;
+}
+
+.kbd-search .kbd-icon {
+  width: 1.7rem;
+  height: 1.7rem;
+}
+
 /* ---- Search ---- */
 
 .search-left {
   position: absolute;
   top: 6rem;
+  bottom: 0;
   left: var(--pad);
-  width: 36rem;
+  width: 34rem;
+}
+
+/* Keyboard, completions and filters; moves with the focus (nav/spatial.ts) when taller than the screen.
+   The side padding keeps the scaled focus of the edge keys inside the clip. */
+.search-left-scroll {
+  position: absolute;
+  top: 7rem;
+  bottom: 0;
+  left: -1rem;
+  right: -1rem;
+  padding: 0.6rem 1rem 0;
+  overflow: hidden;
+}
+
+.search-left-scroll > [data-scroll-content] {
+  padding-bottom: 2rem;
+}
+
+.search-left-scroll::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  height: 5rem;
+  background: linear-gradient(rgba(20, 20, 20, 0), #141414);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.search-left-scroll.has-more::after {
+  opacity: 1;
 }
 
 .search-field {
   display: flex;
   align-items: center;
   height: 5rem;
-  margin-bottom: 2rem;
   font-size: 2rem;
   border-bottom: 0.2rem solid rgba(255, 255, 255, 0.4);
   white-space: nowrap;
@@ -1107,8 +1177,8 @@ p {
   top: 0;
   right: 0;
   bottom: 0;
-  left: 48rem;
-  padding-top: 6rem;
+  left: 45rem;
+  padding: 6rem 0 0 1rem;
   overflow: hidden;
 }
 
@@ -1127,9 +1197,9 @@ p {
 }
 
 .grid-card {
-  width: 21rem;
-  height: 11.8rem;
-  margin: 0 1.2rem 1.6rem 0;
+  width: 17.3rem;
+  height: 9.7rem;
+  margin: 0 1.2rem 1.4rem 0;
 }
 
 .empty {
@@ -1423,6 +1493,38 @@ p {
 .settings-info dd {
   margin: 0.3rem 0 0;
   word-break: break-all;
+}
+
+.settings-section {
+  width: 80rem;
+  margin: 3rem 0 1.4rem;
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* Subtitle appearance preview (not to scale: the text is about twice its real size here) */
+.sub-preview {
+  position: absolute;
+  right: 2.5rem;
+  top: 16.5rem;
+  width: 27rem;
+  height: 15.2rem;
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: linear-gradient(160deg, #4a5d70 0%, #26313d 55%, #0d1115 100%);
+}
+
+.sub-preview .subtitles {
+  left: 4%;
+  right: 4%;
+  bottom: 8%;
+  font-size: 1.3rem;
+  transition: none;
+}
+
+.sub-preview .subtitles.sub-pos-raised {
+  bottom: 20%;
 }
 
 /* ---- Dialog ---- */
@@ -1770,26 +1872,111 @@ p {
   left: 6%;
   right: 6%;
   bottom: 7vh;
+  font-size: 2.9rem;
   text-align: center;
   pointer-events: none;
   transition: bottom 0.3s ease;
+}
+
+/* Subtitle appearance (lib/subtitleStyle.ts): cheap effects only, no blur or backdrop-filter */
+.subtitles.sub-pos-raised {
+  bottom: 16vh;
 }
 
 .subtitles.is-raised {
   bottom: 17rem;
 }
 
+/* Live preview while the style view of the panel is open: left of the panel */
+.subtitles.is-previewing {
+  right: 54rem;
+}
+
 .subtitles-text {
   display: inline-block;
-  font-size: 2.9rem;
   font-weight: 600;
   line-height: 1.25;
   color: #ffffff;
-  text-shadow: 0 0 0.25rem rgba(0, 0, 0, 0.95), 0 0 0.12rem rgba(0, 0, 0, 0.95), 0 0.12rem 0.25rem rgba(0, 0, 0, 0.8);
+  text-shadow: 0 0 0.086em rgba(0, 0, 0, 0.95), 0 0 0.041em rgba(0, 0, 0, 0.95), 0 0.041em 0.086em rgba(0, 0, 0, 0.8);
+}
+
+.sub-size-small .subtitles-text {
+  font-size: 0.8em;
+}
+
+.sub-size-large .subtitles-text {
+  font-size: 1.25em;
+}
+
+.sub-size-xlarge .subtitles-text {
+  font-size: 1.5em;
+}
+
+.sub-color-yellow .subtitles-text {
+  color: #ffe94d;
+}
+
+.sub-color-cyan .subtitles-text {
+  color: #5ee8ff;
+}
+
+/* Outline: eight hard shadows (no blur radius) */
+.sub-edge-outline .subtitles-text {
+  text-shadow: -0.05em 0 0 #000000, 0.05em 0 0 #000000, 0 -0.05em 0 #000000, 0 0.05em 0 #000000,
+    -0.036em -0.036em 0 #000000, 0.036em -0.036em 0 #000000, -0.036em 0.036em 0 #000000, 0.036em 0.036em 0 #000000;
+}
+
+.sub-edge-none .subtitles-text {
+  text-shadow: none;
 }
 
 .cue {
   display: block;
+}
+
+/* One box per line: the inline background is cut and padded at each line break */
+.sub-bg-semi .cue-box,
+.sub-bg-black .cue-box {
+  padding: 0.04em 0.3em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.sub-bg-semi .cue-box {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.sub-bg-black .cue-box {
+  background: #000000;
+}
+
+/* Dimmed band behind the subtitle area: one static gradient, faded with opacity */
+.subtitle-scrim {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.subtitle-scrim.is-on {
+  opacity: 1;
+}
+
+.subtitle-scrim.scrim-light {
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0.35) 45%, rgba(0, 0, 0, 0) 100%);
+}
+
+.subtitle-scrim.scrim-dark {
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.7) 50%, rgba(0, 0, 0, 0) 100%);
+}
+
+.player.is-styling .player-top,
+.player.is-styling .player-bottom {
+  opacity: 0;
 }
 
 /* Audio & Subtitles panel */
@@ -1873,6 +2060,91 @@ p {
   padding: 1rem 1.4rem;
   font-size: 1.5rem;
   color: var(--dim);
+}
+
+/* Takes a click anywhere outside the panel (closes it, never reaches the video) */
+.panel-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.panel-scroll {
+  max-height: calc(70vh - 8.4rem);
+  overflow: hidden;
+}
+
+.panel-row-link {
+  margin-top: 0.6rem;
+}
+
+.panel-link-icon {
+  color: var(--muted);
+}
+
+.panel-row:focus .panel-link-icon {
+  color: #000000;
+}
+
+.panel-row-chevron {
+  width: 2.2rem;
+  height: 2.2rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.panel.panel-style {
+  top: 8rem;
+  bottom: auto;
+  width: 50rem;
+}
+
+.style-name {
+  flex: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.style-value {
+  width: 17rem;
+  text-align: center;
+  color: #ffffff;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.style-row:focus .style-value {
+  color: #000000;
+}
+
+.style-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 2.6rem;
+}
+
+.style-arrow-icon {
+  width: 2.2rem;
+  height: 2.2rem;
+  opacity: 0.45;
+}
+
+.style-row:focus .style-arrow-icon {
+  opacity: 1;
+}
+
+.style-action {
+  padding-left: 1.4rem;
+}
+
+.style-row + .style-action {
+  margin-top: 1rem;
 }
 
 /* ---- Opening intro (components/Intro.tsx): the timeline keyframes are generated there ---- */
@@ -2139,38 +2411,82 @@ p {
   pointer-events: none;
 }
 
-/* ---- Search filters ---- */
+/* ---- Search filters (left column, under the keyboard and the completions) ---- */
 
-.search-chips {
+.search-types {
+  display: flex;
+  margin-top: 1.6rem;
+  padding-top: 1.6rem;
+  border-top: 0.1rem solid rgba(255, 255, 255, 0.15);
+}
+
+.search-type,
+.search-genre {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 3.6rem;
+  padding: 0 0.6rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  font-size: 1.35rem;
+  font-weight: 600;
+  white-space: nowrap;
   overflow: hidden;
-  margin: -0.6rem 4rem 1.4rem 0;
-  padding: 0.6rem 0;
+  transition: transform 0.15s ease;
 }
 
-.search-chips-content {
+.search-type {
+  flex: 1 1 0;
+  margin-right: 0.6rem;
+}
+
+.search-type:last-child {
+  margin-right: 0;
+}
+
+.search-genres {
   display: flex;
-  align-items: center;
-  padding-right: 30rem;
+  flex-wrap: wrap;
+  margin-top: 1.2rem;
 }
 
-.search-chips .chip {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
+.search-genre {
+  width: calc((100% - 1.2rem) / 3);
+  margin: 0 0.6rem 0.6rem 0;
 }
 
-.search-chips-sep {
-  flex-shrink: 0;
-  width: 0.2rem;
-  height: 2.6rem;
-  margin: 0 1.6rem 0 0.6rem;
-  background: rgba(255, 255, 255, 0.25);
+.search-genre:nth-child(3n) {
+  margin-right: 0;
+}
+
+.search-genre-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Chosen: white fill (and a check on genres); focused: also scaled with a ring */
+.search-type.is-active,
+.search-genre.is-active {
+  background: #e8e8e8;
+  color: #000000;
+}
+
+.search-type:focus,
+.search-genre:focus {
+  background: #ffffff;
+  color: #000000;
+  transform: scale(1.06);
+  box-shadow: 0 0 0 0.25rem var(--bg), 0 0 0 0.5rem var(--focus);
 }
 
 .chip-check {
-  width: 1.5rem;
-  height: 1.5rem;
-  margin-right: 0.6rem;
+  width: 1.3rem;
+  height: 1.3rem;
+  margin-right: 0.4rem;
+  flex-shrink: 0;
 }
 
 /* ---- Surprise me ---- */
@@ -2292,15 +2608,17 @@ p {
 /* ---- Search completions and corrections ---- */
 
 .search-suggest {
-  margin-top: 1.6rem;
+  margin-top: 1rem;
 }
 
 .search-suggest-item {
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 0.8rem 1.2rem;
-  font-size: 1.7rem;
+  box-sizing: border-box;
+  height: 3.6rem;
+  padding: 0 1.2rem;
+  font-size: 1.5rem;
   color: var(--muted);
   text-align: left;
   border-radius: 0.4rem;
