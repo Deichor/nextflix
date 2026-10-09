@@ -62,6 +62,7 @@ type Service struct {
 	hashes map[string]string // "<hash>|<index>" -> moviehash
 
 	live *liveSubs // embedded tracks of big files, read while they play
+	sync *syncer   // timing of provider subtitles for the playing file
 
 	refreshMu sync.Mutex
 	refreshed map[string]time.Time // list base key -> last refresh=1 that skipped the cache
@@ -101,6 +102,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 			log.Printf("subtitles: cache write: %v", err)
 		}
 	})
+	s.sync = newSyncer(s)
 	return s
 }
 
@@ -257,9 +259,26 @@ func (s *Service) List(ctx context.Context, q Query) []Sub {
 }
 
 func (s *Service) rank(all []candidate, q Query) []Sub {
+	file := q.Hash != "" && q.Index > 0
+	made := map[string]bool{} // made for the playing file (hash match)
+	if file {
+		if q.FPS == 0 {
+			q.FPS = s.sync.knownFPS(q.Hash, q.Index)
+		}
+		for i := range all {
+			if all[i].Synced {
+				made[all[i].ID] = true
+			} else {
+				all[i].AutoSync = s.sync.fitOf(all[i].ID, q.Hash, q.Index)
+			}
+		}
+	}
 	subs := rankCandidates(all, q)
 	if !s.OpenSubtitlesQuotaUntil().IsZero() {
 		subs = demoteQuota(subs)
+	}
+	if file {
+		subs = s.sync.listed(subs, made, q.Hash, q.Index)
 	}
 	return subs
 }
@@ -310,7 +329,7 @@ func (s *Service) torrentCandidates(ctx context.Context, hash string) ([]candida
 			HI:       t.HI,
 			Forced:   t.Forced,
 			Synced:   true,
-		}})
+		}, Releases: []string{t.Path}}) // the folder may name the episode (season packs)
 	}
 	return out, nil
 }
@@ -320,6 +339,12 @@ func (s *Service) embeddedCandidates(ctx context.Context, hash string, index int
 	if err != nil {
 		return nil, err
 	}
+	// The frame rate ranks the subtitles of later lists (the header is read already)
+	go func() {
+		pctx, cancel := context.WithTimeout(context.Background(), embeddedProbeTimeout)
+		defer cancel()
+		_, _ = s.sync.probeFile(pctx, hash, index, torrFileURL(s.cfg.TorrServerURL, hash, index))
+	}()
 	var out []candidate
 	for _, e := range subs {
 		if !e.Available {
@@ -344,6 +369,21 @@ func (s *Service) embeddedCandidates(ctx context.Context, hash string, index int
 // big file that is not mostly cached is read live from about t on (live.go), and partial
 // tells that the answer will grow (it carries PartialNote).
 func (s *Service) FileAt(ctx context.Context, id string, t float64) ([]byte, bool, error) {
+	a, err := s.FileFor(ctx, id, t)
+	return a.VTT, a.Partial, err
+}
+
+// FileFor is FileAt with the timing state: a subtitle listed for the playing file (its id
+// names the file) is timed to it, see sync.go.
+func (s *Service) FileFor(ctx context.Context, id string, t float64) (FileAnswer, error) {
+	if inner, hash, index, ok := unwrapSyncID(id); ok {
+		return s.sync.serve(ctx, inner, hash, index)
+	}
+	vtt, partial, err := s.fileAt(ctx, id, t)
+	return FileAnswer{VTT: vtt, Partial: partial}, err
+}
+
+func (s *Service) fileAt(ctx context.Context, id string, t float64) ([]byte, bool, error) {
 	source, _, ref, err := decodeID(id)
 	if err != nil {
 		return nil, false, err

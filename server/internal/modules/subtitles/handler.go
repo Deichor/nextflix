@@ -59,7 +59,11 @@ func (h handler) list(c *gin.Context) {
 
 func (h handler) file(c *gin.Context) {
 	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks)
-	vtt, partial, err := h.s.FileAt(c.Request.Context(), c.Query("id"), t)
+	a, err := h.s.FileFor(c.Request.Context(), c.Query("id"), t)
+	vtt, partial := a.VTT, a.Partial
+	if a.Sync != "" {
+		c.Header("X-Subtitle-Sync", a.Sync)
+	}
 	var qe QuotaError
 	switch {
 	case errors.As(err, &qe):

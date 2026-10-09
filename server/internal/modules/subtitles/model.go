@@ -120,6 +120,8 @@ type Query struct {
 	Year      int
 	// Refresh skips the cached provider answers (late uploads), at most every refreshEvery per title
 	Refresh bool
+	// FPS is the playing file's probed frame rate (0 = unknown), a ranking hint
+	FPS float64
 }
 
 func (q Query) isTV() bool { return q.MediaType == "tv" }
@@ -135,6 +137,9 @@ type candidate struct {
 	Quality      int  // provider quality tier: 1 best .. 0 unknown, higher worse
 	MultiCD      bool
 	MovieHashHit bool
+	Pack         bool // a season pack (its names need not name the episode)
+	// AutoSync is the timing result for the playing file: 1 fits once timed, -1 does not fit
+	AutoSync int
 }
 
 var langLabels = map[string]string{

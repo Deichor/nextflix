@@ -218,6 +218,7 @@ func (t *turkceAltyazi) search(ctx context.Context, q Query, imdbID string) ([]c
 				Downloads: r.Downloads,
 			},
 			Releases: releases,
+			Pack:     r.Pack,
 			Quality:  r.Quality,
 			MultiCD:  r.CDs > 1,
 		})

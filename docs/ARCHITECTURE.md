@@ -45,7 +45,7 @@ docs/                       this folder
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
-| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
+| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
 | `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 
@@ -1089,6 +1089,57 @@ after a seek). A position more than 5 minutes past the read's frontier (or befor
 there; a read stops at a range read before, after 3 minutes without requests, or when another track of the same file
 is chosen (at most 3 reads server-wide). Once every second of the file was read the track is cached on disk like a
 full extraction.
+
+### Automatic subtitle timing (`modules/subtitles/sync*.go`)
+
+Subtitles from OpenSubtitles (without a hash match), SubDL and turkcealtyazi.org are made for some release, not
+necessarily the playing one: another frame rate, a title sequence or ad breaks cut differently. Seen on The Mentalist
+S02E07 (Netflix WEB-DL): every Turkish subtitle was made for the HDTV / DVD releases; the one shown (turkcealtyazi
+"S02 (pack) HDTV") was right in the teaser, 1.5 s early after the title sequence, 3.5 s after the first ad break and
+4.2 s by the end (measured against the file's own English track). So the server times them to the playing file, like
+ffsubsync (FFT cross-correlation of the subtitle with a reference signal, a few framerate ratios) and alass (offsets
+that change at splits), simplified:
+
+- Ids: `/api/subtitles` gives each such subtitle an id that also names the playing file (hash + index). Subtitles made
+  for the file (torrent files, embedded tracks, OpenSubtitles hash matches) keep their ids and are never timed.
+- Reference (`sync_media.go`), read once per file and kept on disk (`/app/data/subtitles/syncref`): a subtitle shipped
+  in the torrent (or an embedded track / hash match already on disk) gives the whole timeline for free. Otherwise
+  60 s windows, about one per 7 minutes from the opening to before the credits (4-10), are read with ffmpeg `-ss`
+  (only those stretches, through TorrServer or the TorBox proxy): the cues of the file's own text subtitle track (any
+  language, English first; `-copyts`, since after `-ss` subtitle times count from the keyframe before it), else speech
+  from the dialogue channel (`pan=mono|c0=FC` for 5.1, else a downmix) at 8 kHz by a simple energy detector on 10 ms
+  frames (`sync_vad.go`). Every window read goes through a local byte cap (1.25 × its share of the file + 16 MB):
+  a subtitle read in a stretch without lines would otherwise continue to the end of the file. The reads start 20 s
+  after the first request (not during the playback start) and one window at a time.
+- Alignment (`sync_align.go`): the signals are line starts (a cue's start; speech after a pause), each reference start
+  spread to ±0.6 s, not ffsubsync's speech on/off: many subtitles chain cues back to back, and fan subtitles start
+  lines up to a second early or late. For each ratio (1, 25/23.976, 24/23.976, 25/24 and back) every offset within
+  ±90 s is scored per window by FFT cross-correlation; a Viterbi pass then picks piecewise constant offsets within
+  ±15 s of the best global one, each change costing 4 matched lines, and a change is placed in the subtitle pause that
+  fits both neighbouring windows best (the longest among equals). Up to 2 rounds add windows between neighbours with
+  different offsets more than 150 s apart (12 windows at most). A result fits when its score beats chance (the mean
+  over all offsets) by 0.15 and the best offset away from the chosen ones by 0.08 (matched lines per reference line),
+  and the timed subtitle ends before the video does (+60 s) and covers 40 % of it.
+- Serving (`sync.go`): the file request answers the subtitle as it is at once (marked partial, `NOTE
+  nextflix-partial`, so both players ask again every 15 s; a timing ready within 2.5 s is answered directly) and
+  times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
+  disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues
+  (`X-Subtitle-Sync: synced`). One that does not fit is replaced by the best fitting other subtitle of its language
+  listed for the file (up to 3 tried, OpenSubtitles skipped while its quota is used up; `replaced`), else served as
+  it is (`poor`). A failed read is not tried again for 10 minutes (`failed`).
+- Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox
+  proxy's first chunk and read-ahead) and need at least 8 windows, so files above about 10 Mbit/s are not timed (served
+  as they are; the manual offset remains). The S02E07 file (7 Mbit/s, 2.26 GB) gets 10 windows: about 550-600 MB read
+  once per file, shared by every subtitle of it; the CPU part (decoding 60 s of audio, the FFTs) takes well under a
+  second per window. The server logs the bytes read per reference.
+- Ranking: later lists show a timed fitting subtitle as `synced` (after the ones made for the file) and move ones
+  that do not fit down; the file's probed frame rate is the ranking's fps hint.
+- The viewer's manual offset (`subDelay`) still applies on top.
+
+Measured on S02E07 (text-matched against the file's English track): the HDTV subtitle had a median error of 3.3 s
+(10 % of lines within 1 s); timed from 10 windows of the file's own track: 0.41 s (83 %; 89 % is the best any timing
+of this subtitle reaches, its own line timing is loose), from speech detection alone: 0.37 s (83 %). The S02E06
+subtitle (another episode) is rejected.
 
 `torrserver_tuning.go` raises TorrServer's settings once per start, only writing when a value changes (a write drops
 TorrServer's torrents): `CacheSize` ≥ 2 GB RAM (read-ahead 95 % ≈ 1.9 GB, minutes of a 4K stream),

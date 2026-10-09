@@ -208,6 +208,7 @@ func (d *subDL) toCandidates(subs []subdlSub, q Query) []candidate {
 		release := firstNonEmpty(s.ReleaseName, s.Name)
 		ref := s.URL
 		hi := s.HI
+		pack := false
 		if q.isTV() {
 			season := intOr(s.Season, q.Season)
 			if season != 0 && season != q.Season {
@@ -215,7 +216,7 @@ func (d *subDL) toCandidates(subs []subdlSub, q Query) []candidate {
 			}
 			from, end := intOr(s.EpisodeFrom, 0), intOr(s.EpisodeEnd, 0)
 			ep := intOr(s.Episode, 0)
-			pack := s.FullSeason || (from > 0 && end > from)
+			pack = s.FullSeason || (from > 0 && end > from)
 			switch {
 			case pack && from > 0 && end >= from && (q.Episode < from || q.Episode > end):
 				continue
@@ -247,6 +248,7 @@ func (d *subDL) toCandidates(subs []subdlSub, q Query) []candidate {
 				FPS:      anyFloat(s.FPS),
 			},
 			Releases: append([]string{release}, s.Releases...),
+			Pack:     pack,
 		}
 		c.Downloads = int(anyFloat(s.DownloadsAny))
 		out = append(out, c)

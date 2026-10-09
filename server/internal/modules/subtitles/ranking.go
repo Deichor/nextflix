@@ -212,6 +212,46 @@ func clamp01(v float64) float64 {
 	return math.Max(0, math.Min(1, v))
 }
 
+var (
+	relEpisode  = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[ ._-]?e(\d{1,3})(?:[-e]+(\d{1,3})(?:[^0-9p]|$))?`)
+	relEpisodeX = regexp.MustCompile(`(?:^|[^0-9])(\d{1,2})x(\d{2,3})(?:[^0-9]|$)`)
+)
+
+// wrongEpisode reports a TV subtitle whose release names (or torrent path) name episodes, none
+// of them the asked one ("S02E06" for S02E07; a season pack names none).
+func wrongEpisode(c candidate, q Query) bool {
+	if !q.isTV() || q.Episode <= 0 || c.Pack {
+		return false
+	}
+	names := append([]string{c.Release}, c.Releases...)
+	named := false
+	for _, name := range names {
+		for _, m := range relEpisode.FindAllStringSubmatch(name, -1) {
+			named = true
+			s, _ := strconv.Atoi(m[1])
+			a, _ := strconv.Atoi(m[2])
+			b := a
+			if m[3] != "" {
+				if n, _ := strconv.Atoi(m[3]); n > a && n-a <= 5 {
+					b = n // a double episode "S01E01E02" / "S01E01-02"
+				}
+			}
+			if s == q.Season && q.Episode >= a && q.Episode <= b {
+				return false
+			}
+		}
+		for _, m := range relEpisodeX.FindAllStringSubmatch(name, -1) {
+			named = true
+			s, _ := strconv.Atoi(m[1])
+			e, _ := strconv.Atoi(m[2])
+			if s == q.Season && e == q.Episode {
+				return false
+			}
+		}
+	}
+	return named
+}
+
 // qualitySignal turns provider signals (downloads, rating, trusted uploader, site quality tier) into 0..1.
 func qualitySignal(c candidate) float64 {
 	q := math.Min(1, math.Log10(float64(c.Downloads)+1)/5) * 0.5
@@ -239,6 +279,9 @@ func qualitySignal(c candidate) float64 {
 // machine-translated subtitles always come last.
 func rankCandidates(cands []candidate, q Query) []Sub {
 	hint := parseRelease(q.Title)
+	if hint.fps == 0 {
+		hint.fps = q.FPS
+	}
 	langOrder := map[string]int{}
 	for i, l := range q.Langs {
 		langOrder[l] = i
@@ -268,7 +311,7 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 	out := make([]scored, 0, len(cands))
 	seen := map[string]bool{}
 	for _, c := range cands {
-		if seen[c.ID] {
+		if seen[c.ID] || wrongEpisode(c, q) {
 			continue
 		}
 		seen[c.ID] = true
@@ -288,11 +331,19 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 
 		var score float64
 		tier := 1
-		if c.Synced {
+		switch {
+		case c.Synced:
 			score = 0.8 + 0.12*sim + 0.08*qual
 			tier = 0
-		} else {
+		case c.AutoSync > 0:
+			// Timed to the playing file and fitting: after the ones made for it
+			score = 0.62 + 0.1*sim + 0.08*qual
+			tier = 0
+		default:
 			score = 0.05 + 0.5*sim + 0.2*qual
+			if c.AutoSync < 0 {
+				score -= 0.25 // does not fit the file even when timed
+			}
 		}
 		if c.HI && hasRegular[c.Language] {
 			score -= 0.15
@@ -308,6 +359,7 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 			score = math.Min(score, 0.1)
 		}
 		s := c.Sub
+		s.Synced = c.Synced || c.AutoSync > 0
 		s.Score = math.Round(clamp01(score)*1000) / 1000
 		if s.Label == "" {
 			s.Label = langLabel(s.Language)
