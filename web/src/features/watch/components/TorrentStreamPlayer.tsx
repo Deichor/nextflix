@@ -71,6 +71,7 @@ import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
+import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
 import { useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
 
@@ -153,6 +154,9 @@ const AFTER_PAUSE_MS = 5 * 60 * 1000;
 // The loading overlay shows after this long without frames and hides once frames ran this long
 const LOADING_SHOW_MS = 400;
 const LOADING_HIDE_MS = 300;
+// A wait mid-playback counts as buffering (and holds for a larger buffer) only once it lasted this
+// long: shorter waits (a gap of a few frames, a decoder hiccup) play on by themselves
+const STALL_CONFIRM_MS = 800;
 // Adaptive quality: two stalls within STALL_WINDOW_MS, or one longer than LONG_STALL_MS, on a
 // 1080p+ source re-resolve with a lower cap (4K -> 1080p -> 720p, never lower, never back up)
 const LONG_STALL_MS = 8000;
@@ -1359,6 +1363,10 @@ function PlayerCore({
   const [showControls, setShowControls] = useState(true);
   const [ended, setEnded] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  // 'credits': the countdown runs in a corner while the end credits play; 'end': the video ended
+  const [countdownAt, setCountdownAt] = useState<'credits' | 'end'>('end');
+  // "Watch credits" was picked: no countdown again until the credits are left and reached again
+  const creditsDismissedRef = useRef(false);
   // The source on screen: `source` until a seamless switch replaces it
   const [shownSource, setShownSource] = useState(source);
   // Short "4K" note after a seamless upgrade
@@ -1946,6 +1954,25 @@ function PlayerCore({
     }
   }, []);
 
+  // A wait mid-playback that lasts STALL_CONFIRM_MS: buffering, and resume only with a few seconds buffered
+  const stallConfirmRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearStallConfirm = useCallback(() => {
+    if (stallConfirmRef.current) clearTimeout(stallConfirmRef.current);
+    stallConfirmRef.current = null;
+  }, []);
+  const confirmStall = useCallback((v: HTMLVideoElement) => {
+    clearStallConfirm();
+    const seq = seekSeq.current;
+    const from = v.currentTime;
+    stallConfirmRef.current = setTimeout(() => {
+      stallConfirmRef.current = null;
+      if (videoRef.current !== v || seekSeq.current !== seq || !hasPlayed.current || v.ended || (v.paused && !holdRef.current)) return;
+      if (v.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && v.currentTime > from) return;
+      setBuffering(true);
+      if (!v.seeking && !holdRef.current) startHold('stall');
+    }, STALL_CONFIRM_MS);
+  }, [clearStallConfirm, startHold]);
+
   useEffect(() => {
     if (!holding) return;
     const timer = setInterval(() => {
@@ -1977,9 +2004,10 @@ function PlayerCore({
 
   useEffect(() => () => {
     clearStall();
+    clearStallConfirm();
     if (stallResetTimer.current) clearTimeout(stallResetTimer.current);
     seekCtrl.current?.abort();
-  }, [clearStall]);
+  }, [clearStall, clearStallConfirm]);
 
   // Start the new stream whenever it changes (file, seek, audio track or recovery)
   useEffect(() => {
@@ -2391,8 +2419,9 @@ function PlayerCore({
   useEffect(() => {
     const timer = setInterval(() => {
       const v = videoRef.current;
+      // readyState: a wait not confirmed as a stall yet (confirmStall) is not smooth playback either
       if (!v || !v.getAttribute('src') || v.paused || v.seeking || bufferingRef.current || blockedRef.current ||
-          !hasPlayed.current || !exactRef.current) return;
+          v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA || !hasPlayed.current || !exactRef.current) return;
       const off = offsetRef.current;
       const pos = off + v.currentTime;
       const end = bufferedEnd(v.buffered, v.currentTime);
@@ -2484,13 +2513,34 @@ function PlayerCore({
     if (nextDue) onPrefetchNext?.(nextDueRef.current.position, nextDueRef.current.duration);
   }, [nextDue, onPrefetchNext]);
 
-  // Auto-play the next episode a few seconds after this one ends
+  // Skip intro / end credits of the episode (skipSegments.ts)
+  const skipSegs = useSkipSegments(meta, hash, file?.id, duration);
+  const skip = skipPhase(skipSegs, position, duration);
+  // Leaving from the end credits: mark this episode watched before the next one starts
+  const nextFromCredits = () => { persist({ finished: true }); onNext?.(); };
+
+  // The end credits started: count down to the next episode while they play
+  useEffect(() => {
+    if (skip !== 'credits') { creditsDismissedRef.current = false; return; }
+    if (!onNext || ended || countdown !== null || creditsDismissedRef.current || !playing) return;
+    if (readPlayerPrefs(getActiveProfileId()).autoplayNext === false) return;
+    setCountdownAt('credits');
+    setCountdown(5);
+  }, [skip, onNext, ended, countdown, playing]);
+
+  // Auto-play the next episode a few seconds after this one ends (or its credits start)
   useEffect(() => {
     if (countdown === null) return;
-    if (countdown <= 0) { onNext?.(); return; }
+    if (countdown <= 0) {
+      if (countdownAt === 'credits') persist({ finished: true });
+      onNext?.();
+      return;
+    }
+    // Paused during the credits: the countdown waits
+    if (countdownAt === 'credits' && !playing) return;
     const t = setTimeout(() => setCountdown(c => (c === null ? null : c - 1)), 1000);
     return () => clearTimeout(t);
-  }, [countdown, onNext]);
+  }, [countdown, onNext, countdownAt, playing, persist]);
 
   const handleEnded = () => {
     // The stream ended well before the file did: ffmpeg or TorrServer dropped it
@@ -2503,7 +2553,10 @@ function PlayerCore({
     setEnded(true);
     persist({ finished: true });
     // With autoplay off in Settings only the Next button is shown
-    if (onNext && readPlayerPrefs(getActiveProfileId()).autoplayNext !== false) setCountdown(5);
+    if (onNext && readPlayerPrefs(getActiveProfileId()).autoplayNext !== false) {
+      setCountdownAt('end');
+      setCountdown(c => c ?? 5);
+    }
   };
 
   const handleError = () => {
@@ -2551,9 +2604,10 @@ function PlayerCore({
   const isActive = (e: React.SyntheticEvent<HTMLVideoElement>) => e.currentTarget === videoRef.current;
   const badge = qualityBadge(t, videoInfo, shownSource);
   const shownTime = seekPreview ?? position;
-  const remaining = duration - position;
-  const showNextButton = !!onNext && duration > 0 && !error && countdown === null &&
-    remaining <= Math.min(120, Math.max(40, duration * 0.04));
+  // Only during the end credits (the countdown is off or was dismissed); without credits data the
+  // next episode comes when the video ends
+  const showNextButton = !!onNext && duration > 0 && !error && countdown === null && skip === 'credits';
+  const showSkipIntro = skip === 'intro' && !!skipSegs?.intro && !error && countdown === null;
   // The loading overlay comes only after LOADING_SHOW_MS without frames and goes once they ran LOADING_HIDE_MS
   const loadingShown = useSteady(buffering, LOADING_SHOW_MS, LOADING_HIDE_MS);
   const playable = !!file && duration > 0 && !error;
@@ -2628,23 +2682,24 @@ function PlayerCore({
             }}
             onWaiting={e => {
               if (!isActive(e)) return;
-              setBuffering(true);
               // The browser played what it had cached since a long pause and nothing arrived since:
               // the old stream is gone, restart at once
               const since = resumedAtRef.current;
               if (hasPlayed.current && !e.currentTarget.seeking && since > 0 && Date.now() - since < AFTER_PAUSE_MS &&
                   lastDataRef.current < since) {
+                setBuffering(true);
                 resumedAtRef.current = 0;
                 recover('no data since the pause');
                 return;
               }
+              if (!hasPlayed.current) setBuffering(true);
               armStall();
               if (hasPlayed.current) beginStall(false);
-              // Resume only with a few seconds buffered, not at the first frame
-              if (hasPlayed.current && !e.currentTarget.seeking && !holdRef.current) startHold('stall');
+              if (hasPlayed.current) confirmStall(e.currentTarget);
             }}
             onPlaying={e => {
               if (!isActive(e)) return;
+              clearStallConfirm();
               setBuffering(false);
               clearStall();
               advanceFromRef.current = e.currentTarget.currentTime;
@@ -2733,7 +2788,7 @@ function PlayerCore({
       )}
 
       {/* Up next countdown */}
-      {countdown !== null && !!onNext && (
+      {countdown !== null && !!onNext && countdownAt === 'end' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
           <p className="text-[#b3b3b3] text-sm uppercase tracking-widest mb-2">{t('player.nextEpisode')}</p>
           <p className="text-white text-2xl font-bold mb-6">{t('player.nextStartsIn', { label: nextLabel, n: Math.max(0, countdown) })}</p>
@@ -2803,10 +2858,42 @@ function PlayerCore({
         </div>
       )}
 
-      {/* Next episode button near the end */}
+      {/* End credits: the next episode starts when the button has filled up */}
+      {countdown !== null && !!onNext && countdownAt === 'credits' && (
+        <div className={`absolute ${touchUi ? mobileCss.nextUp : 'right-4 md:right-8 bottom-28'} z-[9] flex items-center gap-2`}>
+          <button
+            onClick={() => { creditsDismissedRef.current = true; setCountdown(null); }}
+            className="px-5 py-2.5 bg-[#6d6d6eb3] hover:bg-[#6d6d6e66] text-white font-bold rounded shadow-lg transition"
+          >
+            {t('player.watchCredits')}
+          </button>
+          <button
+            onClick={nextFromCredits}
+            aria-label={t('player.nextStartsIn', { label: nextLabel, n: Math.max(0, countdown) })}
+            className="relative overflow-hidden px-5 py-2.5 bg-white/60 text-black font-bold rounded shadow-lg"
+          >
+            <span className="absolute inset-y-0 left-0 bg-white transition-[width] duration-1000 ease-linear" style={{ width: `${((5 - countdown) / 5) * 100}%` }} />
+            <span className="relative flex items-center gap-2">
+              <SkipForward className="w-5 h-5 fill-current" /> {t('player.nextEpisode')}
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Skip intro */}
+      {showSkipIntro && !panelOpen && (
+        <button
+          onClick={() => { const i = skipSegs?.intro; if (i) seekTo(i.end); }}
+          className={`absolute ${touchUi ? mobileCss.nextUp : 'right-4 md:right-8 bottom-28'} z-[9] flex items-center gap-2 px-5 py-2.5 bg-black/60 border-2 border-white/80 text-white font-bold rounded shadow-lg hover:bg-white hover:text-black transition`}
+        >
+          <ChevronsRight className="w-5 h-5" /> {t('player.skipIntro')}
+        </button>
+      )}
+
+      {/* Next episode button during the end credits */}
       {showNextButton && !panelOpen && (
         <button
-          onClick={() => onNext?.()}
+          onClick={nextFromCredits}
           className={`absolute ${touchUi ? mobileCss.nextUp : 'right-4 md:right-8 bottom-28'} flex items-center gap-2 px-5 py-2.5 bg-white text-black font-bold rounded shadow-lg hover:bg-white/80 transition`}
         >
           <SkipForward className="w-5 h-5 fill-current" /> {t('player.nextEpisode')}

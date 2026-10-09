@@ -336,6 +336,7 @@ export const en = {
   'player.qualityRelease': 'Release quality',
   'player.nextStartsIn': '{label} starts in {n}',
   'player.playNow': 'Play Now',
+  'player.watchCredits': 'Watch credits',
   'player.seek': 'Seek',
   'player.volume': 'Volume',
   'detail.match': '{n}% Match',

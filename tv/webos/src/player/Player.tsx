@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, ArrowLeft, CalendarClock, Clapperboard, MessageSquare, Pause, Play, RotateCcw, RotateCw, SkipForward } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CalendarClock, ChevronsRight, Clapperboard, MessageSquare, Pause, Play, RotateCcw, RotateCw, SkipForward } from 'lucide-react';
 import Spinner from '../components/Spinner';
 import { img } from '../lib/http';
 import { useI18n } from '../lib/i18n';
@@ -10,6 +10,7 @@ import { PlayerEngine, type PlayerState } from './engine';
 import AudioSubtitlePanel from './AudioSubtitlePanel';
 import SubtitleOverlay from './SubtitleOverlay';
 import TrickPlay, { useTrickPlayPrefetch } from './TrickPlay';
+import { skipPhase, useSkipSegments } from './skipSegments';
 
 const HIDE_MS = 4500;
 const COMMIT_MS = 800;
@@ -35,7 +36,8 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   const engineRef = useRef<PlayerEngine | null>(null);
   const [s, setS] = useState<PlayerState | null>(null);
   const [visible, setVisible] = useState(true);
-  const [zone, setZone] = useState<'timeline' | 'buttons'>('timeline');
+  // 'skip': the Skip intro / end credits buttons (bottom right) have the focus
+  const [zone, setZone] = useState<'timeline' | 'buttons' | 'skip'>('timeline');
   const [panel, setPanel] = useState(false);
   const [styling, setStyling] = useState(false);
   const [preview, setPreview] = useState<number | null>(null);
@@ -89,7 +91,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
       : s.phase === 'error' ? 'error'
         : s.phase === 'unreleased' ? 'unreleased'
           : s.fatal ? 'fatal'
-            : s.countdown !== null ? 'countdown'
+            : s.countdown !== null && s.ended ? 'countdown'
               : '';
 
   // Focus follows what is on screen: an overlay's buttons, else the timeline
@@ -184,6 +186,12 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     }
     const dir = direction(e);
     const onTimeline = !panelRef.current && canPlay && st.countdown === null && zoneRef.current === 'timeline';
+    // On a lone Skip button Left / Right still seek
+    if (!onTimeline && !panelRef.current && canPlay && st.countdown === null && zoneRef.current === 'skip' && (dir === 'left' || dir === 'right')) {
+      focusById('pl-timeline');
+      scrub(dir === 'right' ? 1 : -1, e.repeat);
+      return true;
+    }
     if (onTimeline) {
       if (dir === 'left' || dir === 'right') scrub(dir === 'right' ? 1 : -1, e.repeat);
       else if (dir === 'up') move('up');
@@ -212,6 +220,27 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     s?.duration ?? 0,
     !!s && s.phase === 'ready' && s.playing,
   );
+
+  // Skip intro / end credits (skipSegments.ts)
+  const skipSegs = useSkipSegments(s?.meta, playable ? engineRef.current?.currentFile() ?? null : null, s?.duration ?? 0);
+  const skip = s && playable && preview === null ? skipPhase(skipSegs, s.position, s.duration) : null;
+  // During the credits: a countdown card, or a Next button with autoplay off or after "Watch credits"
+  const creditsCard = !!s && !!s.next && !s.ended && (s.countdown !== null || skip === 'credits');
+  const skipShown = skip === 'intro' && !overlay ? 'intro' : creditsCard && !overlay ? 'credits' : null;
+  const creditsDismissed = useRef(false);
+  useEffect(() => {
+    if (skip !== 'credits') { creditsDismissed.current = false; return; }
+    if (!creditsDismissed.current && s?.playing) engineRef.current?.creditsStarted();
+  }, [skip, s?.playing]);
+  // The Skip / Next button takes the focus when it appears and gives it back when it goes
+  useEffect(() => {
+    if (panel) return;
+    const raf = requestAnimationFrame(() => {
+      if (skipShown) focusById('pl-skip');
+      else if (zoneRef.current === 'skip' && !overlay) focusById('pl-timeline');
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [skipShown, panel, overlay]);
 
   const engine = engineRef.current;
   const subtitleTime = useCallback(() => engineRef.current?.subtitleTime() ?? 0, []);
@@ -317,6 +346,34 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
             </button>
             <button type="button" className="btn btn-secondary" data-nav onClick={() => engine?.stopCountdown()}>{t('common.cancel')}</button>
           </div>
+        </div>
+      )}
+
+      {skipShown === 'intro' && !panel && (
+        <div className="player-skip">
+          <button type="button" className="btn btn-skip" data-nav data-nav-id="pl-skip" onFocus={() => setZone('skip')}
+            onClick={() => { const i = skipSegs?.intro; if (i) engine?.seekTo(i.end); }}>
+            <ChevronsRight className="btn-icon" /> {t('player.skipIntro')}
+          </button>
+        </div>
+      )}
+
+      {skipShown === 'credits' && !panel && (
+        <div className="player-skip">
+          {s.countdown !== null && (
+            <button type="button" className="btn btn-secondary" data-nav data-nav-id="pl-skip-credits" onFocus={() => setZone('skip')}
+              onClick={() => {
+                creditsDismissed.current = true;
+                engine?.stopCountdown();
+                requestAnimationFrame(() => focusById('pl-skip'));
+              }}>
+              {t('player.watchCredits')}
+            </button>
+          )}
+          <button type="button" className="btn btn-next-fill" data-nav data-nav-id="pl-skip" onFocus={() => setZone('skip')} onClick={() => engine?.playNext({ fromCredits: true })}>
+            {s.countdown !== null && <span className="btn-next-fill-bar" style={{ transform: `scaleX(${(5 - s.countdown) / 5})` }} />}
+            <SkipForward className="btn-icon btn-icon-fill" /> <span className="btn-next-fill-label">{t('player.nextEpisode')}</span>
+          </button>
         </div>
       )}
 
@@ -426,6 +483,8 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
           subtitles={s.subs}
           subtitleId={s.subId}
           onSubtitle={id => engine?.setSubtitle(id)}
+          subDelay={s.subDelay}
+          onSubDelay={d => engine?.setSubDelay(d) ?? 0}
           subAlt={s.subAlt}
           onSubAlt={() => engine?.switchSubAlt()}
           onClose={closePanel}

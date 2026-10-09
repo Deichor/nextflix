@@ -20,6 +20,10 @@ interface Props {
   subtitles: SubtitleItem[] | null;
   subtitleId: string | null;
   onSubtitle: (id: string | null) => void;
+  /** Subtitle timing in seconds (+ later, - earlier) */
+  subDelay: number;
+  /** Sets the timing; returns the value it took (rounded, limited) */
+  onSubDelay: (seconds: number) => number;
   /** Another release carries the profile language's subtitle (the playing one lacks it): a row to switch */
   subAlt?: { busy: boolean } | null;
   onSubAlt?: () => void;
@@ -36,10 +40,19 @@ function channelLabel(t: TFunction, channels: number): string {
   return channels > 2 ? `${channels}ch` : '';
 }
 
+const SUB_DELAY_STEP_S = 0.5;
+
+// "+1,5" / "−0.5" / "0.0": signDisplay and Intl number options are missing on old webOS engines
+function delayText(d: number, locale: string): string {
+  const n = Math.abs(d).toFixed(1);
+  return (d > 0 ? '+' : d < 0 ? '−' : '') + (locale === 'tr' ? n.replace('.', ',') : n);
+}
+
 // The web player's simple view: audio tracks on the left, one row per subtitle language on the right.
-// "Subtitle appearance" at the end of the list swaps in the style view (Left / Right or OK change a value).
+// "Subtitle timing" (while a subtitle is on) shifts it with Left / Right. "Subtitle appearance" at the end
+// of the list swaps in the style view (Left / Right or OK change a value).
 // Closes on a click outside (the backdrop), Back, Left past the audio column and after PANEL_IDLE_MS.
-export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, onSubtitle, subAlt, onSubAlt, onClose, onStyling }: Props) {
+export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, onSubtitle, subDelay, onSubDelay, subAlt, onSubAlt, onClose, onStyling }: Props) {
   const { t, locale } = useI18n();
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<'tracks' | 'style'>('tracks');
@@ -48,6 +61,9 @@ export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, origin
   const style = useSubtitleStyle();
   const styleRef = useRef(style);
   styleRef.current = style;
+  const delayRef = useRef({ value: subDelay, set: onSubDelay });
+  delayRef.current = { value: subDelay, set: onSubDelay };
+  const [delayFocused, setDelayFocused] = useState(false);
   const original = normLang(originalLang);
   const order = locale === 'tr' ? ['tr', 'en'] : ['en', 'tr'];
   const perLanguage = useMemo(() => bestPerLanguage(subtitles || [], order, locale), [subtitles, locale]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -85,6 +101,13 @@ export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, origin
         return true;
       }
       return false;
+    }
+    // Subtitle timing row: Left / Right shift the subtitles by half a second
+    if ((dir === 'left' || dir === 'right') && document.activeElement?.hasAttribute('data-sub-delay')) {
+      const d = delayRef.current;
+      // Held keys repeat faster than renders: count on from the value just set
+      d.value = d.set(d.value + (dir === 'right' ? SUB_DELAY_STEP_S : -SUB_DELAY_STEP_S));
+      return true;
     }
     if (dir === 'left') {
       if (!move('left')) closeRef.current();
@@ -203,6 +226,24 @@ export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, origin
                       <span className="panel-label">{t(subAlt.busy ? 'player.subAltSwitching' : 'player.subAltRow')}</span>
                     </button>
                   )}
+                  {!!subtitleId && (
+                    <button
+                      type="button"
+                      className="panel-row style-row delay-row"
+                      data-nav
+                      data-nav-id="sub-delay"
+                      data-sub-delay
+                      onFocus={() => setDelayFocused(true)}
+                      onBlur={() => setDelayFocused(false)}
+                      onClick={() => onSubDelay(0)}
+                    >
+                      <span className="style-name">{t('player.subtitleDelay')}</span>
+                      <span className="style-arrow" onClick={e => { e.stopPropagation(); onSubDelay(subDelay - SUB_DELAY_STEP_S); }}><ChevronLeft className="style-arrow-icon" /></span>
+                      <span className="style-value">{t('player.seconds', { value: delayText(subDelay, locale) })}</span>
+                      <span className="style-arrow" onClick={e => { e.stopPropagation(); onSubDelay(subDelay + SUB_DELAY_STEP_S); }}><ChevronRight className="style-arrow-icon" /></span>
+                    </button>
+                  )}
+                  {!!subtitleId && delayFocused && <p className="panel-hint">{t('player.subtitleDelayHint')}</p>}
                   <button type="button" className="panel-row panel-row-link" data-nav data-nav-id="sub-style" onClick={() => setView('style')}>
                     <span className="panel-check"><Type className="panel-check-icon panel-link-icon" /></span>
                     <span className="panel-label">{t('subStyle.title')}</span>

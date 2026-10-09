@@ -17,6 +17,7 @@ import (
 	"nextflix/internal/modules/providers"
 	"nextflix/internal/modules/ratings"
 	"nextflix/internal/modules/recommendations"
+	"nextflix/internal/modules/segments"
 	"nextflix/internal/modules/streaming"
 	"nextflix/internal/modules/subtitles"
 	"nextflix/internal/modules/top10"
@@ -54,6 +55,7 @@ func run() error {
 	models = append(models, top10.Models()...)
 	models = append(models, streaming.Models()...)
 	models = append(models, subtitles.Models()...)
+	models = append(models, segments.Models()...)
 	if err := database.Migrate(db, models...); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
@@ -137,6 +139,17 @@ func run() error {
 		log.Printf("seed subtitle settings: %v", err)
 	}
 
+	segmentsSvc := segments.NewService(db, segments.Config{
+		Chapters: fileChapters(streamingSvc),
+		IMDb: func(tmdbID int) (string, error) {
+			ids, err := tm.GetExternalIDs("tv", tmdbID)
+			if err != nil {
+				return "", err
+			}
+			return ids.IMDBID, nil
+		},
+	})
+
 	r := httpserver.New(cfg, db)
 	httpserver.ServeTVApp(r, os.Getenv("TV_APP_DIR"))
 	images.Register(r, imagesSvc)
@@ -151,6 +164,7 @@ func run() error {
 	notifications.Register(api, notificationsSvc)
 	streaming.Register(api, streamingSvc)
 	subtitles.Register(api, subtitlesSvc)
+	segments.Register(api, segmentsSvc)
 
 	log.Printf("Nextflix server listening on :%s", cfg.Port)
 	if err := httpserver.Run(ctx, r, cfg.Port); err != nil {
@@ -345,6 +359,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// fileChapters gives the skip segments the chapter markers of a probed file.
+func fileChapters(s *streaming.Service) segments.ChapterSource {
+	return func(ctx context.Context, hash string, index int) ([]segments.Chapter, float64, error) {
+		list, duration, err := s.Chapters(ctx, hash, index)
+		if err != nil {
+			return nil, 0, err
+		}
+		out := make([]segments.Chapter, 0, len(list))
+		for _, c := range list {
+			out = append(out, segments.Chapter{Start: c.Start, End: c.End, Title: c.Title})
+		}
+		return out, duration, nil
+	}
 }
 
 // debridSource lets the subtitle reads follow files that play from TorBox.

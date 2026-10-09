@@ -8,7 +8,7 @@ server/                     Go 1.24, gin, gorm + SQLite, go-redis v8   (module n
   cmd/nextflix/main.go      wiring only
   internal/platform/        config, database, httpserver, cache, tmdb, upstream, torbox
   internal/modules/         profiles, progress, ratings, recommendations, top10, catalog, providers,
-                            notifications, streaming, images
+                            notifications, streaming, subtitles, segments, images
 web/                        Next.js 15 (App Router), React 19, TypeScript
   src/app/                  thin routes: export { default } from '@/features/...'
   src/features/<domain>/    screens, components, api/store files of one domain
@@ -46,6 +46,7 @@ docs/                       this folder
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
 | `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
+| `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 
 A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and `routes.go` with
@@ -68,14 +69,15 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 ### Startup order (`cmd/nextflix/main.go`)
 
 1. Load `.env` if present (optional), `config.Load()`.
-2. `database.Open`, then `database.Migrate` with the models of profiles, progress, ratings, top10 and streaming.
+2. `database.Open`, then `database.Migrate` with the models of profiles, progress, ratings, top10, streaming,
+   subtitles and segments.
 3. `cache.New` (on error the server logs it and runs without Redis), `tmdb.New`.
 4. Context cancelled by SIGINT/SIGTERM.
 5. `progress`, `ratings`, then `profiles` with both as cleaners, plus `EnsureDefault`; `ratings.MigrateMyList()`
    (one time, logged) and `go ratings.Backfill(ctx)`; `recommendations` (ratings adapter + TMDB catalog, hooked to
    `ratings.OnChange`), plus the watch history (`SetHistory(watchHistory(progress))`); `top10` (`Start(ctx)` loads stored lists and refreshes in the background).
 6. `catalog` with `StartSearchIndex(ctx, SEARCH_INDEX_DIR or /app/data)` (loads / refreshes the typo index in the background), `SetRatings(searchRatings(ratings))` + `ratings.OnChange(InvalidateTaste)` (genre taste) and `SetLocalSignals(localSignals(profiles, progress, ratings))` (browse ranking) and `recommendations.SetSimilar(similarTitles(catalog))` (More Like This lists for the "Because you ..." rows); `providers` (on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
-7. `httpserver.New`, `images.Register(r, …)` on the root, `api := r.Group("/api")`, every other module's `Register`, `httpserver.Run`.
+7. `segments` (chapters from streaming via `fileChapters`, show IMDb ids from TMDB), `httpserver.New`, `images.Register(r, …)` on the root, `api := r.Group("/api")`, every other module's `Register`, `httpserver.Run`.
 
 ## Web
 
@@ -568,7 +570,8 @@ speed instead of from the swarm (`debrid.go`, `debrid_resolve.go`, client in `pl
   (4 sequential requests, 2.2 s of first-byte waits for a 4K file). So the file is read in bounded chunks: a reader's
   position starts a 4 MB chunk, a reader that read 1 MB gets the next 8 MB chunk fetched ahead, from 4 MB on 3 of
   them in parallel (keep-alive pool, ≤ 8 idle connections, 90 s). Chunks are shared by every reader of the file and
-  stay cached (LRU over all files, 256 MB, chunks in use never evicted), so the header / index / cue reads before a
+  stay cached (LRU over all files, 256 MB, chunks in use never evicted; chunks fetched ahead of a reader count as just
+  used, so health checks of other releases cannot evict them before the reader gets there), so the header / index / cue reads before a
   seek, the data around a paused position and a restart at the same spot never go out again. Readers get bytes as
   they arrive (no wait for the whole chunk). A chunk fetch without headers after 4 s or without bytes for 5 s is
   tried again on a new connection (DPI stalls) and resumed at its next byte, up to 6 failures / 2 link refreshes;
@@ -896,7 +899,12 @@ Adaptive start buffer (`web/src/features/watch/startBuffer.ts`, ported to `tv/we
 a source whose resolve health (`rate / need`) is below 1.3× starts paused (`preload=auto`, still downloading) until
 8 s are buffered ahead, at most 4 s after the first frames were playable (`readyState` ≥ HAVE_FUTURE_DATA); a
 source at 1.3× or more, an unmeasured one and a TorBox source (line speed) start at once. Only the first stream of a
-source holds; seeks and restarts play at once. After a stall (`waiting` once playback started, not while seeking)
+source holds; seeks and restarts play at once. Once playback started, a `waiting` is only a stall when it lasts
+800 ms (`STALL_CONFIRM_MS`: still below HAVE_FUTURE_DATA or the position did not move; `playing` cancels it):
+only then the player counts as buffering (overlay, `stalled()`, no buffer health samples) and, when not seeking,
+holds. Shorter waits (a few frames' gap, a decoder hiccup) used to pause the element for the hold and flash
+"Buffering..." for under a second, a few times per episode; now they play on unseen (web and TV alike; the web
+overlay keeps its 400 ms / 300 ms hysteresis on top). After a stall
 any source is held paused until 4 s are buffered, at most 6 s. Either hold also ends
 when the buffer reaches the end of the file or the browser stopped fetching with ≥ 2 s buffered. The normal loading
 screen shows with a small "Buffering for smooth playback…" line. A hold counts as a stall for the watchdog (only a
@@ -1034,7 +1042,8 @@ it) and released when the player closes before it is reached.
 
 Player preferences live per profile in localStorage `hfx-player:<profileId>` (written by Settings,
 `features/settings/playerPrefs.ts`, and by the player for the last audio/subtitle pick): `autoplayNext: false` drops
-the 5 s countdown at the end of an episode (only the Next button stays), `subSize` (`small`/`medium`/`large`) scales
+the 5 s countdown at the end credits and the end of an episode (only the Next button stays, see
+[Skip intro and Next episode](#skip-intro-and-next-episode)), `subSize` (`small`/`medium`/`large`) scales
 the subtitle overlay by `SUBTITLE_SIZE_SCALE`, `audioLang: 'original'` picks the title's original language and skips
 the "Turkish profile → Turkish audio" rule (picking the original track in the player keeps `'original'`).
 
@@ -1072,7 +1081,8 @@ those retries and the audio is in another language:
 Embedded text tracks of big files are read live (`modules/subtitles/live.go`): extracting a track of an MKV / MP4
 means reading the whole file, so before, such tracks were only offered for small or mostly cached files. Now they are
 listed with `live: true`; the file request carries the player's position (`t`) and ffmpeg reads the track from 30 s
-before it onward (`-ss … -copyts`, so cues keep the file's times; the pieces it reads are the ones playback needs
+before it onward (`-ss … -copyts -start_at_zero`, so cues keep the file's times, counted from its start time like a
+full extraction and the play stream; the pieces it reads are the ones playback needs
 next, mostly from TorrServer's read-ahead cache). Cues collect in memory and each answer returns what is there (a
 `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` while more follows); the players ask again every 15 s (the web player also
 after a seek). A position more than 5 minutes past the read's frontier (or before its start) starts a new read
@@ -1095,6 +1105,40 @@ peers; buffered ahead 22 s of media after 10 s, 51 s after 20 s, 140 s after 30 
 1.9 GB range (≈ 18 min) after 90 s, then at the reader's pace. With a second torrent read at full speed next to it
 the playing one still got 20-24 MB/s (19 s ahead after 11 s, 72 s after 21 s), because that swarm was strong; with a
 weak playing swarm (3-5 active peers) the other torrents take the line, hence the playback priority.
+
+## Skip intro and Next episode
+
+`server/internal/modules/segments` (`GET /api/skip-segments`, see [API.md](API.md#skip-segments-modulessegments))
+tells both players where an episode's intro and end credits are. Sources, first match per segment:
+
+1. Named chapters of the playing file: the probe runs ffprobe with `-show_chapters` (free: chapters are in the
+   header), `streaming.Service.Chapters` hands them over through the consumer-owned `segments.ChapterSource`
+   (`fileChapters` in `main.go`). Only whole names count (`Intro`, `Opening`, `OP - <song>`, `Opening Credits`,
+   `Credits`, `End Credits`, `Ending`, `ED`, `Outro`, a few Turkish / German / French / Spanish / Italian ones);
+   generic chapters (`Chapter 3`, `Opening Scene`) are ignored.
+2. Community timestamps: [TheIntroDB](https://theintrodb.org/docs) (`/v3/media?tmdb_id=&season=&episode=&duration_ms=`,
+   TMDB id of the show, the file length picks the release version; 500 reads a day per IP without a key), then
+   [IntroDB](https://introdb.app/docs) (`/segments?imdb_id=&season=&episode=`, IMDb id via TMDB external ids) for
+   what the first one lacks. The answer is stored per episode and file length (±5 s) in `skip_segments`: found 30
+   days, not found 3 days; failures are not stored and pause lookups for 10 min (an hour after a 429).
+
+Audio fingerprinting (Jellyfin Intro Skipper style: chromaprint of several episodes of a season, black frames for
+credits) was left out: it needs the decoded audio of many episodes, i.e. gigabytes read from swarms while one plays.
+
+Rules (`rules.go`) keep wrong data (another release version, a bad submission) from putting a prompt in the middle
+of an episode: an intro lasts 5 s to 4 min and ends in the first half; credits start in the second half, at most
+15 min before the end and not in the last 5 s, and only with a known file length.
+
+Players (`web/src/features/watch/skipSegments.ts`, `tv/webos/src/player/skipSegments.ts`, series only, fetched once
+per episode and file):
+
+- Intro: a "Skip intro" button while the position is inside it; it seeks to its end. On the TV it takes the focus
+  when it appears (OK skips, Left / Right still seek) and gives it back to the timeline when it goes.
+- Credits: while they play (and a next episode exists), a corner card counts down 5 s ("Next episode" fills up,
+  "Watch credits" cancels) while the video goes on; the countdown waits while paused. The TV focuses "Next episode".
+  With `autoplayNext: false`, or after "Watch credits", only a Next episode button shows there.
+- Without credits data nothing appears before the end; the old "last 40-120 s" Next button is gone. The `ended`
+  event (the real end) always starts the full-screen 5 s countdown, also after "Watch credits".
 
 ## Ratings and Favorites
 

@@ -146,13 +146,17 @@ func (d *tsDebrid) chunkAtLocked(f *tsProxyFile, pos, want int64) *tsProxyChunk 
 }
 
 // prefetchLocked makes sure the n chunks after from are cached or on their way (up to last).
+// They count as just used: otherwise a chunk fetched ahead long ago is older than the ones
+// already read, and a burst of other reads (health checks) evicts it before the reader gets there.
 func (d *tsDebrid) prefetchLocked(f *tsProxyFile, from, last int64, n int) {
 	pos := from
+	now := time.Now()
 	for k := 0; k < n && pos <= last && (f.size == 0 || pos < f.size); k++ {
 		c := d.chunkAtLocked(f, pos, tsProxyChunkSize)
 		if c.failed {
 			return
 		}
+		c.used = now
 		pos = c.end
 	}
 }

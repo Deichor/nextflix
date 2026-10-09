@@ -84,6 +84,8 @@ export interface PlayerState {
   subs: SubtitleItem[] | null;
   subId: string | null;
   cues: Cue[];
+  /** Seconds the subtitles are shown later (negative: earlier), for the playing file */
+  subDelay: number;
   toast: MessageKey | '';
   /** Another release carries the profile language's subtitle that the playing file lacks (subtitle panel row) */
   subAlt?: { busy: boolean } | null;
@@ -106,6 +108,9 @@ const LONG_STALL_MS = 8000;
 const STALL_WINDOW_MS = 60000;
 // A stall counts once playback waited this long (waiting, so under 1 s buffered); shorter ones are hiccups
 const MIN_STALL_MS = 3000;
+// A wait mid-playback shows buffering and holds for a larger buffer only once it lasted this long:
+// shorter waits (a gap of a few frames, a decoder hiccup) play on by themselves
+const STALL_CONFIRM_MS = 800;
 const MAX_DOWNGRADES = 2;
 // The first upgrade poll comes soon after the start (a TorBox 4K is often ready at once), then every 10 s
 const UPGRADE_FIRST_MS = 5000;
@@ -129,6 +134,9 @@ const RECOVERED_MS = 15000;
 const TOAST_MS = 4000;
 // Slower subtitle providers finish after the first answer: ask again (see loadSubtitles)
 const SUBTITLE_RETRY_MS = [8000, 20000];
+// A /seekpoint that failed (its pieces were not in yet) is asked again after these delays
+const SEEKPOINT_RETRY_MS = [3000, 10000, 30000];
+const MAX_SUB_DELAY_S = 60;
 // Source switches without a stall are spliced into the playing MediaSource (mseStream.ts) about
 // SPLICE_LEAD_S ahead; a restart (loading screen) only follows a real stall. A sidegrade offer must
 // measure at least BETTER_RATIO (rate / bitrate) and more than the playing source.
@@ -231,6 +239,7 @@ export class PlayerEngine {
   private spliceFail = '';
   private deferredUpgrade: { src: StreamSource; toast: MessageKey } | null = null;
   private realStallTimer?: Timer;
+  private stallConfirmTimer?: Timer;
   private hasPlayed = false;
   private everPlayed = false;
   private recoveries = 0;
@@ -252,9 +261,11 @@ export class PlayerEngine {
   private subAltSource: StreamSource | null = null;
   private wantSubLang = '';
   private cueTimer?: Timer;
-  private subDelay = 0;
   private subDecided = false;
   private subUserPicked = false;
+  // A spliced-in file: its list picks the subtitle again (the old file's may be timed for the other release)
+  private subRepick = false;
+  private seekRetry?: Timer;
 
   // session wide
   private played = new Set<string>();
@@ -296,6 +307,7 @@ export class PlayerEngine {
       subs: null,
       subId: null,
       cues: [],
+      subDelay: 0,
       toast: '',
       countdown: null,
       next: null,
@@ -342,7 +354,14 @@ export class PlayerEngine {
 
   /** File time the subtitle overlay shows. */
   subtitleTime(): number {
-    return this.positionNow() - this.subDelay;
+    return this.positionNow() - this.state.subDelay;
+  }
+
+  /** Subtitle timing (seconds, + shows them later); kept for the playing file like on the web */
+  setSubDelay(seconds: number): number {
+    const d = Math.round(Math.max(-MAX_SUB_DELAY_S, Math.min(MAX_SUB_DELAY_S, seconds)) * 10) / 10;
+    if (d !== this.state.subDelay) this.set({ subDelay: d });
+    return d;
   }
 
   private stale(session: number) {
@@ -461,16 +480,18 @@ export class PlayerEngine {
     }
     this.current = h;
     this.played.add(h);
+    // The subtitle timing belongs to the file: kept when the same one opens again
+    const subDelay = this.hash === h && this.index === src.index ? this.state.subDelay : 0;
     this.hash = h;
     this.index = src.index;
     this.subDecided = false;
     this.subUserPicked = false;
-    this.subDelay = 0;
+    this.subRepick = false;
     this.noMse = !mseAvailable();
     this.set({
       phase: 'ready', error: null, unreleased: null, fatal: null, ended: false, buffering: true, reconnecting: false,
       status: 'player.connecting', duration: 0, position: startAt, audioTracks: [], audio: 0,
-      quality: qualityOf(null, src), audioBadge: '', subs: null, subId: null, cues: [], debrid: !!src.debrid, cinema: !!src.cinema,
+      quality: qualityOf(null, src), audioBadge: '', subs: null, subId: null, cues: [], subDelay, debrid: !!src.debrid, cinema: !!src.cinema,
     });
 
     // TorrServer may have dropped a saved torrent since
@@ -645,21 +666,33 @@ export class PlayerEngine {
     }
     else v.play().catch(e => { if (e?.name !== 'AbortError') this.set({ playing: false }); });
     this.armStall();
+    clearTimeout(this.seekRetry);
     if (target <= 0 || split) return;
 
-    const ctrl = new AbortController();
-    this.seekCtrl = ctrl;
-    const timer = setTimeout(() => ctrl.abort(), 15000);
+    // Until the answer comes positions (and subtitles) run up to one keyframe interval ahead. An unknown
+    // start (ffprobe waiting for pieces from a slow swarm) is asked again once the stream's data is cached,
+    // instead of keeping the requested time as the offset for the whole stream.
     const q = `hash=${this.hash}&index=${this.index}&t=${target.toFixed(3)}&audio=${this.state.audio}${capsQuery()}`;
-    getJson(`/api/torrent-stream/seekpoint?${q}`, { signal: ctrl.signal })
-      .then(data => (typeof data?.t === 'number' && data.t >= 0 && data.t <= target + 1 ? data.t : target))
-      .catch(() => target)
-      .then(t => {
-        clearTimeout(timer);
-        if (seq !== this.seekSeq || this.destroyed) return;
-        this.offset = t;
-        this.exact = true;
-      });
+    const ask = (attempt: number) => {
+      const ctrl = new AbortController();
+      this.seekCtrl = ctrl;
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      getJson(`/api/torrent-stream/seekpoint?${q}`, { signal: ctrl.signal })
+        .then(data => (typeof data?.t === 'number' && data.t >= 0 && data.t <= target + 1 && data.exact !== false ? data.t : NaN))
+        .catch(() => NaN)
+        .then(t => {
+          clearTimeout(timer);
+          if (seq !== this.seekSeq || this.destroyed) return;
+          if (isNaN(t) && attempt < SEEKPOINT_RETRY_MS.length) {
+            this.seekRetry = setTimeout(() => { if (seq === this.seekSeq && !this.destroyed) ask(attempt + 1); }, SEEKPOINT_RETRY_MS[attempt]);
+            return;
+          }
+          if (isNaN(t)) console.info(`[restart] no seek point for t=${target.toFixed(1)}: positions may be off by a keyframe interval`);
+          this.offset = isNaN(t) ? target : t;
+          this.exact = true;
+        });
+    };
+    ask(0);
   }
 
   private stopStream() {
@@ -746,15 +779,15 @@ export class PlayerEngine {
           if (this.state.buffering && ahead < 1 && this.hold?.kind !== 'start' && this.pendingSide) this.usePending('stall');
         }, MIN_STALL_MS);
       }
-      this.set({ buffering: true });
+      if (!this.hasPlayed) this.set({ buffering: true });
       // Not re-armed by every waiting: a stall hold ends (pause, play, waiting) every few seconds, which
       // kept the watchdog from ever restarting a stream that delivers nothing
       if (!this.stallArmed) this.armStall();
       if (this.hasPlayed) this.beginStall(false);
-      // Resume only with a few seconds buffered, not at the first frame
-      if (this.hasPlayed && !v.seeking && !this.hold) this.startHold('stall');
+      if (this.hasPlayed) this.confirmStall();
     });
     v.addEventListener('playing', () => {
+      clearTimeout(this.stallConfirmTimer);
       this.set({ buffering: false, reconnecting: false });
       this.disarmStall();
       this.endStall();
@@ -789,7 +822,8 @@ export class PlayerEngine {
     this.disarmStall();
     this.set({ playing: false, ended: true });
     this.persist({ finished: true });
-    if (this.state.next && readPlayerPrefs(this.pid).autoplayNext !== false) this.startCountdown();
+    // A countdown the end credits started goes on
+    if (this.state.next && readPlayerPrefs(this.pid).autoplayNext !== false && !this.countdownTimer) this.startCountdown();
   }
 
   private onError() {
@@ -818,6 +852,20 @@ export class PlayerEngine {
       // A paused player is not stalled (a buffer hold is)
       if (!this.video.paused || this.hold) this.recover();
     }, ms);
+  }
+
+  /** A wait mid-playback that lasts STALL_CONFIRM_MS: show buffering and resume only with a few seconds buffered. */
+  private confirmStall() {
+    clearTimeout(this.stallConfirmTimer);
+    const v = this.video;
+    const seq = this.seekSeq;
+    const from = v.currentTime;
+    this.stallConfirmTimer = setTimeout(() => {
+      if (seq !== this.seekSeq || this.destroyed || !this.hasPlayed || v.ended || (v.paused && !this.hold)) return;
+      if (v.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && v.currentTime > from) return;
+      this.set({ buffering: true });
+      if (!v.seeking && !this.hold) this.startHold('stall');
+    }, STALL_CONFIRM_MS);
   }
 
   /** Holds the element paused until startBuffer.ts says enough is buffered. */
@@ -968,8 +1016,9 @@ export class PlayerEngine {
   private sampleHealth() {
     const v = this.video;
     const s = this.state;
+    // readyState: a wait not confirmed as a stall yet (confirmStall) is not smooth playback either
     if (s.phase !== 'ready' || !v.getAttribute('src') || v.paused || v.seeking || s.buffering || s.ended || s.fatal ||
-        !this.hasPlayed || !this.exact) return;
+        v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA || !this.hasPlayed || !this.exact) return;
     const pos = this.offset + v.currentTime;
     const end = bufferedEnd(v.buffered, v.currentTime);
     const fileEnd = end >= 0 ? this.offset + end : pos;
@@ -1266,8 +1315,10 @@ export class PlayerEngine {
         ? { codec: probe.video_codec || '', width: probe.width, height: probe.height || 0, hdr: !!probe.hdr, dolbyVision: Number(probe.dolby_vision) || 0, direct: !!probe.direct }
         : null;
       this.videoHeight = video ? videoQuality(video.width, video.height) : 0;
-      this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid, cinema: !!src.cinema });
+      this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid, cinema: !!src.cinema, subDelay: 0 });
       this.health.reset();
+      // The old file's subtitle stays until the new list picks one for this file (as the web player does)
+      this.subRepick = true;
       this.loadSubtitles(next);
       this.scheduleUpgrade(next);
       this.watchSplice(cut, old, toast, reason);
@@ -1489,6 +1540,8 @@ export class PlayerEngine {
     const show = (items: SubtitleItem[]) => {
       list = items;
       this.set({ subs: items });
+      const repick = this.subRepick && items.length > 0;
+      if (repick) this.subRepick = false;
       // The viewer switched to this release for its subtitle: show it as their choice
       if (this.wantSubLang && hasSubtitleLang(items, this.wantSubLang)) {
         const id = bestSubtitleOf(items, this.wantSubLang);
@@ -1499,11 +1552,11 @@ export class PlayerEngine {
         return;
       }
       // Default pick; a later, fuller list picks again while nothing is shown and the viewer chose nothing
-      if (this.subUserPicked || (this.subDecided && this.state.subId)) return;
+      if (!repick && (this.subUserPicked || (this.subDecided && this.state.subId))) return;
       this.subDecided = true;
       const track = this.state.audioTracks.find(a => a.index === this.state.audio);
       const id = pickSubtitle(items, { profileLang: this.locale, pref: readPlayerPrefs(this.pid).sub, audioLang: track?.language });
-      if (id) this.applySubtitle(id);
+      if (repick ? id !== this.state.subId : id) this.applySubtitle(id);
     };
     // The profile's language is needed when the audio is in another one
     const needed = () => {
@@ -1615,9 +1668,11 @@ export class PlayerEngine {
     });
   }
 
-  playNext() {
+  playNext(opts: { fromCredits?: boolean } = {}) {
     const next = this.state.next;
     if (!next) return;
+    // Leaving from the end credits: this episode counts as watched
+    if (opts.fromCredits && !this.state.ended) this.persist({ finished: true });
     this.stopCountdown();
     if (this.deferredUpgrade) {
       releaseTorrents([this.deferredUpgrade.src.hash.toLowerCase()]);
@@ -1638,13 +1693,20 @@ export class PlayerEngine {
     this.startItem({});
   }
 
+  /** The end credits started (skipSegments.ts): count down to the next episode while they play */
+  creditsStarted() {
+    if (this.state.next && !this.state.ended && !this.countdownTimer && readPlayerPrefs(this.pid).autoplayNext !== false) this.startCountdown();
+  }
+
   private startCountdown() {
     this.stopCountdown();
     this.set({ countdown: 5 });
     this.countdownTimer = setInterval(() => {
+      // Paused during the credits: the countdown waits
+      if (!this.state.ended && this.video.paused) return;
       const n = (this.state.countdown ?? 1) - 1;
       if (n <= 0) {
-        this.playNext();
+        this.playNext({ fromCredits: true });
         return;
       }
       this.set({ countdown: n });

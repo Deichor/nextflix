@@ -1,0 +1,99 @@
+package segments
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
+
+func TestChapterKind(t *testing.T) {
+	cases := map[string]string{
+		"Intro":                  "intro",
+		"Opening":                "intro",
+		"OP":                     "intro",
+		"OP - Kick Back":         "intro",
+		"Opening Credits":        "intro",
+		"Giriş":                  "intro",
+		"Credits":                "credits",
+		"End Credits":            "credits",
+		"ED: Chainsaw Blood":     "credits",
+		"Ending":                 "credits",
+		"Outro":                  "credits",
+		"Chapter 01":             "",
+		"Opening Scene":          "",
+		"The Ending of Everyone": "",
+		"Prologue":               "",
+		"":                       "",
+	}
+	for title, want := range cases {
+		if got := chapterKind(title); got != want {
+			t.Errorf("chapterKind(%q) = %q, want %q", title, got, want)
+		}
+	}
+}
+
+func TestFromChapters(t *testing.T) {
+	ch := []Chapter{
+		{0, 95, "Prologue"}, {95, 185, "Opening"}, {185, 1300, "Part A"}, {1300, 1390, "Ending"}, {1390, 1420, "Preview"},
+	}
+	intro, credits := fromChapters(ch, 1420)
+	if intro == nil || intro.Start != 95 || intro.End != 185 {
+		t.Fatalf("intro = %+v", intro)
+	}
+	if credits == nil || credits.Start != 1300 || credits.End != 1390 {
+		t.Fatalf("credits = %+v", credits)
+	}
+}
+
+func TestRulesRejectMidEpisode(t *testing.T) {
+	// Credits in the first half, or 20 minutes before the end, are another version's or wrong
+	if validCredits(1000, 0, 2700, "x") != nil || validCredits(1500, 0, 2700, "x") != nil {
+		t.Fatal("credits far from the end must be rejected")
+	}
+	if validCredits(2600, 0, 0, "x") != nil {
+		t.Fatal("credits without a known length must be rejected")
+	}
+	if c := validCredits(2600, 0, 2700, "x"); c == nil || c.End != 2700 {
+		t.Fatalf("credits to the end: %+v", c)
+	}
+	if validIntro(1500, 1560, 2700, "x") != nil || validIntro(10, 12, 2700, "x") != nil || validIntro(0, 400, 2700, "x") != nil {
+		t.Fatal("late, short or long intros must be rejected")
+	}
+	if i := validIntro(0.4, 60, 2700, "x"); i == nil || i.Start != 0 {
+		t.Fatalf("intro at the start: %+v", i)
+	}
+}
+
+func TestCommunityFallbackAndShare(t *testing.T) {
+	var theCalls, introCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/the"):
+			theCalls.Add(1)
+			if r.URL.Query().Get("duration_ms") != "2900000" {
+				t.Errorf("duration_ms = %q", r.URL.Query().Get("duration_ms"))
+			}
+			w.Write([]byte(`{"tmdb_id":1396,"type":"tv","season":1,"episode":2,"intro":[{"start_ms":314360,"end_ms":330461}]}`))
+		default:
+			introCalls.Add(1)
+			w.Write([]byte(`{"intro":{"start_ms":314500,"end_ms":331000},"outro":{"start_ms":2843000,"end_ms":2901000}}`))
+		}
+	}))
+	defer srv.Close()
+	s := NewService(nil, Config{IMDb: func(int) (string, error) { return "tt0903747", nil }})
+	s.theIntroDBURL, s.introDBURL = srv.URL+"/the", srv.URL+"/intro"
+
+	r := s.Get(context.Background(), Query{TmdbID: 1396, Season: 1, Episode: 2, Duration: 2900})
+	if r.Intro == nil || r.Intro.Start != 314.36 || r.Intro.Source != "theintrodb+introdb" {
+		t.Fatalf("intro = %+v", r.Intro)
+	}
+	if r.Credits == nil || r.Credits.Start != 2843 || r.Credits.End != 2900 {
+		t.Fatalf("credits = %+v", r.Credits)
+	}
+	if theCalls.Load() != 1 || introCalls.Load() != 1 {
+		t.Fatalf("calls: %d %d", theCalls.Load(), introCalls.Load())
+	}
+}

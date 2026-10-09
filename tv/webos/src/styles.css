@@ -2147,6 +2147,15 @@ p {
   margin-top: 1rem;
 }
 
+/* Subtitle timing in the subtitle column (narrower than the appearance view) */
+.delay-row {
+  margin-top: 0.6rem;
+}
+
+.delay-row .style-value {
+  width: 9rem;
+}
+
 /* ---- Opening intro (components/Intro.tsx): the timeline keyframes are generated there ---- */
 
 .intro {
@@ -2646,4 +2655,63 @@ p {
 .did-you-mean {
   margin: 0 0 1.2rem;
   font-size: 1.7rem;
+}
+
+/* ---- Skip intro / end credits (bottom right, above the controls while they show) ---- */
+
+.player-skip {
+  position: absolute;
+  right: 5rem;
+  bottom: 9rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  transition: bottom 0.3s ease;
+}
+
+.player.show-controls .player-skip {
+  bottom: 22rem;
+}
+
+.player-skip .btn:last-child {
+  margin-right: 0;
+}
+
+.btn-skip {
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  border: 0.2rem solid rgba(255, 255, 255, 0.85);
+}
+
+.btn-skip:focus {
+  background: #ffffff;
+  color: #000000;
+}
+
+.btn-next-fill {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.55);
+  color: #000000;
+}
+
+.btn-next-fill:focus {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* Fills up while the countdown runs (transform: no repaint of the button per frame) */
+.btn-next-fill-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background: #ffffff;
+  transform-origin: left center;
+  transition: transform 1s linear;
+}
+
+.btn-next-fill > svg,
+.btn-next-fill-label {
+  position: relative;
 }

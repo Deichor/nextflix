@@ -127,6 +127,26 @@ func TestDebridProxyEvictsOldChunks(t *testing.T) {
 	}
 }
 
+// A chunk fetched ahead long ago outlives one the reader just left: it is the next one needed.
+func TestDebridProxyKeepsPrefetchedChunks(t *testing.T) {
+	_, s, _ := bigFakeVideo(t)
+	d := s.debrid
+	f := d.proxyFile(tbHash, 1)
+	pc := &d.cache
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.bytes = tsProxyCacheMax
+	read := &tsProxyChunk{start: 0, end: 10, buf: make([]byte, 10), n: 10, wake: make(chan struct{}), used: time.Now().Add(-time.Minute)}
+	ahead := &tsProxyChunk{start: 10, end: 20, buf: make([]byte, 10), n: 10, wake: make(chan struct{}), used: time.Now().Add(-2 * time.Minute)}
+	f.chunks = []*tsProxyChunk{read, ahead}
+	d.prefetchLocked(f, 10, 19, 1)
+	d.makeRoomLocked(5)
+	pc.bytes = 0
+	if len(f.chunks) != 1 || f.chunks[0] != ahead {
+		t.Fatalf("%d chunks left, want only the prefetched one", len(f.chunks))
+	}
+}
+
 func TestDebridParseRange(t *testing.T) {
 	for _, c := range []struct {
 		in                  string

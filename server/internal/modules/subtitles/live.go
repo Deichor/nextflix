@@ -388,14 +388,15 @@ func renderVTT(cues []liveCue, partial bool) []byte {
 }
 
 // ffmpegLiveReader reads one subtitle stream from about from on; -copyts keeps the file's
-// timestamps and -flush_packets hands over each cue at once.
+// timestamps (-start_at_zero: relative to its start_time, like a full extraction and the play
+// stream) and -flush_packets hands over each cue at once.
 func ffmpegLiveReader(ctx context.Context, url string, stream int, from float64) (io.Reader, func() error, error) {
 	args := []string{"-nostdin", "-v", "error",
 		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5"}
 	if from > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(from, 'f', 3, 64))
 	}
-	args = append(args, "-copyts", "-i", url, "-map", fmt.Sprintf("0:%d", stream), "-c:s", "webvtt",
+	args = append(args, "-copyts", "-start_at_zero", "-i", url, "-map", fmt.Sprintf("0:%d", stream), "-c:s", "webvtt",
 		"-flush_packets", "1", "-f", "webvtt", "pipe:1")
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	out, err := cmd.StdoutPipe()

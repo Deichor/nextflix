@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.9_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.10_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 
@@ -107,7 +107,7 @@ sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach 
 | Everywhere | arrows move, OK selects, Back goes back (on Home: side menu, then "Exit?") |
 | Rows | Left from the first card opens the side menu; focus comes back to the same card after Back |
 | Player | OK play / pause, Left / Right seek 10 s; a second press (or holding the key: 30 s, then 60 s steps) opens scrub mode with a strip of preview frames, where OK seeks to the shown time, Back cancels and Up / Down close (15 s without a key: closed, no seek; playback goes on underneath). Up shows the buttons (play, ±10 s, next episode, Audio & Subtitles), Back closes |
-| Audio & Subtitles | Up / Down move, OK picks; Back, Left past the audio column, a Magic Remote click outside the panel (it never reaches the video, so no play / pause) or 15 s without a key or pointer move close it. In **Subtitle appearance** (last row of the subtitle list) Left / Right or OK change the focused value with a live preview, Back returns to the lists |
+| Audio & Subtitles | Up / Down move, OK picks; Back, Left past the audio column, a Magic Remote click outside the panel (it never reaches the video, so no play / pause) or 15 s without a key or pointer move close it. **Subtitle timing** (shown while a subtitle is on, above Subtitle appearance): Left / Right show the subtitles 0.5 s earlier / later (up to ±60 s), OK resets to 0; it is kept for the playing file, like on the web. In **Subtitle appearance** (last row of the subtitle list) Left / Right or OK change the focused value with a live preview, Back returns to the lists |
 | Media keys | Play, Pause, Play/Pause, Stop (closes), Rewind / Fast forward (seek) |
 | Magic Remote | pointing focuses, click selects, clicking the progress bar seeks |
 
@@ -172,6 +172,10 @@ animation.
   player asks `upgrade` every 15 s for 5 minutes and splices it in at the current position. A draining buffer
   (`player/bufferHealth.ts`, shared logic with the web, sized to the byte budget on the TV) asks `sidegrade` early;
   only a clearly faster offer (rate / bitrate ≥ 1.3 and above the playing source) is kept and spliced in.
+- Skip intro and Next episode (`player/skipSegments.ts`, `GET /api/skip-segments`): a focused "Skip intro" button
+  during the intro (OK skips, Left / Right still seek); during the end credits a focused "Next episode" button fills
+  up for 5 s next to "Watch credits", then the next episode starts. Without credits data the countdown only comes
+  when the video ends. See docs/ARCHITECTURE.md "Skip intro and Next episode".
 - Subtitles are fetched as WebVTT and drawn over the video at `stream offset + video time`. Without a subtitle in the
   profile's language the list is fetched again after 8 s and 20 s (slower providers finish later). A subtitle file
   that brings no cues (e.g. an OpenSubtitles quota answer) is replaced by the next one of the language, another

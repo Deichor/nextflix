@@ -34,6 +34,12 @@ type tsProbe struct {
 		FormatName string `json:"format_name"`
 		Duration   string `json:"duration"`
 	} `json:"format"`
+	// Container chapters (Matroska / MP4), read from the header with the rest
+	Chapters []struct {
+		StartTime string            `json:"start_time"`
+		EndTime   string            `json:"end_time"`
+		Tags      map[string]string `json:"tags"`
+	} `json:"chapters"`
 }
 
 // How the play stream handles the video of a file
@@ -127,7 +133,7 @@ func (s *Service) runProbe(ctx context.Context, hash string, index int, timeout 
 		return s.probeFn(ctx, hash, index)
 	}
 	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-print_format", "json",
-		"-show_format", "-show_streams", s.fileURL(hash, index)).Output()
+		"-show_format", "-show_streams", "-show_chapters", s.fileURL(hash, index)).Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe failed: %w", err)
 	}

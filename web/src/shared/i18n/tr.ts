@@ -323,6 +323,7 @@ export const tr: Messages = {
   'player.qualityRelease': 'Sürüm kalitesi',
   'player.nextStartsIn': '{label} {n} saniye içinde başlıyor',
   'player.playNow': 'Şimdi Oynat',
+  'player.watchCredits': 'Jeneriği izle',
   'player.seek': 'İlerleme',
   'player.volume': 'Ses düzeyi',
   'detail.match': '%{n} Eşleşme',
