@@ -1162,8 +1162,8 @@ weak playing swarm (3-5 active peers) the other torrents take the line, hence th
 ## Anime upscaling (web)
 
 The web player can run [Anime4K](https://github.com/bloc97/Anime4K) on anime: a switch under "Picture" in the Audio &
-Subtitles panel, shown only when the title is anime by the server's rule (TMDB Animation genre 16 and original
-language `ja`, `isAnimeTitle` in `features/watch/api.ts`). It is off by default and remembered per profile
+Subtitles panel, shown only for anime and donghua (TMDB Animation genre 16 and original language `ja`, `zh` or `cn`,
+`isAnimeTitle` in `features/watch/api.ts`; wider than the catalog's Japanese-only Anime filter). It is off by default and remembered per profile
 (`upscale` in the player prefs). The TV app has nothing like it: webOS plays video on a hardware plane the page can't
 read, and the TV upscales on its own.
 

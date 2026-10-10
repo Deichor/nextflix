@@ -303,10 +303,16 @@ export function getOriginalLanguage(tmdbId: number, type: StreamMediaType, waitM
 }
 
 const ANIMATION_GENRE = 16;
+// Japanese anime and Chinese donghua (TMDB: zh Mandarin, cn Cantonese)
+const ANIME_LANGUAGES = ['ja', 'zh', 'cn'];
 
-/** Anime by the server's rule (catalog/discover.go): Animation with Japanese as the original language */
+/**
+ * Anime for the player's upscaling: Animation from Japan or China. Wider than the catalog's Anime
+ * filter (catalog/discover.go), which is Japanese only.
+ */
 export function isAnimeTitle(tmdbId: number, type: StreamMediaType): Promise<boolean> {
-  return getTitleTraits(tmdbId, type).then(t => !!t && t.originalLanguage === 'ja' && t.genreIds.includes(ANIMATION_GENRE));
+  return getTitleTraits(tmdbId, type).then(t =>
+    !!t && ANIME_LANGUAGES.includes(t.originalLanguage || '') && t.genreIds.includes(ANIMATION_GENRE));
 }
 
 /** Episode air date (YYYY-MM-DD) still ahead of today. */
