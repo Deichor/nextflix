@@ -42,7 +42,7 @@ func TestLang(t *testing.T) {
 func TestCORSAllowsXLang(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(corsMiddleware(nil))
+	r.Use(corsMiddleware(nil, ""))
 	r.GET("/api/x", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodOptions, "/api/x", nil)
@@ -59,14 +59,15 @@ func TestCORSAllowsXLang(t *testing.T) {
 	}
 }
 
-func TestCORSNullOriginOnlyForWebOS(t *testing.T) {
+func TestCORSNullOriginNeedsTVAppKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(corsMiddleware(nil))
+	r.Use(corsMiddleware(nil, testAppKey))
 	r.GET("/api/x", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	do := func(method, ua string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, "/api/x", nil)
+	withKey := "/api/x?app_key=" + testAppKey
+	do := func(method, path, ua string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
 		req.Header.Set("Origin", "null")
 		req.Header.Set("User-Agent", ua)
 		if method == http.MethodOptions {
@@ -78,13 +79,19 @@ func TestCORSNullOriginOnlyForWebOS(t *testing.T) {
 		return w
 	}
 	tv := "Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0 Safari/537.36 WebAppManager"
-	if w := do(http.MethodGet, tv); w.Code != http.StatusOK || w.Header().Get("Access-Control-Allow-Origin") != "null" {
+	if w := do(http.MethodGet, withKey, tv); w.Code != http.StatusOK || w.Header().Get("Access-Control-Allow-Origin") != "null" {
 		t.Fatalf("webOS GET: %d %v", w.Code, w.Header())
 	}
-	if w := do(http.MethodOptions, tv); w.Code != http.StatusNoContent || !strings.Contains(w.Header().Get("Access-Control-Allow-Headers"), "X-User-ID") {
+	if w := do(http.MethodOptions, withKey, tv); w.Code != http.StatusNoContent || !strings.Contains(w.Header().Get("Access-Control-Allow-Headers"), "X-User-ID") {
 		t.Fatalf("webOS preflight: %d %v", w.Code, w.Header())
 	}
-	if w := do(http.MethodGet, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131"); w.Header().Get("Access-Control-Allow-Origin") != "" || w.Code == http.StatusOK {
+	// The TV's own browser has the same user agent: a sandboxed iframe there has no key
+	for _, method := range []string{http.MethodGet, http.MethodOptions} {
+		if w := do(method, "/api/x", tv); w.Header().Get("Access-Control-Allow-Origin") != "" || w.Code < 400 {
+			t.Fatalf("null origin without key allowed (%s): %d %v", method, w.Code, w.Header())
+		}
+	}
+	if w := do(http.MethodGet, "/api/x", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131"); w.Header().Get("Access-Control-Allow-Origin") != "" || w.Code == http.StatusOK {
 		t.Fatalf("null origin from a desktop browser allowed: %d %v", w.Code, w.Header())
 	}
 }

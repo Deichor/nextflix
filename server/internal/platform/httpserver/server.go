@@ -22,10 +22,10 @@ func New(cfg config.Config, db *gorm.DB) *gin.Engine {
 	r := gin.New()
 	r.Use(errorLogger(), recovery(),
 		hostGuard(cfg.AllowedOrigins, cfg.AllowedHosts),
-		fetchSiteGuard(cfg.AllowedOrigins),
+		fetchSiteGuard(cfg.AllowedOrigins, cfg.TVAppKey),
 		bodyLimit(maxBodyBytes),
 		requestDeadline(),
-		corsMiddleware(cfg.AllowedOrigins))
+		corsMiddleware(cfg.AllowedOrigins, cfg.TVAppKey))
 	r.GET("/api/health", healthHandler(db))
 	return r
 }

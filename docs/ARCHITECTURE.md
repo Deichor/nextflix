@@ -24,9 +24,9 @@ docs/                       this folder
 
 | Package | Responsibility |
 |---|---|
-| `config` | Reads env: `PORT` (8252), `DATABASE_URL`, `REDIS_URL`, `TMDB_API_KEY`, `TORRSERVER_URL`, `JACKETT_URL`, `JACKETT_API_KEY`, `ALLOWED_ORIGINS`, `ALLOWED_HOSTS` |
+| `config` | Reads env: `PORT` (8252), `DATABASE_URL`, `REDIS_URL` (empty: no cache, no notifications), `TMDB_API_KEY`, `TORRSERVER_URL`, `JACKETT_URL`, `JACKETT_API_KEY`, `ALLOWED_ORIGINS`, `ALLOWED_HOSTS`, `TV_APP_KEY` |
 | `database` | SQLite open with pragmas and pool settings, `Migrate(db, models...)` |
-| `httpserver` | gin engine, logging/recovery, Host check against DNS rebinding (LAN names and IPs, `server`, hosts of `ALLOWED_ORIGINS` and `ALLOWED_HOSTS`), `Sec-Fetch-Site: cross-site` block (except LAN CORS origins, the packaged webOS app and page navigations outside `/api/`), 1 MB body cap, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check, `ProfileID(c)` from `X-User-ID`, `GET /api/health`, `http.Server` with graceful shutdown |
+| `httpserver` | gin engine, logging/recovery, Host check against DNS rebinding (LAN names and IPs, hosts of `ALLOWED_ORIGINS` and `ALLOWED_HOSTS`; for Host `server`, i.e. the web container, the browser's Host from `X-Forwarded-Host`, none for SSR fetches), `Sec-Fetch-Site: cross-site` block (except LAN CORS origins, `Origin: null` with `?app_key=<TV_APP_KEY>` (the packaged webOS app), GET/HEAD without Origin from a webOS user agent (its images and video) and page navigations outside `/api/`), 1 MB body cap, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check (`Origin: null` only with the app key), `ProfileID(c)` from `X-User-ID`, `GET /api/health`, `http.Server` with graceful shutdown |
 | `cache` | go-redis v8 wrapper; a nil `*Cache` is valid and behaves as "no cache" |
 | `tmdb` | TMDB HTTP client (v4 token as Bearer, on `upstream`), types, 24 h in-memory cache shared by catalog, providers and notifications; expired entries are kept 7 days and served when TMDB fails (see [DPI resilience](#dpi-resilience)) |
 | `upstream` | Resilient HTTP client for TMDB API, image CDN, the TMDB export files (search typo index) and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |
@@ -102,6 +102,9 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 - Features may import `shared/*`. Imports between features are kept to the public pieces listed above
   (for example `watch` components, `shell/PageShell`, `favorites/store`); `shared/*` never imports a feature.
 - All imports use the `@/` alias.
+- `src/proxy.ts` (Next.js proxy, formerly middleware) answers 403 when the Host is not a LAN name or listed in
+  `ALLOWED_HOSTS` (`deploy/config/web.env`), same rules as the server (`shared/lib/lanHost.ts`): a DNS rebinding
+  page could otherwise call `/api` through the rewrites as same-origin.
 - Images always go through `/tmdb-img/t/p/<size><path>` (`shared/lib/image.ts`), never `image.tmdb.org`. Card,
   billboard and hero artwork is rendered with `shared/ui/TmdbImage` (see [Images](#images)).
 - The active profile lives in `localStorage` under `hfx-profile`; changes fire the `hfx-profile-change` event.
@@ -243,10 +246,12 @@ Resets come in bursts: in the measurements all 12 in-flight connections to the C
 - dials with 3 s connect, 3 s TLS handshake and 5 s response header timeouts, and aborts a body that makes no
   progress for 2 s (1.5 s for images);
 - retries resets, EOFs, timeouts, truncated or stalled bodies, `429` and `5xx` up to 3 tries in total, after a
-  100-300 ms jittered pause, each retry on a new connection (a keep-alive-less transport);
+  100-300 ms jittered pause (or the response's `Retry-After` when it is at most 5 s and fits the budget, else the
+  response is returned at once), each retry on a new connection (a keep-alive-less transport);
 - hedges: when no try has response headers after 1.2 s (images) / 1.5 s (API), it starts one parallel try on a new
   connection; the first good answer wins and the other is cancelled;
-- stops at a per-request budget (images 4 s, API 8 s) with an error wrapping `context.DeadlineExceeded`;
+- stops at a per-request budget (images 4 s, API 8 s) with an error wrapping `context.DeadlineExceeded`; when the
+  tries or the budget run out after a `429` / `5xx`, that response is returned (with its `Retry-After`) instead;
 - speaks HTTP/1.1 with a per-host pool (16, images 12). Measured from a container on `nextflix_default` (1,200
   poster fetches per variant, 12 at a time): HTTP/2 multiplexes everything on one connection, so one reset failed
   12 requests at once (24 of 1,200 with a plain client); with retries both HTTP/2 and HTTP/1.1 had 0 failures, and
@@ -1222,7 +1227,8 @@ tells both players where an episode's intro and end credits are. Sources, first 
    TMDB id of the show, the file length picks the release version; 500 reads a day per IP without a key), then
    [IntroDB](https://introdb.app/docs) (`/segments?imdb_id=&season=&episode=`, IMDb id via TMDB external ids) for
    what the first one lacks. The answer is stored per episode and file length (±5 s) in `skip_segments`: found 30
-   days, not found 3 days; failures are not stored and pause lookups for 10 min (an hour after a 429).
+   days, not found (or a segment missing because a database failed) 3 days; failures that found nothing are not
+   stored and pause lookups for 10 min (an hour after a 429).
 
 Audio fingerprinting (Jellyfin Intro Skipper style: chromaprint of several episodes of a season, black frames for
 credits) was left out: it needs the decoded audio of many episodes, i.e. gigabytes read from swarms while one plays.

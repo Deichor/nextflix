@@ -21,6 +21,10 @@ cp deploy/config/server.env.example deploy/config/server.env
 cp deploy/config/web.env.example    deploy/config/web.env
 # edit deploy/config/server.env: TMDB_API_KEY = TMDB v4 "API Read Access Token" (used as a Bearer token)
 
+# The stack mounts the built TV app and refuses to start without it (tv/webos/README.md);
+# without a webOS TV, `mkdir -p tv/webos/dist` is enough (tvapp then reports "unhealthy")
+bash tv/webos/scripts/build.sh
+
 docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml ps        # server and web report "healthy" after a few seconds
 ```
@@ -35,6 +39,8 @@ Then open Jackett at `http://127.0.0.1:9117`, add indexers and paste its API key
 | `TMDB_API_KEY` | yes | TMDB v4 Read Access Token |
 | `JACKETT_API_KEY` | no | default for the indexer settings; the value saved in Settings wins |
 | `ALLOWED_ORIGINS` | no | extra CORS origins, comma separated; localhost, private IPs and `*.local` are always allowed |
+| `ALLOWED_HOSTS` | no | extra host names the server answers to (DNS rebinding guard); set the same list in `web.env` |
+| `TV_APP_KEY` | for the packaged TV app | written by `tv/webos/scripts/build.sh` on the first build and embedded in the app; the server only accepts the app's `Origin: null` requests with it |
 
 `PORT`, `DATABASE_URL` (`/app/data/nextflix.db`), `REDIS_URL`, `TORRSERVER_URL` and `JACKETT_URL` are set in the
 compose file and point at the other services.
@@ -57,11 +63,14 @@ Keep the service name `flaresolverr`: Jackett's config points at `http://flareso
 Every third-party image is pinned to an exact tag; update by changing the tag (Jackett's in-container
 `AUTO_UPDATE` is off). Networks: `web` only reaches `server` and `tvapp` (`frontend`); Jackett, FlareSolverr and
 TorrServer sit on `backend`; Redis is alone with `server` on `cache`, an internal network without internet access.
-`server` waits for Redis' healthcheck (`redis-cli ping`) before it starts.
+`server` waits for Redis' healthcheck (`redis-cli ping`) before it starts. Every service has a healthcheck; on
+`compose up`, `server` also waits for Jackett and TorrServer, Jackett for FlareSolverr and `web` for `server`. These
+waits are optional (`required: false`): an unhealthy one only logs a warning and does not block the stack.
 
 All services use `no-new-privileges` and json-file logs capped at 3 x 10 MB. All except Jackett drop every Linux
 capability; `redis` and `tvapp` add back only what their root entrypoints need to switch users. Jackett keeps the
-defaults because s6-overlay starts as root and chowns `/config`.
+defaults because s6-overlay starts as root and chowns `/config`. TorrServer runs as UID/GID 1000; the one-shot
+`torrserver-init` hands the `torrserver-data` volume to that user before each start (only `CHOWN`, no network).
 
 SQLite lives in a named volume on purpose: WAL and mmap are unreliable on Windows bind mounts (`/mnt/c`).
 

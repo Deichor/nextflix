@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.14_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.15_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 
@@ -96,9 +96,13 @@ keyboard (or the remote's number keys) and choose **Save and continue**; **Test 
 address gets `http://` and port `8252` added. It is stored on the TV (localStorage) and can be changed later in
 Settings or with **Change server** on the profile screen.
 
-The packaged app is loaded from `file://`, so its requests carry `Origin: null`. The server accepts that origin only
-from a webOS user agent (`Web0S`), so no configuration is needed; a desktop browser sending `Origin: null` (e.g. a
-sandboxed iframe) is still refused. The PC firewall must allow the LAN to reach port 8252 (see the root docs).
+The packaged app is loaded from `file://`, so its requests carry `Origin: null`, the same origin a sandboxed iframe on
+any website sends (also in the TV's own browser, which has the same user agent). The server accepts that origin only
+with the per-install key `TV_APP_KEY` from `deploy/config/server.env`: `scripts/build.sh` creates it on the first
+build and embeds it, and `lib/appKey.ts` adds it as `?app_key=` to the app's fetches and beacons. After the first
+build restart the server (`docker compose -f deploy/docker-compose.yml up -d`) so it reads the key; an app built
+with another key gets 403. The app's images and video (no Origin) only need the webOS user agent. The PC firewall
+must allow the LAN to reach port 8252 (see the root docs).
 
 ## Remote control
 

@@ -10,7 +10,9 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { initSpatial } from './nav/spatial';
 import { initCaps } from './lib/stream';
+import { installAppKey } from './lib/appKey';
 
+installAppKey(import.meta.env.VITE_TV_APP_KEY || '');
 initSpatial();
 // The panel resolution (HDR "auto") comes from a quick Luna call; start without waiting for it
 initCaps();

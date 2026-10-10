@@ -10,7 +10,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const webOSUA = "Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36 WebAppManager"
+const (
+	webOSUA    = "Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36 WebAppManager"
+	testAppKey = "0123456789abcdef"
+)
 
 func TestIsLANHost(t *testing.T) {
 	for host, want := range map[string]bool{
@@ -70,8 +73,10 @@ func guardEngine(mw ...gin.HandlerFunc) *gin.Engine {
 }
 
 func TestHostGuard(t *testing.T) {
-	r := guardEngine(hostGuard([]string{"https://flix.example.com"}, []string{"mypc", "box.lan:8252"}))
+	r := guardEngine(hostGuard([]string{"https://flix.example.com"}, []string{"mypc", "box.lan:8252", "NAS.lan."}))
 	for host, want := range map[string]int{
+		"nas.lan":              http.StatusOK,
+		"nas.lan.:8252":        http.StatusOK,
 		"192.168.1.5:8252":     http.StatusOK,
 		"nextflix.local":       http.StatusOK,
 		"nextflix.local:8252":  http.StatusOK,
@@ -96,8 +101,39 @@ func TestHostGuard(t *testing.T) {
 	}
 }
 
+// Requests the web container proxies (Host "server") are judged by the browser's Host, which
+// Next.js passes in X-Forwarded-Host; its own SSR fetches have none.
+func TestHostGuardBehindWebProxy(t *testing.T) {
+	r := guardEngine(hostGuard(nil, []string{"mypc"}))
+	for fwd, want := range map[string]int{
+		"":                    http.StatusOK, // SSR fetch
+		"nextflix.local":      http.StatusOK,
+		"192.168.1.5:3008":    http.StatusOK,
+		"tv.nextflix.local":   http.StatusOK,
+		"localhost:3008":      http.StatusOK,
+		"mypc":                http.StatusOK,
+		"rebind.evil.com":     http.StatusForbidden,
+		"rebind.evil.com:80":  http.StatusForbidden,
+		"evil.com, 10.0.0.1":  http.StatusForbidden,
+		"8.8.8.8:3008":        http.StatusForbidden,
+		"server.evil.com:80":  http.StatusForbidden,
+		"nextflix.local.evil": http.StatusForbidden,
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/x", nil)
+		req.Host = "server:8252"
+		if fwd != "" {
+			req.Header.Set("X-Forwarded-Host", fwd)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Errorf("X-Forwarded-Host %q: got %d, want %d", fwd, w.Code, want)
+		}
+	}
+}
+
 func TestFetchSiteGuard(t *testing.T) {
-	r := guardEngine(fetchSiteGuard(nil))
+	r := guardEngine(fetchSiteGuard(nil, testAppKey))
 	cases := []struct {
 		name, method, path, site, mode, origin, ua string
 		want                                       int
@@ -112,9 +148,15 @@ func TestFetchSiteGuard(t *testing.T) {
 		{"foreign link to api", "GET", "/api/x", "cross-site", "navigate", "", "", 403},
 		{"foreign link to /tv/", "GET", "/tv/", "cross-site", "navigate", "", "", 200},
 		{"other LAN page", "GET", "/api/x", "cross-site", "cors", "http://10.0.0.7:5173", "", 200},
-		{"packaged TV app fetch", "GET", "/api/x", "cross-site", "cors", "null", webOSUA, 200},
+		{"packaged TV app fetch", "GET", "/api/x?app_key=" + testAppKey, "cross-site", "cors", "null", webOSUA, 200},
+		{"packaged TV app beacon", "POST", "/api/x?a=1&app_key=" + testAppKey, "cross-site", "no-cors", "null", webOSUA, 200},
 		{"packaged TV app video", "GET", "/api/x", "cross-site", "no-cors", "", webOSUA, 200},
 		{"foreign page on TV", "GET", "/api/x", "cross-site", "cors", "http://evil.com", webOSUA, 403},
+		{"sandboxed iframe on TV", "GET", "/api/x", "cross-site", "cors", "null", webOSUA, 403},
+		{"sandboxed iframe on TV, POST", "POST", "/api/x", "cross-site", "no-cors", "null", webOSUA, 403},
+		{"sandboxed iframe on TV, wrong key", "GET", "/api/x?app_key=guess", "cross-site", "cors", "null", webOSUA, 403},
+		{"TV user agent, POST without Origin", "POST", "/api/x", "cross-site", "no-cors", "", webOSUA, 403},
+		{"key without TV user agent", "GET", "/api/x?app_key=" + testAppKey, "cross-site", "cors", "null", "", 200},
 	}
 	for _, tc := range cases {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -175,16 +217,45 @@ func TestBodyLimit(t *testing.T) {
 }
 
 // The packaged TV app (Origin: null, cross-site) must pass the whole chain including CORS.
+// A page with Origin null (sandboxed iframe) in the TV's own browser has the same user agent but
+// not the key, so it gets neither through the guards nor a CORS grant.
 func TestWebOSAppThroughChain(t *testing.T) {
-	r := guardEngine(hostGuard(nil, nil), fetchSiteGuard(nil), bodyLimit(maxBodyBytes), corsMiddleware(nil))
-	req := httptest.NewRequest(http.MethodGet, "/api/x", nil)
-	req.Host = "nextflix.local:8252"
-	req.Header.Set("Origin", "null")
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	req.Header.Set("User-Agent", webOSUA)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || w.Header().Get("Access-Control-Allow-Origin") != "null" {
-		t.Fatalf("got %d, ACAO %q", w.Code, w.Header().Get("Access-Control-Allow-Origin"))
+	cases := []struct {
+		name, method, path, site string
+		wantCode                 int
+		wantACAO                 string
+	}{
+		{"app fetch", "GET", "/api/x?app_key=" + testAppKey, "cross-site", 200, "null"},
+		{"app preflight", "OPTIONS", "/api/x?app_key=" + testAppKey, "cross-site", 204, "null"},
+		{"iframe fetch", "GET", "/api/x", "cross-site", 403, ""},
+		{"iframe preflight", "OPTIONS", "/api/x", "cross-site", 403, ""},
+		// webOS 4/5 send no Sec-Fetch-Site: CORS alone must refuse
+		{"iframe fetch, old webOS", "GET", "/api/x", "", 403, ""},
+		{"app fetch, old webOS", "GET", "/api/x?app_key=" + testAppKey, "", 200, "null"},
+	}
+	for _, key := range []string{testAppKey, ""} {
+		r := guardEngine(hostGuard(nil, nil), fetchSiteGuard(nil, key), bodyLimit(maxBodyBytes), corsMiddleware(nil, key))
+		for _, tc := range cases {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Host = "nextflix.local:8252"
+			req.Header.Set("Origin", "null")
+			req.Header.Set("User-Agent", webOSUA)
+			if tc.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.site)
+			}
+			if tc.method == http.MethodOptions {
+				req.Header.Set("Access-Control-Request-Method", "PUT")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			wantCode, wantACAO := tc.wantCode, tc.wantACAO
+			if key == "" {
+				// No TV_APP_KEY configured: Origin null is never trusted
+				wantCode, wantACAO = 403, ""
+			}
+			if w.Code != wantCode || w.Header().Get("Access-Control-Allow-Origin") != wantACAO {
+				t.Errorf("key %q, %s: got %d, ACAO %q", key, tc.name, w.Code, w.Header().Get("Access-Control-Allow-Origin"))
+			}
+		}
 	}
 }

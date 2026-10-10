@@ -70,7 +70,7 @@ var (
 	corsExpose = []string{"Content-Length", "Content-Range", "Accept-Ranges", "Content-Type", "X-Cache", "Connection"}
 )
 
-func corsMiddleware(allowed []string) gin.HandlerFunc {
+func corsMiddleware(allowed []string, tvAppKey string) gin.HandlerFunc {
 	lan := cors.New(cors.Config{
 		AllowOriginFunc:  func(origin string) bool { return isAllowedOrigin(origin, allowed) },
 		AllowMethods:     corsMethods,
@@ -80,7 +80,7 @@ func corsMiddleware(allowed []string) gin.HandlerFunc {
 		MaxAge:           12 * time.Hour,
 	})
 	return func(c *gin.Context) {
-		if c.GetHeader("Origin") == "null" && isWebOSApp(c.Request) {
+		if c.GetHeader("Origin") == "null" && hasTVAppKey(c.Request, tvAppKey) {
 			allowWebOSApp(c)
 			return
 		}
@@ -88,9 +88,8 @@ func corsMiddleware(allowed []string) gin.HandlerFunc {
 	}
 }
 
-// isWebOSApp: the packaged LG TV app runs from file:// and sends "Origin: null". Only the TV's
-// own browser engine (Web0S user agent) gets that origin, so a sandboxed iframe on some website
-// opened in a normal browser still cannot read this API.
+// isWebOSApp matches the LG TV's browser engine. The TV's own browser sends it too, so it only
+// admits the packaged app's media requests; its "Origin: null" fetches need TV_APP_KEY.
 func isWebOSApp(r *http.Request) bool {
 	ua := r.UserAgent()
 	return strings.Contains(ua, "Web0S") || strings.Contains(ua, "webOS")
