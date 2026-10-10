@@ -19,6 +19,7 @@ import { lengthsMatch, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
 import { canSeek, cueAnswer, openStart, progressToSave } from './playRules';
+import { DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy } from './subsLog';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
 // The stream is a live fragmented MP4 requested at `t` that really starts at `offset`
@@ -282,6 +283,9 @@ export class PlayerEngine {
   private toastTimer?: Timer;
   // Playback diagnostics (playbackLog.ts); null when switched off
   private plog: PlaybackLog | null = null;
+  // The viewer's subtitle delay changes, logged once settled (subsLog.ts)
+  private delayLog = new DelayLog();
+  private delayTimer?: Timer;
 
   constructor(video: HTMLVideoElement, req: PlayRequest, locale: Locale) {
     this.video = video;
@@ -321,7 +325,8 @@ export class PlayerEngine {
       next: null,
     };
     this.bindVideo();
-    this.plog = PlaybackLog.create(video, () => this.positionNow(), () => this.logContext());
+    this.plog = PlaybackLog.create(video, () => this.positionNow(), () => this.logContext(),
+      () => ({ subdelay: this.state.subId ? this.state.subDelay : undefined }));
     this.saveTimer = setInterval(() => { if (this.state.playing) this.persist(); }, 10000);
     this.healthTimer = setInterval(() => this.sampleHealth(), 1000);
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -380,8 +385,26 @@ export class PlayerEngine {
   /** Subtitle timing (seconds, + shows them later); kept for the playing file like on the web */
   setSubDelay(seconds: number): number {
     const d = Math.round(Math.max(-MAX_SUB_DELAY_S, Math.min(MAX_SUB_DELAY_S, seconds)) * 10) / 10;
-    if (d !== this.state.subDelay) this.set({ subDelay: d });
+    if (d !== this.state.subDelay) {
+      this.set({ subDelay: d });
+      this.delayLog.change(d, Date.now());
+      clearTimeout(this.delayTimer);
+      this.delayTimer = setTimeout(() => this.noteDelay(this.delayLog.take(Date.now())), DELAY_SETTLE_MS + 50);
+    }
     return d;
+  }
+
+  /** The player sets the delay itself (another file): a pending change of the viewer is logged first */
+  private resetDelayLog(d: number) {
+    clearTimeout(this.delayTimer);
+    this.noteDelay(this.delayLog.reset(d, Date.now()));
+  }
+
+  private noteDelay(e: { subdelay: number; from: number } | null) {
+    if (!e) return;
+    const id = this.state.subId;
+    const s = this.subItem(id);
+    this.plog?.note('subdelay', { ...e, id: id ? logToken(id, 24) : undefined, provider: s ? logToken(s.source, 16) : undefined });
   }
 
   private stale(session: number) {
@@ -501,6 +524,9 @@ export class PlayerEngine {
 
   private async openSource(src: StreamSource, startAt: number, origin: Origin, reason = 'open') {
     const prev = this.source && this.source.hash.toLowerCase() !== src.hash.toLowerCase() ? { src: this.source, origin: this.origin, duration: this.state.duration } : null;
+    // The subtitle timing belongs to the file: kept when the same one opens again
+    const subDelay = this.hash === src.hash.toLowerCase() && this.index === src.index ? this.state.subDelay : 0;
+    this.resetDelayLog(subDelay);
     // Sent first: queued events belong to the previous source's context
     this.plog?.flush();
     this.plog?.note('open', { why: reason, origin, to: `${src.hash.slice(0, 8)}:${src.index}`, at: startAt, debrid: !!src.debrid });
@@ -518,8 +544,6 @@ export class PlayerEngine {
     }
     this.current = h;
     this.played.add(h);
-    // The subtitle timing belongs to the file: kept when the same one opens again
-    const subDelay = this.hash === h && this.index === src.index ? this.state.subDelay : 0;
     this.hash = h;
     this.index = src.index;
     this.subDecided = false;
@@ -1387,6 +1411,7 @@ export class PlayerEngine {
         ? { codec: probe.video_codec || '', width: probe.width, height: probe.height || 0, hdr: !!probe.hdr, dolbyVision: Number(probe.dolby_vision) || 0, direct: !!probe.direct }
         : null;
       this.videoHeight = video ? videoQuality(video.width, video.height) : 0;
+      this.resetDelayLog(0);
       this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid, cinema: !!src.cinema, subDelay: 0 });
       this.health.reset();
       // The old file's subtitle stays until the new list picks one for this file (as the web player does)
@@ -1527,17 +1552,29 @@ export class PlayerEngine {
     this.subUserPicked = true;
     const s = id ? (this.state.subs || []).find(x => x.id === id) : null;
     writePlayerPrefs(this.pid, { sub: s ? { lang: normLang(s.language), id: s.id } : 'off' });
-    this.applySubtitle(id);
+    if (!id) this.noteSubsNone('off');
+    this.applySubtitle(id, 'user');
   }
 
-  private applySubtitle(id: string | null) {
+  private subItem(id: string | null): SubtitleItem | undefined {
+    return id ? (this.state.subs || []).find(x => x.id === id) : undefined;
+  }
+
+  private noteSubsNone(why: string, extra?: SubsFields) {
+    this.plog?.note('subs-none', noneFields(why, this.locale, this.state.subs, extra));
+  }
+
+  private applySubtitle(id: string | null, why: SubsWhy) {
     clearTimeout(this.cueTimer);
     this.set({ subId: id, cues: [] });
     if (!id) return;
     const session = this.session;
     let loads = 0;
-    let wasPartial = false;
-    // A live embedded track (big file) is read from the playing position on: ask again while it grows
+    // The answer of the last `subs` event
+    let logged: SubsShown | null = null;
+    let loggedAt = 0;
+    // Asked again every LIVE_CUES_POLL_MS while partial: a live embedded track (read from the playing position
+    // on, it grows) and a subtitle the server still times to the file alike; the final answer stops it
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
       if (this.stale(session) || this.state.subId !== id) return;
       const answer = cueAnswer(f.cues.length, f.partial, loads);
@@ -1549,17 +1586,20 @@ export class PlayerEngine {
         // Nothing came (an OpenSubtitles quota answers 429): the next one of the language, another provider first
         const alt = this.subtitleFallback(id);
         console.info(`[subtitles] ${id.slice(0, 16)} gave no cues${alt ? `, trying ${alt.slice(0, 16)}` : ''}`);
-        if (alt) this.applySubtitle(alt);
+        if (alt) this.applySubtitle(alt, 'fallback');
+        else this.noteSubsNone('failed', { id: logToken(id, 24) });
         return;
       }
-      // The first cues, and the final file replacing a partial one (live track done, or timed to the file)
-      if (loads++ === 0 || (wasPartial && !f.partial)) {
-        const prev = this.state.cues[0]?.start;
-        const first = f.cues[0]?.start;
-        this.plog?.note(loads === 1 ? 'subs' : 'subs-swap', { id: id.slice(0, 12), cues: f.cues.length, partial: f.partial,
-          shift: prev !== undefined && first !== undefined ? first - prev : undefined });
+      loads++;
+      // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew)
+      const next: SubsShown = { id, cues: f.cues, partial: f.partial, sync: f.sync };
+      const change = subsChange(logged, next, Date.now() - loggedAt);
+      if (change.log) {
+        this.plog?.note('subs', subsFields(this.subItem(id), next, logged ? 'poll' : why, this.state.subDelay, change));
+        logged = next;
+        loggedAt = Date.now();
       }
-      wasPartial = f.partial;
+      // The overlay looks the cue up again in the new list; the delay stays
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
       if (f.partial) this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
     });
@@ -1628,6 +1668,8 @@ export class PlayerEngine {
     };
     const hasPreferred = (items: SubtitleItem[]) => hasSubtitleLang(items, langs[0]);
     let list: SubtitleItem[] = [];
+    // The first default pick for this file is logged as `open`, later ones as `auto`
+    let picked = false;
     this.subAltSource = null;
     this.set({ subAlt: null });
     const show = (items: SubtitleItem[]) => {
@@ -1641,15 +1683,19 @@ export class PlayerEngine {
         writePlayerPrefs(this.pid, { sub: { lang: this.wantSubLang } });
         this.wantSubLang = '';
         this.subDecided = this.subUserPicked = true;
-        this.applySubtitle(id);
+        this.applySubtitle(id, 'user');
         return;
       }
       // Default pick; a later, fuller list picks again while nothing is shown and the viewer chose nothing
       if (!repick && (this.subUserPicked || (this.subDecided && this.state.subId))) return;
       this.subDecided = true;
       const track = this.state.audioTracks.find(a => a.index === this.state.audio);
-      const id = pickSubtitle(items, { profileLang: this.locale, pref: readPlayerPrefs(this.pid).sub, audioLang: track?.language });
-      if (repick ? id !== this.state.subId : id) this.applySubtitle(id);
+      const pref = readPlayerPrefs(this.pid).sub;
+      const id = pickSubtitle(items, { profileLang: this.locale, pref, audioLang: track?.language });
+      const why: SubsWhy = picked ? 'auto' : 'open';
+      picked = true;
+      if (repick ? id !== this.state.subId : id) this.applySubtitle(id, why);
+      if (!id && why === 'open') this.noteSubsNone('open', { pref: pref === 'off' ? 'off' : undefined, audio: logToken(track?.language, 8) });
     };
     // The profile's language is needed when the audio is in another one
     const needed = () => {
@@ -1675,14 +1721,19 @@ export class PlayerEngine {
         this.set({ subs: late.items });
         if (late.pick) {
           this.subDecided = true;
-          this.applySubtitle(late.pick);
+          this.applySubtitle(late.pick, 'auto');
         }
         this.toast('player.subtitleFound');
       });
     }, LATE_SUBTITLE_POLL_MS));
     // After the retries: a release that carries the missing language is offered in the panel
     const settled = () => {
-      if (this.stale(session) || !needed()) return;
+      if (this.stale(session)) return;
+      if (!hasPreferred(list)) {
+        const audio = this.state.audioTracks.find(a => a.index === this.state.audio)?.language;
+        this.noteSubsNone('missing', { audio: logToken(audio, 8) });
+      }
+      if (!needed()) return;
       this.findSubAlt(session, langs[0]);
       lateCheck();
     };
@@ -1859,7 +1910,9 @@ export class PlayerEngine {
   destroy() {
     if (this.destroyed) return;
     this.persist();
-    this.plog?.note('exit');
+    clearTimeout(this.delayTimer);
+    this.noteDelay(this.delayLog.take(Date.now(), true));
+    this.plog?.note('exit', { subdelay: this.state.subId ? this.state.subDelay : undefined });
     this.plog?.destroy();
     this.plog = null;
     this.destroyed = true;

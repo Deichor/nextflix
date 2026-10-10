@@ -21,6 +21,7 @@ import {
   nextSubtitleAfterFailure,
   subtitleRetryAt,
   type SubtitleFailure,
+  type SubtitleFile,
   LIVE_CUES_POLL_MS,
   SUBALT_RETRY_MAX,
   fetchSubtitles,
@@ -78,6 +79,10 @@ import { savePosition } from '@/features/watch/progressSave';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
 import { Upscaler, upscaleSupported, type UpscaleMode, type UpscaleStop } from '@/features/watch/upscale';
 import { UpscaleLog } from '@/features/watch/upscaleLog';
+import { PlaybackNotes } from '@/features/watch/playbackLog';
+import {
+  DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
+} from '@/features/watch/subsLog';
 import upscaleCss from '@/features/watch/components/upscale.module.css';
 import { useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
@@ -1529,6 +1534,15 @@ function PlayerCore({
   const anime = !!metaId && !!metaType && animeCheck?.key === `${metaType}:${metaId}` && animeCheck.anime;
   const subIdRef = useRef(subId);
   useSyncRef(subIdRef, subId);
+  // Subtitle diagnostics for the playback log (client "web", subsLog.ts): why the subtitle was chosen,
+  // the answer of the last `subs` event, whether the file's default pick ran, the viewer's delay changes
+  const subLogRef = useRef<PlaybackNotes | null>(null);
+  const subWhyRef = useRef<SubsWhy>('open');
+  const subShownRef = useRef<SubsShown | null>(null);
+  const subLoggedAtRef = useRef(0);
+  const subPickedRef = useRef(false);
+  const delayLogRef = useRef<DelayLog | null>(null);
+  const delayTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onSubtitleStateRef = useRef(onSubtitleState);
   useSyncRef(onSubtitleStateRef, onSubtitleState);
 
@@ -1816,6 +1830,57 @@ function PlayerCore({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiUrl, hash, file]);
 
+  const delayLog = useCallback(() => (delayLogRef.current ??= new DelayLog()), []);
+  const noteDelay = useCallback((e: { subdelay: number; from: number } | null) => {
+    if (!e) return;
+    const id = subIdRef.current;
+    const s = id ? subsRef.current?.find(x => x.id === id) : undefined;
+    subLogRef.current?.note('subdelay', { ...e, id: id ? logToken(id, 24) : undefined, provider: s ? logToken(s.source, 16) : undefined });
+  }, []);
+  const noteSubsNone = useCallback((why: string, extra?: SubsFields, items?: SubtitleItem[]) => {
+    subLogRef.current?.note('subs-none', noneFields(why, localeRef.current, items ?? subsRef.current, extra));
+  }, []);
+  // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew)
+  const noteSubs = useCallback((id: string, f: SubtitleFile) => {
+    const prev = subShownRef.current;
+    const next: SubsShown = { id, cues: f.cues, partial: f.partial, sync: f.sync };
+    const change = subsChange(prev, next, Date.now() - subLoggedAtRef.current);
+    if (!change.log) return;
+    subShownRef.current = next;
+    subLoggedAtRef.current = Date.now();
+    const why = prev?.id === id ? 'poll' : subWhyRef.current;
+    subLogRef.current?.note('subs', subsFields(subsRef.current?.find(s => s.id === id), next, why, delayLog().current, change));
+  }, [delayLog]);
+  // The viewer's delay change is logged once it settled
+  const changeSubDelay = useCallback((d: number) => {
+    setSubDelay(d);
+    const log = delayLog();
+    log.change(d, Date.now());
+    clearTimeout(delayTimerRef.current);
+    delayTimerRef.current = setTimeout(() => noteDelay(log.take(Date.now())), DELAY_SETTLE_MS + 50);
+  }, [delayLog, noteDelay]);
+  const closeSubLog = useCallback(() => {
+    const log = subLogRef.current;
+    if (!log) return;
+    clearTimeout(delayTimerRef.current);
+    noteDelay(delayLog().take(Date.now(), true));
+    log.note('exit', { subdelay: subIdRef.current ? delayLog().current : undefined });
+    log.close();
+    subLogRef.current = null;
+  }, [delayLog, noteDelay]);
+  useEffect(() => {
+    subLogRef.current = new PlaybackNotes('web', () => {
+      const m = metaRef.current;
+      const h = hashRef.current;
+      const f = fileRef.current;
+      return {
+        type: m?.media_type || '', tmdb: m?.tmdb_id || 0, s: m?.season, e: m?.episode, title: m?.title,
+        src: h && f ? `${h.slice(0, 8)}:${f.id}` : '', dur: Math.round(durationRef.current),
+      };
+    }, () => filePosRef.current);
+    return closeSubLog;
+  }, [closeSubLog]);
+
   // 3) Subtitles for the playing file: listed once its hash/index are known (a new source or
   // episode mounts a new PlayerCore and lists again)
   const subLangs = locale === 'tr' ? ['tr', 'en'] : ['en', 'tr'];
@@ -1843,6 +1908,7 @@ function PlayerCore({
       setSubs(groupSubtitles(items, langs, localeRef.current));
     };
     setSubs(null);
+    subPickedRef.current = false;
     const report = onSubtitleStateRef.current;
     // The profile's language is needed when the audio is in another one
     const needed = () => {
@@ -1865,13 +1931,19 @@ function PlayerCore({
         report?.({ lang: langs[0], hash, missing: false, arrived: true });
         if (late.pick) {
           subDecided.current = true;
+          subWhyRef.current = 'auto';
           setSubId(late.pick);
         }
       });
     }, LATE_SUBTITLE_POLL_MS));
     // After the retries: report a missing language (the parent looks for a release that carries it)
     const settled = () => {
-      if (cancelled || !needed()) return;
+      if (cancelled) return;
+      if (!hasSubtitleLang(list, langs[0])) {
+        const audio = audioTracksRef.current.find(a => a.index === audioRef.current)?.language;
+        noteSubsNone('missing', { audio: logToken(audio, 8) }, list);
+      }
+      if (!needed()) return;
       report?.({ lang: langs[0], hash, missing: true });
       lateCheck();
     };
@@ -1909,6 +1981,7 @@ function PlayerCore({
       subDecided.current = true;
       subUserPicked.current = true;
       subPickedFor.current = subs;
+      subWhyRef.current = 'user';
       setSubId(id);
       writePlayerPrefs(getActiveProfileId(), { sub: { lang: normLang(want) } });
       return;
@@ -1917,12 +1990,15 @@ function PlayerCore({
     subDecided.current = true;
     subPickedFor.current = subs;
     const track = audioTracks.find(a => a.index === audio);
-    setSubId(pickSubtitle(subs, {
-      profileLang: locale,
-      pref: readPlayerPrefs(getActiveProfileId()).sub,
-      audioLang: track?.language,
-    }));
-  }, [subs, duration, audioTracks, audio, locale, wantSubLangRef]);
+    const pref = readPlayerPrefs(getActiveProfileId()).sub;
+    const id = pickSubtitle(subs, { profileLang: locale, pref, audioLang: track?.language });
+    // The file's first default pick is logged as `open`, later ones as `auto`
+    const why: SubsWhy = subPickedRef.current ? 'auto' : 'open';
+    subPickedRef.current = true;
+    subWhyRef.current = why;
+    setSubId(id);
+    if (!id && why === 'open') noteSubsNone('open', { pref: pref === 'off' ? 'off' : undefined, audio: logToken(track?.language, 8) }, subs);
+  }, [subs, duration, audioTracks, audio, locale, wantSubLangRef, noteSubsNone]);
 
   // A subtitle file failed (OpenSubtitles' daily limit, a provider error): the next one of the same
   // language from another provider is shown instead (subtitles.ts nextSubtitleAfterFailure)
@@ -1949,40 +2025,61 @@ function PlayerCore({
         },
       });
     }
-    if (next && current) setSubId(next);
-  }, []);
+    if (next && current) {
+      subWhyRef.current = 'fallback';
+      setSubId(next);
+    } else if (current) {
+      noteSubsNone('failed', { id: logToken(id, 24) });
+    }
+  }, [noteSubsNone]);
 
   // Subtitles off: the last file's cues go (switching between files keeps them until the next loads)
   if (!subId && cues.length > 0) setCues([]);
   useEffect(() => {
-    if (!subId) return;
+    if (!subId) {
+      subShownRef.current = null;
+      return;
+    }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    // A live embedded track (big file) is read from the playing position on: ask again while it grows
-    const load = () => fetchSubtitleFile(subId, filePosRef.current).then(f => {
-      if (cancelled) return;
-      if (f.failed) {
-        setCues([]);
-        subtitleFailed(subId, f.failed);
-        return;
-      }
-      if (f.cues.length > 0 || !f.partial) setCues(f.cues);
-      if (f.partial) timer = setTimeout(load, LIVE_CUES_POLL_MS);
-    });
+    // Asked again every LIVE_CUES_POLL_MS while partial: a live embedded track (read from the playing position
+    // on, it grows) and a subtitle the server still times to the file alike; the final answer stops it
+    const load = () => {
+      // It answered before (a poll, or a seek while partial): a failure now (network, 5xx) asks again, keeping the cues
+      const answered = subShownRef.current?.id === subId;
+      fetchSubtitleFile(subId, filePosRef.current, answered).then(f => {
+        if (cancelled) return;
+        if (f.failed) {
+          if (answered) {
+            timer = setTimeout(load, LIVE_CUES_POLL_MS);
+            return;
+          }
+          setCues([]);
+          subtitleFailed(subId, f.failed);
+          return;
+        }
+        noteSubs(subId, f);
+        // The overlay looks the cue up again in the new list; the delay stays
+        if (f.cues.length > 0 || !f.partial) setCues(f.cues);
+        if (f.partial) timer = setTimeout(load, LIVE_CUES_POLL_MS);
+      });
+    };
     load();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [subId, stream?.t, subtitleFailed]); // a seek asks a live track for its new position at once
+  }, [subId, stream?.t, subtitleFailed, noteSubs]); // a seek asks a live track for its new position at once
 
   const chooseSubtitle = useCallback((id: string | null) => {
     subDecided.current = true;
     subUserPicked.current = true;
+    subWhyRef.current = 'user';
+    if (!id) noteSubsNone('off');
     setSubId(id);
     const s = id ? subs?.find(x => x.id === id) : null;
     writePlayerPrefs(getActiveProfileId(), { sub: s ? { lang: normLang(s.language), id: s.id } : 'off' });
-  }, [subs]);
+  }, [subs, noteSubsNone]);
 
   const src = file && hash && duration > 0 && stream
     ? `${apiUrl}/api/torrent-stream/play?hash=${hash}&index=${file.id}&t=${stream.t.toFixed(3)}&audio=${audio}${capsQuery()}`
@@ -2437,6 +2534,8 @@ function PlayerCore({
     // Subtitles are listed again for the new file and the default pick runs again (as on a new source)
     subDecided.current = false;
     setSubDelay(0);
+    clearTimeout(delayTimerRef.current);
+    noteDelay(delayLog().reset(0, Date.now()));
     setActiveSlot(newSlot);
     setFadingSlot(oldSlot);
     setVideoAspect(aspectOf(el));
@@ -2460,7 +2559,7 @@ function PlayerCore({
     };
     const timer = setTimeout(() => finish(true), 250);
     finishFadeRef.current = finish;
-  }, [clearStall, clearHold, armStall, setCur]);
+  }, [clearStall, clearHold, armStall, setCur, delayLog, noteDelay]);
   const adoptFnRef = useRef(adopt);
   useSyncRef(adoptFnRef, adopt);
 
@@ -3336,7 +3435,7 @@ function PlayerCore({
           failedSubtitles={failedSubs}
           onSubtitle={chooseSubtitle}
           delay={subDelay}
-          onDelay={setSubDelay}
+          onDelay={changeSubDelay}
           subAlt={subAlt}
           upscale={anime ? {
             on: upscalePref && !upscaleStop,

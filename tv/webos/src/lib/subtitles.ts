@@ -1,6 +1,7 @@
 import { getJson, request } from './http';
 import { intlLocale, type Locale } from './i18n';
 import type { PlayerPrefs } from './stream';
+import { SYNC_NONE, syncValue } from '../player/subsLog';
 
 // Ported from web/src/features/watch/subtitles.ts
 
@@ -187,12 +188,12 @@ export interface Cue {
 }
 
 // Parsed subtitle files, least recently used first (a few files only: they can be large)
-const cueCache = new Map<string, Promise<Cue[]>>();
+const cueCache = new Map<string, Promise<{ cues: Cue[]; sync: string }>>();
 const CUE_CACHE_MAX = 5;
 
-function rememberCues(id: string, cues: Cue[]) {
+function rememberCues(id: string, cues: Cue[], sync: string) {
   cueCache.delete(id);
-  cueCache.set(id, Promise.resolve(cues));
+  cueCache.set(id, Promise.resolve({ cues, sync }));
   while (cueCache.size > CUE_CACHE_MAX) cueCache.delete(cueCache.keys().next().value as string);
 }
 
@@ -213,21 +214,31 @@ export function fetchCues(id: string): Promise<Cue[]> {
  * Cues of a subtitle. `at` (seconds of the file) is where the viewer is: a live embedded track is read from
  * there on. A partial answer is not cached; ask again (LIVE_CUES_POLL_MS) for the cues read since.
  */
-export function fetchCueFile(id: string, at?: number): Promise<{ cues: Cue[]; partial: boolean }> {
+export interface CueFile {
+  cues: Cue[];
+  partial: boolean;
+  /** X-Subtitle-Sync for the playback log ("hidden" when the browser hides it, see subsLog.ts) */
+  sync: string;
+}
+
+export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
   const hit = cueCache.get(id);
   if (hit) {
     // Most recently used goes last
     cueCache.delete(id);
     cueCache.set(id, hit);
-    return hit.then(cues => ({ cues, partial: false }));
+    return hit.then(c => ({ cues: c.cues, partial: false, sync: c.sync }));
   }
   const t = at !== undefined && at > 0 ? `&t=${Math.floor(at)}` : '';
   const req = request(`/api/subtitles/file?id=${encodeURIComponent(id)}${t}`)
-    .then(res => (res.ok ? res.text() : ''))
-    .then(text => ({ cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0 }))
-    .catch(() => ({ cues: [] as Cue[], partial: false }));
+    .then(async res => {
+      const sync = syncValue(res.headers.get('X-Subtitle-Sync'), res.type === 'cors');
+      const text = res.ok ? await res.text() : '';
+      return { cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0, sync };
+    })
+    .catch(() => ({ cues: [] as Cue[], partial: false, sync: SYNC_NONE }));
   req.then(f => {
-    if (f.cues.length > 0 && !f.partial) rememberCues(id, f.cues);
+    if (f.cues.length > 0 && !f.partial) rememberCues(id, f.cues, f.sync);
   });
   return req;
 }

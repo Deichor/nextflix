@@ -96,11 +96,12 @@ export class PlaybackLog {
   // summary since the last one
   private sum = { aheadMin: Infinity, aheadSum: 0, aheadN: 0, dropped: 0, decoded: 0, waits: 0, waitMs: 0, freezes: 0, freezeMs: 0, jumps: 0, late: 0, lateMax: 0 };
 
-  static create(video: HTMLVideoElement, pos: () => number, ctx: () => LogContext | null): PlaybackLog | null {
-    return enabled() ? new PlaybackLog(video, pos, ctx) : null;
+  /** extra: fields added to every summary (the subtitle delay) */
+  static create(video: HTMLVideoElement, pos: () => number, ctx: () => LogContext | null, extra?: () => LogFields): PlaybackLog | null {
+    return enabled() ? new PlaybackLog(video, pos, ctx, extra) : null;
   }
 
-  private constructor(private v: HTMLVideoElement, private pos: () => number, private ctx: () => LogContext | null) {
+  private constructor(private v: HTMLVideoElement, private pos: () => number, private ctx: () => LogContext | null, private extra?: () => LogFields) {
     active = this;
     const on = (type: string, fn: () => void) => v.addEventListener(type, fn);
     on('waiting', this.onWaiting);
@@ -368,7 +369,7 @@ export class PlaybackLog {
       dropped: s.dropped, decoded: s.decoded,
       waits: s.waits, wait_ms: s.waitMs, freezes: s.freezes, freeze_ms: Math.round(s.freezeMs),
       jumps: s.jumps, late: s.late, late_max: Math.round(s.lateMax),
-      w: this.v.videoWidth, h: this.v.videoHeight,
+      w: this.v.videoWidth, h: this.v.videoHeight, ...this.extra?.(),
     });
     this.resetSum();
   }

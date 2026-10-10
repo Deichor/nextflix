@@ -2,6 +2,7 @@ import { getApiUrl } from '@/shared/lib/api';
 import { intlLocale, type Locale } from '@/shared/i18n/core';
 import { type SubtitleSize } from '@/features/settings/playerPrefs';
 import { normLang } from '@/features/watch/lang';
+import { SYNC_NONE, syncValue } from '@/features/watch/subsLog';
 
 export { normLang };
 export { pickAudioTrack, type AudioTrackInfo } from '@/features/watch/audioPick';
@@ -259,7 +260,7 @@ export interface Cue {
   text: string;
 }
 
-const cueCache = new LruCache<string, Promise<Cue[]>>(CACHE_MAX);
+const cueCache = new LruCache<string, Promise<{ cues: Cue[]; sync: string }>>(CACHE_MAX);
 // Subtitle files that could not be loaded, by id: not asked again before `until`
 const failedFiles = new Map<string, { why: SubtitleFailure; until: number }>();
 const FAILED_FILE_MS = 5 * 60 * 1000;
@@ -278,28 +279,38 @@ export function fetchSubtitleCues(id: string): Promise<Cue[]> {
  * Cues of a subtitle. `at` (seconds of the file) is where the viewer is: a live embedded track is read from
  * there on. A partial answer is not cached; ask again (LIVE_CUES_POLL_MS) for the cues read since.
  */
-export function fetchSubtitleFile(id: string, at?: number): Promise<{ cues: Cue[]; partial: boolean; failed?: SubtitleFailure }> {
+export interface SubtitleFile {
+  cues: Cue[];
+  partial: boolean;
+  /** X-Subtitle-Sync for the playback log ("hidden" when the browser hides it, see subsLog.ts) */
+  sync: string;
+  failed?: SubtitleFailure;
+}
+
+/** poll: the file answered before (a partial one asked again); a failure now is temporary and not remembered */
+export function fetchSubtitleFile(id: string, at?: number, poll = false): Promise<SubtitleFile> {
   const hit = cueCache.get(id);
-  if (hit) return hit.then(cues => ({ cues, partial: false }));
+  if (hit) return hit.then(c => ({ cues: c.cues, partial: false, sync: c.sync }));
   // A file that failed is not asked again for a while (every seek reloads the cues)
-  const bad = failedFiles.get(id);
-  if (bad && Date.now() < bad.until) return Promise.resolve({ cues: [], partial: false, failed: bad.why });
+  const bad = poll ? undefined : failedFiles.get(id);
+  if (bad && Date.now() < bad.until) return Promise.resolve({ cues: [], partial: false, sync: SYNC_NONE, failed: bad.why });
   const t = at !== undefined && at > 0 ? `&t=${Math.floor(at)}` : '';
   const req = fetch(`${getApiUrl()}/api/subtitles/file?id=${encodeURIComponent(id)}${t}`)
-    .then(async res => {
+    .then(async (res): Promise<SubtitleFile> => {
+      const sync = syncValue(res.headers.get('X-Subtitle-Sync'), res.type === 'cors');
       if (res.ok) {
         const text = await res.text();
-        return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE) };
+        return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE), sync };
       }
       const body = await res.json().catch(() => null) as { quota?: boolean; reset_at?: string } | null;
       const why: SubtitleFailure = res.status === 429 ? (body?.quota ? 'quota' : 'limited') : res.status >= 500 ? 'error' : 'missing';
       const reset = body?.reset_at ? Date.parse(body.reset_at) : NaN;
-      failedFiles.set(id, { why, until: why === 'quota' && reset > Date.now() ? reset : Date.now() + FAILED_FILE_MS });
-      return { cues: [] as Cue[], partial: false, failed: why };
+      if (!poll) failedFiles.set(id, { why, until: why === 'quota' && reset > Date.now() ? reset : Date.now() + FAILED_FILE_MS });
+      return { cues: [], partial: false, sync, failed: why };
     })
-    .catch(() => ({ cues: [] as Cue[], partial: false, failed: 'error' as SubtitleFailure }));
+    .catch((): SubtitleFile => ({ cues: [], partial: false, sync: SYNC_NONE, failed: 'error' }));
   req.then(f => {
-    if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve(f.cues));
+    if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve({ cues: f.cues, sync: f.sync }));
   });
   return req;
 }
