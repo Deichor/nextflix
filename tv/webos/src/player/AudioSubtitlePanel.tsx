@@ -210,7 +210,10 @@ export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, origin
                         onClick={() => onSubtitle(s.id)}
                       >
                         <span className="panel-check">{isActive && <Check className="panel-check-icon" />}</span>
-                        <span className="panel-label">{normLang(s.language) ? languageName(locale, code) : s.label || s.language}</span>
+                        <span className="panel-label">
+                          {normLang(s.language) ? languageName(locale, code) : s.label || s.language}
+                          {s.source === 'ai' ? ` · ${t('player.subAi')}` : ''}
+                        </span>
                       </button>
                     );
                   })}

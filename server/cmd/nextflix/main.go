@@ -145,6 +145,8 @@ func run() error {
 		Titles:          titleLookup(tm),
 		Debrid:          debridSource(streamingSvc),
 		LiveTiming:      true,
+		AIDir:           envOr("AI_SUBTITLE_DIR", "/app/data/ai-subtitles"),
+		NextEpisode:     catalogSvc.NextEpisode,
 	})
 	streamingSvc.SetSpeechTap(speechTap{subtitlesSvc})
 	if err := subtitlesSvc.EnsureSettings(); err != nil {
@@ -313,21 +315,25 @@ func imdbLookup(tm *tmdb.Client) subtitles.IMDbLookup {
 // (subf2m finds title pages by name).
 func titleLookup(tm *tmdb.Client) subtitles.TitleLookup {
 	return func(mediaType string, tmdbID int) (subtitles.TitleInfo, error) {
-		var name, original, date string
+		var name, original, date, overview string
+		var genres []tmdb.Genre
 		if mediaType == "tv" {
 			d, err := tm.GetTVDetails(tmdbID)
 			if err != nil {
 				return subtitles.TitleInfo{}, err
 			}
-			name, original, date = d.Name, d.OriginalName, d.FirstAirDate
+			name, original, date, overview, genres = d.Name, d.OriginalName, d.FirstAirDate, d.Overview, d.Genres
 		} else {
 			d, err := tm.GetMovieDetails(tmdbID)
 			if err != nil {
 				return subtitles.TitleInfo{}, err
 			}
-			name, original, date = d.Title, d.OriginalTitle, d.ReleaseDate
+			name, original, date, overview, genres = d.Title, d.OriginalTitle, d.ReleaseDate, d.Overview, d.Genres
 		}
-		info := subtitles.TitleInfo{Names: []string{name}}
+		info := subtitles.TitleInfo{Names: []string{name}, Overview: overview}
+		for _, g := range genres {
+			info.Genres = append(info.Genres, g.Name)
+		}
 		if original != "" && original != name {
 			info.Names = append(info.Names, original)
 		}

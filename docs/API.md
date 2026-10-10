@@ -572,18 +572,20 @@ without it loses the name's hint. These parts stay below a resolution step and n
 
 ## Subtitles (`modules/subtitles`)
 
-Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|subsource|turkcealtyazi|subf2m|yifysubtitles", "language": "tr",
+Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|subsource|turkcealtyazi|subf2m|yifysubtitles|ai", "language": "tr",
 "label": "Türkçe", "release": "BDRip HDRINVASION", "hi": false, "forced": false, "synced": false, "score": 0.3,
 "author": "WoraZ", "fps": 23.976, "downloads": 6527, "live": true, "quota": true }` (`author`, `fps`, `downloads` only when known; `live`: an
 embedded track of a big file, read while it plays, see below; `quota`: an OpenSubtitles item while its download quota is
-used up, listed after the other items of its language)
+used up, listed after the other items of its language; `ai_from`: the language an `ai` item is translated from, see
+[AI translation](#ai-translation))
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/subtitles` | `tmdb_id`, `media_type=movie\|tv`, `season`, `episode` (required for tv), `hash` + `index` (playing TorrServer file), `langs=tr,en` (default: the settings order), `title` (playing torrent name, ranking hint), `year`, `refresh=1` (late uploads: ask the providers again, skipping the 30 min list cache and the 24 h page cache of the scraped sites (pages older than 10 min); at most every 5 min per title, otherwise the cache answers) → 200 `{items: [Sub], opensubtitles_quota_until?: "<RFC 3339>"}` (the field only while the OpenSubtitles download quota is used up); 400 without `tmdb_id` and `hash` |
-| GET | `/api/subtitles/file?id=[&t=<sec>]` | 200 `text/vtt; charset=utf-8`; a subtitle listed for a playing file (not made for it) is timed to that file (see [ARCHITECTURE.md](ARCHITECTURE.md#automatic-subtitle-timing-modulessubtitlessyncgo)): while that runs the answer is the subtitle as it is, marked partial like a live track (ask again), then the timed one; while the file plays, timing from the played audio keeps improving it, and such answers stay partial too (players keep asking every 15 s and replace the cues). Every 200 answer carries `X-Subtitle-Sync` (exposed to CORS, values below); for a `live` embedded track the cues read so far from about `t` (the player's position) on, marked by a `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` (`no-store`) while more follow (ask again; the whole track is cached once every part of the file was read); 400 unknown id, 429 provider quota or rate limit (OpenSubtitles quota: `{error, quota: true, reset_at: "<RFC 3339>"}`, answered without asking OpenSubtitles until then), 502 provider failure |
-| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, subsource: {api_key_set}, turkcealtyazi: {enabled}, subf2m: {enabled}, yifysubtitles: {enabled}, default_langs: ["tr","en"]}`; secrets are never returned |
-| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, subsource: {api_key}, turkcealtyazi: {enabled}, subf2m: {enabled}, yifysubtitles: {enabled}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
+| GET | `/api/subtitles` | `tmdb_id`, `media_type=movie\|tv`, `season`, `episode` (required for tv), `hash` + `index` (playing TorrServer file), `langs=tr,en` (default: the settings order), `title` (playing torrent name, ranking hint), `year`, `ui_lang` (the profile's language, the AI translation target `profile`), `refresh=1` (late uploads: ask the providers again, skipping the 30 min list cache and the 24 h page cache of the scraped sites (pages older than 10 min); at most every 5 min per title, otherwise the cache answers) → 200 `{items: [Sub], opensubtitles_quota_until?: "<RFC 3339>"}` (the field only while the OpenSubtitles download quota is used up); 400 without `tmdb_id` and `hash` |
+| GET | `/api/subtitles/file?id=[&t=<sec>]` | 200 `text/vtt; charset=utf-8`; a subtitle listed for a playing file (not made for it) is timed to that file (see [ARCHITECTURE.md](ARCHITECTURE.md#automatic-subtitle-timing-modulessubtitlessyncgo)): while that runs the answer is the subtitle as it is, marked partial like a live track (ask again), then the timed one; while the file plays, timing from the played audio keeps improving it, and such answers stay partial too (players keep asking every 15 s and replace the cues). Every 200 answer carries `X-Subtitle-Sync` (exposed to CORS, values below); for a `live` embedded track the cues read so far from about `t` (the player's position) on, marked by a `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` (`no-store`) while more follow (ask again; the whole track is cached once every part of the file was read); 400 unknown id, 409 `{error, ai: true}` for an `ai` item while the AI translation is off, 429 provider quota or rate limit (OpenSubtitles quota: `{error, quota: true, reset_at: "<RFC 3339>"}`, answered without asking OpenSubtitles until then), 502 provider failure (`{error, ai: true}`: the Claude key or account cannot be used) |
+| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, subsource: {api_key_set}, turkcealtyazi: {enabled}, subf2m: {enabled}, yifysubtitles: {enabled}, ai_translate: {enabled, api_key_set, langs: ["profile","de"], languages: [{code, name, native}], model, usage: {month, lines, input_tokens, output_tokens, cost_usd}}, default_langs: ["tr","en"]}`; secrets are never returned |
+| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, subsource: {api_key}, turkcealtyazi: {enabled}, subf2m: {enabled}, yifysubtitles: {enabled}, ai_translate: {enabled, api_key, langs}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
+| POST | `/api/settings/subtitles/ai-test` | `{api_key?}` (empty: the stored key) → 200 `{ok: true}` or `{ok: false, error}`; one tiny Claude request |
 
 `X-Subtitle-Sync` on `/api/subtitles/file` (one token, `[a-z]`):
 
@@ -659,6 +661,27 @@ are left out; season packs are kept.
 
 With `hash` + `index`, every item not made for that file gets an id that also names the file, so its file request
 is timed to it; the ids stay the same for the same file.
+
+### AI translation
+
+Off by default (`ai_translate_enabled`, key `anthropic_api_key`, languages `ai_translate_langs`: `profile` and/or
+codes). When it is on and a list has no usable subtitle (not forced, not quota-blocked) in a target language, an `ai`
+item (never marked HI) is added in that language's place: Claude Haiku 5.5 translates the best other subtitle (one
+already translated first, then English without HI, then the best one; OpenSubtitles only when its file is on disk or
+nothing else is left, and never one whose timing does not fit the playing file). Targets and English are added to the
+searched languages. Its file answer is the source as served for the player (timed for the file like any provider
+subtitle) with the translated lines; when the source turns out not to fit the file (`poor` timing), another listed
+subtitle is translated instead (an OpenSubtitles download may be used for it). Sound notes, music notes and speaker
+labels of HI sources are removed before translating. Only the lines from `t` to about 15 min ahead are translated
+(first request 20 lines, then 60; 3 requests at a time), so the answer stays partial until every line is done and
+the players keep asking with their position. Answers are numbered lines; a sentence over several lines may come
+back once as `a-b: ...` and is divided over them by length. Skipped lines are asked again; an answer missing its
+last line (numbers possibly shifted) is asked again in halves; lines in Chinese, Japanese or Korean script are
+rejected for other targets. While the lines at `t` are missing the answer also carries `NOTE nextflix-ai-translating` (players ask again
+every 3 s and show a note); the first answer waits up to 10 s for them. Translated lines are stored for good under
+`/app/data/ai-subtitles` (`AI_SUBTITLE_DIR`, outside the swept cache), keyed by source subtitle and language, so a line
+is never paid twice. For an episode the opening (about 3 min) of the next one is translated once in the background.
+Usage per month is kept in `ai_translation_usage`.
 
 Files are converted to UTF-8 WebVTT once and cached forever under `/app/data/subtitles` (`SUBTITLE_CACHE_DIR`), keyed by
 provider and file id, so a cached file never counts against a provider quota again.

@@ -144,6 +144,8 @@ export interface SubtitleItem {
   score: number;
   /** Embedded track of a big file: read while it plays, its cues grow (fetch with the position) */
   live?: boolean;
+  /** Source "ai": Claude translates the subtitle of this language (listed only when no source has the language) */
+  ai_from?: string;
 }
 
 export interface SubtitleQuery {
@@ -156,6 +158,8 @@ export interface SubtitleQuery {
   langs: string[];
   title?: string;
   year?: number;
+  /** The profile's language: the AI translation target "profile" */
+  ui_lang?: string;
 }
 
 /** refresh: the server asks the providers again, skipping its caches (late uploads; it limits how often) */
@@ -173,6 +177,7 @@ export async function fetchSubtitles(q: SubtitleQuery, opts: { refresh?: boolean
   }
   if (q.title) p.set('title', q.title);
   if (q.year) p.set('year', String(q.year));
+  if (q.ui_lang) p.set('ui_lang', q.ui_lang);
   try {
     const data = await getJson(`/api/subtitles?${p.toString()}${opts.refresh ? '&refresh=1' : ''}`);
     return Array.isArray(data?.items) ? (data.items as SubtitleItem[]).filter(s => s && s.id) : [];
@@ -199,8 +204,12 @@ function rememberCues(id: string, cues: Cue[], sync: string) {
 
 // The server marks a partial live answer with this note (more cues follow while the file plays)
 const PARTIAL_NOTE = 'NOTE nextflix-partial';
+// ...and an AI translation with this one while the lines at the position are being translated
+const AI_NOTE = 'NOTE nextflix-ai-translating';
 // A live (partial) subtitle file is fetched again this often while it plays
 export const LIVE_CUES_POLL_MS = 15000;
+// An AI translation still missing the lines at the position is asked again this often
+export const AI_CUES_POLL_MS = 3000;
 // Late uploads: while the profile's language is missing the list is asked again this often, bypassing caches
 export const LATE_SUBTITLE_POLL_MS = 10 * 60 * 1000;
 // How often the player asks again for a release with the profile's subtitle while the server scans
@@ -219,6 +228,8 @@ export interface CueFile {
   partial: boolean;
   /** X-Subtitle-Sync for the playback log ("hidden" when the browser hides it, see subsLog.ts) */
   sync: string;
+  /** AI translation: the lines at the position are still being translated */
+  translating?: boolean;
 }
 
 export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
@@ -234,7 +245,7 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
     .then(async res => {
       const sync = syncValue(res.headers.get('X-Subtitle-Sync'), res.type === 'cors');
       const text = res.ok ? await res.text() : '';
-      return { cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0, sync };
+      return { cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0, sync, translating: text.indexOf(AI_NOTE) >= 0 };
     })
     .catch(() => ({ cues: [] as Cue[], partial: false, sync: SYNC_NONE }));
   req.then(f => {
@@ -243,8 +254,9 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
   return req;
 }
 
+// An AI translation does not count: a real subtitle that turns up later still replaces it
 export const hasSubtitleLang = (items: SubtitleItem[], lang: string) =>
-  items.some(s => normLang(s.language) === normLang(lang));
+  items.some(s => s.source !== 'ai' && normLang(s.language) === normLang(lang));
 
 /** Both lists by id, the newer answer's entries first */
 export function mergeSubtitles(prev: SubtitleItem[], next: SubtitleItem[]): SubtitleItem[] {

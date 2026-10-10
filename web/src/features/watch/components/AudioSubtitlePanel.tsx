@@ -349,6 +349,11 @@ export default function AudioSubtitlePanel({
                 <Row col="subs" active={s.id === subtitleId} onClick={() => onSubtitle(s.id)}>
                   <span className="flex items-center gap-2">
                     <span className="truncate">{name}{tags.length > 0 && ` (${tags.join(', ')})`}</span>
+                    {s.source === 'ai' && (
+                      <span className="shrink-0 rounded-sm border border-[#a78bfa]/70 px-1 text-[10px] font-bold uppercase leading-4 tracking-wide text-[#a78bfa]">
+                        AI
+                      </span>
+                    )}
                     {s.synced && (
                       <span className="shrink-0 rounded-sm border border-[#46d369]/70 px-1 text-[10px] font-bold uppercase leading-4 tracking-wide text-[#46d369]">
                         {t('player.subtitlesSynced')}
@@ -356,7 +361,10 @@ export default function AudioSubtitlePanel({
                     )}
                   </span>
                   <span className="block truncate text-xs font-normal text-[#8c8c8c] md:text-sm">
-                    {[sourceLabel(t, s.source), s.release].filter(Boolean).join(' · ')}
+                    {[
+                      s.source === 'ai' ? t('player.subAiFrom', { lang: languageName(locale, normLang(s.ai_from || '')) }) : sourceLabel(t, s.source),
+                      s.release,
+                    ].filter(Boolean).join(' · ')}
                   </span>
                   {!!hint && <span className="block truncate text-xs font-normal text-[#e5a00d] md:text-sm">{hint}</span>}
                 </Row>

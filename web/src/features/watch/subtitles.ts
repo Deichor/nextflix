@@ -86,6 +86,8 @@ export interface SubtitleItem {
   live?: boolean;
   /** OpenSubtitles' daily download limit is used up: listed last, not picked by itself */
   quota?: boolean;
+  /** Source "ai": Claude translates the subtitle of this language (listed only when no source has the language) */
+  ai_from?: string;
 }
 
 export interface SubtitleQuery {
@@ -99,6 +101,8 @@ export interface SubtitleQuery {
   /** Torrent / release name, helps matching */
   title?: string;
   year?: number;
+  /** The profile's language: the AI translation target "profile" */
+  ui_lang?: string;
 }
 
 // Map that keeps only the `max` most recently used entries (Map iterates in insertion order)
@@ -148,6 +152,7 @@ export function fetchSubtitles(q: SubtitleQuery, opts: { fresh?: boolean; refres
   }
   if (q.title) p.set('title', q.title);
   if (q.year) p.set('year', String(q.year));
+  if (q.ui_lang) p.set('ui_lang', q.ui_lang);
   const key = p.toString();
   const hit = listCache.get(key);
   if (opts.refresh) opts = { ...opts, fresh: true };
@@ -182,13 +187,16 @@ export function mergeSubtitles(prev: SubtitleItem[], next: SubtitleItem[]): Subt
 // providers for its next call: refetch then, unless the preferred language is already there
 export const SUBTITLE_RETRY_MS = [8000, 20000];
 
+// An AI translation does not count: a real subtitle that turns up later still replaces it
 export const hasSubtitleLang = (items: SubtitleItem[], lang: string) =>
-  items.some(s => normLang(s.language) === normLang(lang));
+  items.some(s => s.source !== 'ai' && normLang(s.language) === normLang(lang));
 
 // Late uploads: while the profile's language is missing the list is asked again this often, bypassing caches
 export const LATE_SUBTITLE_POLL_MS = 10 * 60 * 1000;
 // A live (partial) subtitle file is fetched again this often while it plays
 export const LIVE_CUES_POLL_MS = 15000;
+// An AI translation still missing the lines at the position is asked again this often
+export const AI_CUES_POLL_MS = 3000;
 // After the retries: how often the player asks for a release that carries the profile's subtitle
 export const SUBALT_RETRY_MAX = 4;
 
@@ -270,6 +278,8 @@ export const subtitleRetryAt = (id: string): number | null => failedFiles.get(id
 
 // The server marks a partial live answer with this note (more cues follow while the file plays)
 export const PARTIAL_NOTE = 'NOTE nextflix-partial';
+// ...and an AI translation with this one while the lines at the position are being translated
+export const AI_NOTE = 'NOTE nextflix-ai-translating';
 
 export function fetchSubtitleCues(id: string): Promise<Cue[]> {
   return fetchSubtitleFile(id).then(f => f.cues);
@@ -285,6 +295,8 @@ export interface SubtitleFile {
   /** X-Subtitle-Sync for the playback log ("hidden" when the browser hides it, see subsLog.ts) */
   sync: string;
   failed?: SubtitleFailure;
+  /** AI translation: the lines at the position are still being translated */
+  translating?: boolean;
 }
 
 /** poll: the file answered before (a partial one asked again); a failure now is temporary and not remembered */
@@ -300,7 +312,7 @@ export function fetchSubtitleFile(id: string, at?: number, poll = false): Promis
       const sync = syncValue(res.headers.get('X-Subtitle-Sync'), res.type === 'cors');
       if (res.ok) {
         const text = await res.text();
-        return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE), sync };
+        return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE), sync, translating: text.includes(AI_NOTE) };
       }
       const body = await res.json().catch(() => null) as { quota?: boolean; reset_at?: string } | null;
       const why: SubtitleFailure = res.status === 429 ? (body?.quota ? 'quota' : 'limited') : res.status >= 500 ? 'error' : 'missing';

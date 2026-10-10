@@ -53,6 +53,10 @@ type Config struct {
 	// LiveTiming: the play streams feed their audio (OpenSpeech), so timing results stay
 	// provisional and improve while a file plays (sync_live.go)
 	LiveTiming bool
+	// AIDir keeps the AI translations for good (outside the swept cache; default /app/data/ai-subtitles)
+	AIDir string
+	// NextEpisode is the episode after season/episode (nil = no AI prefetch of the next episode)
+	NextEpisode func(tvID, season, episode int) (int, int, bool)
 }
 
 // Service lists subtitles from the torrent itself and online providers and serves them as WebVTT.
@@ -77,6 +81,7 @@ type Service struct {
 
 	live *liveSubs // embedded tracks of big files, read while they play
 	sync *syncer   // timing of provider subtitles for the playing file
+	ai   *aiTranslator
 
 	refreshMu sync.Mutex
 	refreshed map[string]time.Time // list base key -> last refresh=1 that skipped the cache
@@ -90,6 +95,9 @@ const refreshEvery = 5 * time.Minute
 func NewService(db *gorm.DB, cfg Config) *Service {
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = "/app/data/subtitles"
+	}
+	if cfg.AIDir == "" {
+		cfg.AIDir = "/app/data/ai-subtitles"
 	}
 	client := cfg.HTTPClient
 	if client == nil {
@@ -123,6 +131,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		}
 	})
 	s.sync = newSyncer(s)
+	s.ai = newAITranslator(db, cfg.AIDir)
 	return s
 }
 
@@ -167,7 +176,11 @@ func (s *Service) Start(ctx context.Context) {
 // EnsureSettings seeds the settings row (Turkish first, turkcealtyazi.org on).
 func (s *Service) EnsureSettings() error { return s.settings.ensure() }
 
-func (s *Service) Settings() SettingsView { return s.settings.get().view() }
+func (s *Service) Settings() SettingsView {
+	v := s.settings.get().view()
+	v.AI.Usage = s.ai.usage()
+	return v
+}
 
 func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
 	st, err := s.settings.load()
@@ -189,7 +202,12 @@ func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
 		before.OpenSubtitlesPassword != st.OpenSubtitlesPassword {
 		s.os.clearQuota()
 	}
-	return st.view(), nil
+	if before.AnthropicAPIKey != st.AnthropicAPIKey {
+		s.ai.resetKeyErrors()
+	}
+	v := st.view()
+	v.AI.Usage = s.ai.usage()
+	return v, nil
 }
 
 // providerResult is what one source delivered.
@@ -202,9 +220,22 @@ type providerResult struct {
 // List merges every source and ranks the result. Sources that are not ready within listWait are
 // left out; they keep running and fill the cache for the next call.
 func (s *Service) List(ctx context.Context, q Query) []Sub {
+	return s.list(ctx, q, s.wait, nil)
+}
+
+// list is List with its wait; nil targets are the AI translation targets of the settings.
+func (s *Service) list(ctx context.Context, q Query, wait time.Duration, targets []string) []Sub {
 	st := s.settings.get()
 	if len(q.Langs) == 0 {
 		q.Langs = st.langs()
+	}
+	if targets == nil {
+		targets = s.aiTargets(st, q)
+	}
+	if len(targets) > 0 && st.AITranslateEnabled && st.AnthropicAPIKey != "" {
+		q.Langs = aiSearchLangs(q.Langs, targets)
+	} else {
+		targets = nil
 	}
 	type job struct {
 		source string
@@ -317,7 +348,7 @@ func (s *Service) List(ctx context.Context, q Query) []Sub {
 		}()
 	}
 
-	timer := time.NewTimer(s.wait)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	var all []candidate
 	for range jobs {
@@ -325,12 +356,12 @@ func (s *Service) List(ctx context.Context, q Query) []Sub {
 		case r := <-results:
 			all = append(all, r.items...)
 		case <-timer.C:
-			return s.rank(all, q)
+			return s.addAI(s.rank(all, q), q, targets)
 		case <-ctx.Done():
-			return s.rank(all, q)
+			return s.addAI(s.rank(all, q), q, targets)
 		}
 	}
-	return s.rank(all, q)
+	return s.addAI(s.rank(all, q), q, targets)
 }
 
 func (s *Service) rank(all []candidate, q Query) []Sub {
@@ -451,6 +482,9 @@ func (s *Service) FileAt(ctx context.Context, id string, t float64) ([]byte, boo
 // FileFor is FileAt with the timing state: a subtitle listed for the playing file (its id
 // names the file) is timed to it, see sync.go.
 func (s *Service) FileFor(ctx context.Context, id string, t float64) (FileAnswer, error) {
+	if source, lang, ref, err := decodeID(id); err == nil && source == SourceAI {
+		return s.serveAI(ctx, lang, ref, t)
+	}
 	if inner, hash, index, ok := unwrapSyncID(id); ok {
 		return s.sync.serve(ctx, inner, hash, index)
 	}
@@ -667,7 +701,7 @@ func decodeID(id string) (source, lang, ref string, err error) {
 	}
 	switch parts[0] {
 	case SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceSubSource, SourceTurkceAltyazi,
-		SourceSubf2m, SourceYIFY:
+		SourceSubf2m, SourceYIFY, SourceAI:
 	default:
 		return "", "", "", ErrBadID
 	}

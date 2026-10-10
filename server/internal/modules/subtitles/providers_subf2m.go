@@ -28,6 +28,9 @@ const (
 type TitleInfo struct {
 	Names []string // English title first, then the original title when it differs
 	Year  int      // release year, first air year for TV
+	// Genres and Overview give the AI translation its context
+	Genres   []string
+	Overview string
 }
 
 // TitleLookup returns the TitleInfo of a movie or TV show (mediaType "movie" | "tv").

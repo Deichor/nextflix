@@ -16,6 +16,7 @@ const (
 	SourceSubSource     = "subsource"
 	SourceSubf2m        = "subf2m"
 	SourceYIFY          = "yifysubtitles"
+	SourceAI            = "ai" // a Claude translation of another subtitle (ai.go)
 )
 
 // Settings is the single row of subtitle provider settings (id 1). Secrets never leave the server.
@@ -30,19 +31,29 @@ type Settings struct {
 	Subf2mEnabled         bool   `gorm:"column:subf2m_enabled;default:true"`
 	YIFYEnabled           bool   `gorm:"column:yify_enabled;default:true"`
 	DefaultLangs          string `gorm:"column:default_langs"`
+	AITranslateEnabled    bool   `gorm:"column:ai_translate_enabled"`
+	AnthropicAPIKey       string `gorm:"column:anthropic_api_key"`
+	AITranslateLangs      string `gorm:"column:ai_translate_langs;default:profile"`
 	UpdatedAt             time.Time
 }
 
 func (Settings) TableName() string { return "subtitle_settings" }
 
 // Models returns the tables of this module for database.Migrate.
-func Models() []any { return []any{&Settings{}} }
+func Models() []any { return []any{&Settings{}, &AIUsage{}} }
 
 func (s Settings) langs() []string {
 	if l := parseLangs(s.DefaultLangs); len(l) > 0 {
 		return l
 	}
 	return []string{"tr", "en"}
+}
+
+func (s Settings) aiLangs() []string {
+	if l := parseAILangs(strings.Split(s.AITranslateLangs, ",")); len(l) > 0 {
+		return l
+	}
+	return []string{aiProfileLang}
 }
 
 // SettingsView is what GET /api/settings/subtitles returns.
@@ -67,6 +78,14 @@ type SettingsView struct {
 	YIFY struct {
 		Enabled bool `json:"enabled"`
 	} `json:"yifysubtitles"`
+	AI struct {
+		Enabled   bool         `json:"enabled"`
+		APIKeySet bool         `json:"api_key_set"`
+		Langs     []string     `json:"langs"` // "profile" or language codes
+		Languages []AILanguage `json:"languages"`
+		Model     string       `json:"model"`
+		Usage     AIUsageView  `json:"usage"`
+	} `json:"ai_translate"`
 	DefaultLangs []string `json:"default_langs"`
 }
 
@@ -108,6 +127,11 @@ type SettingsInput struct {
 	YIFY *struct {
 		Enabled *bool `json:"enabled"`
 	} `json:"yifysubtitles"`
+	AI *struct {
+		Enabled *bool     `json:"enabled"`
+		APIKey  optString `json:"api_key"`
+		Langs   *[]string `json:"langs"`
+	} `json:"ai_translate"`
 	DefaultLangs *[]string `json:"default_langs"`
 }
 
@@ -129,6 +153,8 @@ type Sub struct {
 	Live bool `json:"live,omitempty"`
 	// OpenSubtitles' download quota is used up: listed last, its file answers 429 until the reset
 	Quota bool `json:"quota,omitempty"`
+	// An AI translation: the language it is translated from
+	AIFrom string `json:"ai_from,omitempty"`
 }
 
 // Query is a subtitle search for one movie or episode.
@@ -146,6 +172,8 @@ type Query struct {
 	Refresh bool
 	// FPS is the playing file's probed frame rate (0 = unknown), a ranking hint
 	FPS float64
+	// UILang is the language of the watching profile (AI translation target "profile")
+	UILang string
 }
 
 func (q Query) isTV() bool { return q.MediaType == "tv" }
@@ -177,6 +205,9 @@ var langLabels = map[string]string{
 func langLabel(code string) string {
 	if l, ok := langLabels[code]; ok {
 		return l
+	}
+	if l, ok := aiLanguage(code); ok {
+		return l.Native
 	}
 	if code == "" {
 		return "Unknown"

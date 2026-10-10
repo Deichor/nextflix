@@ -19,6 +19,7 @@ func (h handler) list(c *gin.Context) {
 		Hash:      strings.ToLower(strings.TrimSpace(c.Query("hash"))),
 		Title:     c.Query("title"),
 		Langs:     parseLangs(c.Query("langs")),
+		UILang:    normLang(c.Query("ui_lang")),
 	}
 	q.TmdbID, _ = strconv.Atoi(c.Query("tmdb_id"))
 	q.Season, _ = strconv.Atoi(c.Query("season"))
@@ -62,6 +63,7 @@ func (h handler) file(c *gin.Context) {
 	a, err := h.s.FileFor(c.Request.Context(), c.Query("id"), t)
 	vtt, partial := a.VTT, a.Partial
 	var qe QuotaError
+	var ke AIKeyError
 	switch {
 	case errors.As(err, &qe):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "OpenSubtitles download quota used up", "quota": true,
@@ -69,6 +71,12 @@ func (h handler) file(c *gin.Context) {
 		return
 	case errors.Is(err, ErrBadID):
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subtitle id"})
+		return
+	case errors.Is(err, ErrAIOff):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "ai": true})
+		return
+	case errors.As(err, &ke):
+		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true})
 		return
 	case errors.Is(err, ErrRateLimited):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
@@ -116,4 +124,17 @@ func (h handler) putSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, v)
+}
+
+// testAI checks a Claude API key (the body's, else the stored one) with a tiny request.
+func (h handler) testAI(c *gin.Context) {
+	var in struct {
+		APIKey string `json:"api_key"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	if err := h.s.TestAIKey(c.Request.Context(), in.APIKey); err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

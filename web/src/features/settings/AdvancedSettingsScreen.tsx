@@ -8,6 +8,7 @@ import { useT } from '@/shared/i18n';
 import IndexerCard from '@/features/settings/components/IndexerCard';
 import DebridCard from '@/features/settings/components/DebridCard';
 import SubtitlesSection from '@/features/settings/SubtitlesSection';
+import AutoTranslateCard from '@/features/settings/components/AutoTranslateCard';
 
 export default function AdvancedSettingsScreen() {
   const t = useT();
@@ -30,6 +31,7 @@ export default function AdvancedSettingsScreen() {
           <IndexerCard />
           <DebridCard />
           <SubtitlesSection />
+          <AutoTranslateCard />
         </div>
       </div>
     </PageShell>

@@ -416,6 +416,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
       )}
 
       {!!s.toast && <div className="player-toast">{t(s.toast)}</div>}
+      {s.aiTranslating && !s.toast && <div className="player-toast"><Spinner className="spinner-small" /> {t('player.aiTranslating')}</div>}
 
       <div className={`player-top ${controls || overlay ? 'is-visible' : ''}`}>
         <button type="button" className="player-back" data-nav data-nav-id="pl-close" onClick={onClose} aria-label={t('player.back')}>

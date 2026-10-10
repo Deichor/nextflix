@@ -8,4 +8,5 @@ func Register(api *gin.RouterGroup, s *Service) {
 	api.GET("/subtitles/file", h.file)
 	api.GET("/settings/subtitles", h.getSettings)
 	api.PUT("/settings/subtitles", h.putSettings)
+	api.POST("/settings/subtitles/ai-test", h.testAI)
 }

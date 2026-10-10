@@ -81,7 +81,7 @@ Replace `192.168.1.50` with the TV's address. `-i` can be repeated; `ares-setup-
 
 ```
 scripts/build.sh
-scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.17_all.ipk
+scripts/ares.sh ares-install --device tv out/com.nextflix.tv_0.1.18_all.ipk
 scripts/ares.sh ares-launch --device tv com.nextflix.tv
 ```
 

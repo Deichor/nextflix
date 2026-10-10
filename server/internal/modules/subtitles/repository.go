@@ -21,7 +21,8 @@ type settingsRepo struct {
 func newSettingsRepo(db *gorm.DB) *settingsRepo { return &settingsRepo{db: db} }
 
 func defaultSettings() Settings {
-	return Settings{ID: settingsID, TurkceAltyaziEnabled: true, Subf2mEnabled: true, YIFYEnabled: true, DefaultLangs: "tr,en"}
+	return Settings{ID: settingsID, TurkceAltyaziEnabled: true, Subf2mEnabled: true, YIFYEnabled: true, DefaultLangs: "tr,en",
+		AITranslateLangs: aiProfileLang}
 }
 
 // ensure seeds the row on first start.
@@ -119,6 +120,17 @@ func (in SettingsInput) apply(s *Settings) {
 	if o := in.YIFY; o != nil && o.Enabled != nil {
 		s.YIFYEnabled = *o.Enabled
 	}
+	if o := in.AI; o != nil {
+		if o.Enabled != nil {
+			s.AITranslateEnabled = *o.Enabled
+		}
+		set(&s.AnthropicAPIKey, o.APIKey)
+		if o.Langs != nil {
+			if l := parseAILangs(*o.Langs); len(l) > 0 {
+				s.AITranslateLangs = strings.Join(l, ",")
+			}
+		}
+	}
 	if in.DefaultLangs != nil {
 		if l := parseLangs(strings.Join(*in.DefaultLangs, ",")); len(l) > 0 {
 			s.DefaultLangs = strings.Join(l, ",")
@@ -136,6 +148,11 @@ func (s Settings) view() SettingsView {
 	v.TurkceAltyazi.Enabled = s.TurkceAltyaziEnabled
 	v.Subf2m.Enabled = s.Subf2mEnabled
 	v.YIFY.Enabled = s.YIFYEnabled
+	v.AI.Enabled = s.AITranslateEnabled
+	v.AI.APIKeySet = s.AnthropicAPIKey != ""
+	v.AI.Langs = s.aiLangs()
+	v.AI.Languages = aiLanguages
+	v.AI.Model = aiModel
 	v.DefaultLangs = s.langs()
 	return v
 }

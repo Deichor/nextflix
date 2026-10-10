@@ -9,7 +9,7 @@ import {
   type Availability, type PlayRequest, type QualityCap, type ResolveParams, type ResolvedSource, type StreamMeta, type StreamSource, restrictToSafeAudio,
 } from '../lib/stream';
 import {
-  LATE_SUBTITLE_POLL_MS, LIVE_CUES_POLL_MS, SUBALT_RETRY_MAX, bestSubtitleOf, fetchCueFile, fetchSubtitles,
+  AI_CUES_POLL_MS, LATE_SUBTITLE_POLL_MS, LIVE_CUES_POLL_MS, SUBALT_RETRY_MAX, bestSubtitleOf, fetchCueFile, fetchSubtitles,
   hasSubtitleLang, lateSubtitles, mergeSubtitles, normLang, pickAudioTrack, pickSubtitle,
   type AudioTrackInfo, type Cue, type SubtitleItem,
 } from '../lib/subtitles';
@@ -71,6 +71,8 @@ export interface PlayerState {
   buffering: boolean;
   /** Waiting paused for a larger buffer (startBuffer.ts) */
   holding: boolean;
+  /** The shown AI subtitle is still being translated at the position */
+  aiTranslating: boolean;
   status: MessageKey;
   reconnecting: boolean;
   ended: boolean;
@@ -306,6 +308,7 @@ export class PlayerEngine {
       playing: false,
       buffering: true,
       holding: false,
+      aiTranslating: false,
       status: 'player.connecting',
       reconnecting: false,
       ended: false,
@@ -1566,7 +1569,7 @@ export class PlayerEngine {
 
   private applySubtitle(id: string | null, why: SubsWhy) {
     clearTimeout(this.cueTimer);
-    this.set({ subId: id, cues: [] });
+    this.set({ subId: id, cues: [], aiTranslating: false });
     if (!id) return;
     const session = this.session;
     let loads = 0;
@@ -1600,8 +1603,9 @@ export class PlayerEngine {
         loggedAt = Date.now();
       }
       // The overlay looks the cue up again in the new list; the delay stays
+      if (!!f.translating !== this.state.aiTranslating) this.set({ aiTranslating: !!f.translating });
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
-      if (f.partial) this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
+      if (f.partial) this.cueTimer = setTimeout(load, f.translating ? AI_CUES_POLL_MS : LIVE_CUES_POLL_MS);
     });
     load();
   }
@@ -1665,6 +1669,7 @@ export class PlayerEngine {
       langs,
       title: src?.torrent_title || src?.file_name || undefined,
       year: m.year,
+      ui_lang: this.locale,
     };
     const hasPreferred = (items: SubtitleItem[]) => hasSubtitleLang(items, langs[0]);
     let list: SubtitleItem[] = [];
@@ -1708,7 +1713,9 @@ export class PlayerEngine {
       if (this.stale(session) || hasPreferred(list)) return;
       fetchSubtitles(q, { refresh: true }).then(more => {
         if (this.stale(session)) return;
-        const late = lateSubtitles(list, more, langs[0], this.subUserPicked || !!this.state.subId);
+        // An AI translation picked by itself gives way to a real subtitle
+        const shownAI = this.subItem(this.state.subId)?.source === 'ai';
+        const late = lateSubtitles(list, more, langs[0], this.subUserPicked || (!!this.state.subId && !shownAI));
         if (!late.arrived) {
           if (more.length > 0) show(late.items);
           this.findSubAlt(session, langs[0]);

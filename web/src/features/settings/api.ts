@@ -81,7 +81,24 @@ export interface SubtitleSettings {
   turkcealtyazi: { enabled: boolean };
   subf2m: { enabled: boolean };
   yifysubtitles: { enabled: boolean };
+  ai_translate: AITranslateSettings;
   default_langs: string[];
+}
+
+export interface AILanguage {
+  code: string;
+  name: string;
+  native: string;
+}
+
+// The Claude key is write-only; langs holds "profile" (the profile's language) and language codes
+export interface AITranslateSettings {
+  enabled: boolean;
+  api_key_set: boolean;
+  langs: string[];
+  languages: AILanguage[];
+  model: string;
+  usage: { month: string; lines: number; input_tokens: number; output_tokens: number; cost_usd: number };
 }
 
 // Empty strings keep the stored value, null clears it.
@@ -92,6 +109,7 @@ export interface SubtitleSettingsInput {
   turkcealtyazi?: { enabled?: boolean };
   subf2m?: { enabled?: boolean };
   yifysubtitles?: { enabled?: boolean };
+  ai_translate?: { enabled?: boolean; api_key?: string | null; langs?: string[] };
   default_langs?: string[];
 }
 
@@ -109,6 +127,18 @@ export async function saveSubtitleSettings(input: SubtitleSettingsInput): Promis
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+// Checks a Claude key (empty: the stored one) with a tiny request.
+export async function testAITranslate(apiKey: string): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${getApiUrl()}/api/settings/subtitles/ai-test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!res.ok) return { success: false, message: await readError(res) };
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  return { success: !!body.ok, message: body.error || '' };
 }
 
 // TorBox debrid. The key is write-only: only api_key_set comes back.

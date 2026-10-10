@@ -23,6 +23,7 @@ import {
   type SubtitleFailure,
   type SubtitleFile,
   LIVE_CUES_POLL_MS,
+  AI_CUES_POLL_MS,
   SUBALT_RETRY_MAX,
   fetchSubtitles,
   groupSubtitles,
@@ -1503,6 +1504,8 @@ function PlayerCore({
   // Short notice above the controls (OpenSubtitles' daily limit once per player, upscaling stopped)
   const [subNotice, setSubNotice] = useState<{ key: MessageKey; vars?: Vars; ms?: number } | null>(null);
   const quotaNoticeRef = useRef<MessageKey | ''>('');
+  // The shown AI subtitle is still being translated at the position
+  const [aiTranslating, setAiTranslating] = useState(false);
   useEffect(() => {
     if (!subNotice) return;
     const timer = setTimeout(() => setSubNotice(null), subNotice.ms ?? 4000);
@@ -1901,6 +1904,7 @@ function PlayerCore({
       langs,
       title: shownSource?.torrent_title || shownSource?.file_name || file.name || undefined,
       year: m.year,
+      ui_lang: localeRef.current,
     };
     let list: SubtitleItem[] = [];
     const show = (items: SubtitleItem[]) => {
@@ -1921,7 +1925,9 @@ function PlayerCore({
       if (cancelled || hasSubtitleLang(list, langs[0])) return;
       fetchSubtitles(q, { refresh: true }).then(more => {
         if (cancelled) return;
-        const late = lateSubtitles(list, more, langs[0], subUserPicked.current || subIdRef.current !== null);
+        // An AI translation picked by itself gives way to a real subtitle
+        const shownAI = list.find(s => s.id === subIdRef.current)?.source === 'ai';
+        const late = lateSubtitles(list, more, langs[0], subUserPicked.current || (subIdRef.current !== null && !shownAI));
         if (more.length > 0) show(late.items);
         if (!late.arrived) {
           report?.({ lang: langs[0], hash, missing: true });
@@ -2059,15 +2065,17 @@ function PlayerCore({
           return;
         }
         noteSubs(subId, f);
+        setAiTranslating(!!f.translating);
         // The overlay looks the cue up again in the new list; the delay stays
         if (f.cues.length > 0 || !f.partial) setCues(f.cues);
-        if (f.partial) timer = setTimeout(load, LIVE_CUES_POLL_MS);
+        if (f.partial) timer = setTimeout(load, f.translating ? AI_CUES_POLL_MS : LIVE_CUES_POLL_MS);
       });
     };
     load();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      setAiTranslating(false);
     };
   }, [subId, stream?.t, subtitleFailed, noteSubs]); // a seek asks a live track for its new position at once
 
@@ -3207,6 +3215,13 @@ function PlayerCore({
           </button>
         )}
       </div>
+
+      {aiTranslating && !subNotice && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-4 py-2 rounded bg-black/80 border border-white/20 w-max max-w-[90vw] text-white text-sm shadow-lg pointer-events-none" role="status">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+          {t('player.aiTranslating')}
+        </div>
+      )}
 
       {!!subNotice && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded bg-black/80 border border-white/20 w-max max-w-[90vw] text-center text-white text-sm shadow-lg pointer-events-none" role="status">
