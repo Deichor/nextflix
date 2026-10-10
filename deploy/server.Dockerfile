@@ -1,5 +1,6 @@
 # Build context: server/ (see deploy/docker-compose.yml)
-FROM golang:1.27-trixie AS builder
+# Base images are pinned to exact versions; keep them in sync with scripts/*.sh
+FROM golang:1.27.2-trixie AS builder
 
 # go-sqlite3 needs cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,7 +18,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags '-s -w -linkmode external -extldflags "-static"' \
     -o /out/nextflix ./cmd/nextflix
 
-FROM debian:trixie-slim
+FROM debian:13.7-slim
 
 # ffmpeg remuxes torrent streams to fMP4; sqlite3 is kept for debugging the database
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +41,8 @@ USER nextflix
 
 EXPOSE 8252
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+# Probes every 2s while starting, so web (which waits for this) starts right away
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --start-interval=2s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8252/api/health > /dev/null || exit 1
 
 CMD ["/app/nextflix"]

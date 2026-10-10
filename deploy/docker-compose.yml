@@ -33,17 +33,27 @@ services:
     volumes:
       # SQLite lives in a named volume (WAL/mmap is unreliable on /mnt/c bind mounts)
       - db:/app/data
-      # Built TV app, served at /tv/ for the TV's own browser (tv/webos/scripts/build.sh)
-      - ../tv/webos/dist:/app/tv:ro
+      # Built TV app, served at /tv/ for the TV's own browser (tv/webos/scripts/build.sh).
+      # Fails instead of mounting an empty folder when it has not been built yet.
+      - type: bind
+        source: ../tv/webos/dist
+        target: /app/tv
+        read_only: true
+        bind:
+          create_host_path: false
     networks: [frontend, backend, cache]
     depends_on:
       # Notifications are turned off when Redis is not up at boot
       redis:
         condition: service_healthy
+      # Waits until they answer, so the first search/stream works; optional so a broken one
+      # does not keep the server down
       jackett:
-        condition: service_started
+        condition: service_healthy
+        required: false
       torrserver:
-        condition: service_started
+        condition: service_healthy
+        required: false
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     logging: *logging
@@ -69,7 +79,9 @@ services:
     # Only talks to server and tvapp
     networks: [frontend]
     depends_on:
-      - server
+      server:
+        condition: service_healthy
+        required: false
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     logging: *logging
@@ -79,8 +91,20 @@ services:
   tvapp:
     image: nginx:1.30.5-alpine
     volumes:
-      - ../tv/webos/dist:/usr/share/nginx/html:ro
+      - type: bind
+        source: ../tv/webos/dist
+        target: /usr/share/nginx/html
+        read_only: true
+        bind:
+          create_host_path: false
     networks: [frontend]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     # Master starts as root, binds :80, creates its cache dirs and switches workers to "nginx"
@@ -131,6 +155,18 @@ services:
     ports:
       - "127.0.0.1:9117:9117"
     networks: [backend]
+    depends_on:
+      # Cloudflare-protected indexers need it; optional so Jackett still starts without it
+      flaresolverr:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9117/UI/Login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
     # No cap_drop: s6-overlay starts as root and needs to chown /config and switch users
     security_opt: [no-new-privileges:true]
     logging: *logging
@@ -144,15 +180,41 @@ services:
       - LOG_LEVEL=info
       - TZ=UTC
     networks: [backend]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8191/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
     # Runs as a non-root user and starts Chromium with --no-sandbox
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     logging: *logging
     restart: unless-stopped
 
+  # One-shot: gives torrserver-data (root-owned on older installs) to the user TorrServer runs as
+  torrserver-init:
+    image: alpine:3.24.2
+    command: ["find", "/opt/ts", "(", "!", "-user", "1000", "-o", "!", "-group", "1000", ")",
+              "-exec", "chown", "-h", "1000:1000", "{}", "+"]
+    volumes:
+      - torrserver-data:/opt/ts
+    network_mode: none
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    logging: *logging
+    restart: "no"
+
   # Streams torrents over HTTP while they download (used by the "Watch" button)
   torrserver:
     image: ghcr.io/yourok/torrserver:MatriX.146
+    # Non-root: it is the only service reachable from the internet (peer port)
+    user: "1000:1000"
+    depends_on:
+      torrserver-init:
+        condition: service_completed_successfully
     environment:
       - TS_PORT=8090
       - TS_CONF_PATH=/opt/ts/config
@@ -165,7 +227,14 @@ services:
       - "41413:41413/tcp"
       - "41413:41413/udp"
     networks: [backend]
-    # Runs as root on root-owned files and only binds ports above 1024
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/echo"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    # Only binds ports above 1024, so no capabilities are needed
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     logging: *logging

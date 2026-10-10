@@ -12,8 +12,9 @@ node_modules/
 *.db-wal
 /deploy/config/*.env
 /deploy/data/
-.env
-.env.local
+# .env, .env.local, .env.production(.local) etc. (Next.js loads all of them)
+.env*
+!.env*.example
 *.log
 __pycache__/
 *.pyc

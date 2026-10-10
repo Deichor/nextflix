@@ -4,4 +4,4 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 docker run --rm \
   -v "$ROOT/server:/app" \
   -v nextflix-gomod:/go/pkg/mod \
-  -w /app golang:1.27-trixie sh -c 'go mod tidy && echo "TIDY=ok" || echo "TIDY=failed"'
+  -w /app golang:1.27.2-trixie sh -c 'go mod tidy && echo "TIDY=ok" || echo "TIDY=failed"'

@@ -1,5 +1,6 @@
 # Build context: web/ (see deploy/docker-compose.yml)
-FROM node:24-alpine AS builder
+# Base images are pinned to exact versions; keep them in sync with scripts/check-frontend.sh
+FROM node:24.21.0-alpine3.24 AS builder
 
 WORKDIR /app
 COPY package*.json ./
@@ -15,7 +16,7 @@ ENV BACKEND_INTERNAL_URL=$BACKEND_INTERNAL_URL NEXT_PUBLIC_API_URL=$BACKEND_INTE
 
 RUN npm run build
 
-FROM node:24-alpine AS runner
+FROM node:24.21.0-alpine3.24 AS runner
 
 WORKDIR /app
 

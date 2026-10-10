@@ -38,7 +38,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map and dependen
 
 ## Quick start
 
-Requirements: Docker with Compose v2.24 or newer (on Windows: Docker inside WSL, e.g. Ubuntu 24.04).
+Requirements: Docker Engine 25+ with Compose v2.24 or newer (on Windows: Docker inside WSL, e.g. Ubuntu 24.04).
 Everything builds and runs in containers; nothing is installed on the host.
 
 ```bash
@@ -47,10 +47,14 @@ cp deploy/config/server.env.example deploy/config/server.env
 cp deploy/config/web.env.example    deploy/config/web.env
 #    Put your TMDB v4 "API Read Access Token" into TMDB_API_KEY in server.env.
 
-# 2. Build and start
+# 2. Build the TV app first; the stack refuses to start without tv/webos/dist
+#    (no webOS TV: `mkdir -p tv/webos/dist` is enough)
+bash tv/webos/scripts/build.sh
+
+# 3. Build and start
 docker compose -f deploy/docker-compose.yml up -d --build
 
-# 3. Set up Jackett: open http://127.0.0.1:9117, add indexers, copy the API key
+# 4. Set up Jackett: open http://127.0.0.1:9117, add indexers, copy the API key
 #    into Settings -> Indexer in Nextflix (or JACKETT_API_KEY in server.env).
 ```
 

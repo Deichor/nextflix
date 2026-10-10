@@ -9,6 +9,9 @@ cd "$ROOT"
 
 OLD_PROJECT=homeflix-wifi
 NEW_COMPOSE=deploy/docker-compose.yml
+ALPINE=alpine:3.24.2
+# Written into a new volume after its data was copied completely
+COPIED_MARKER=.homeflix-migrated
 
 log()  { printf '[migrate] %s\n' "$*"; }
 skip() { printf '[migrate] skip: %s\n' "$*"; }
@@ -18,9 +21,10 @@ command -v docker >/dev/null || { echo "docker not found" >&2; exit 1; }
 
 volume_exists() { docker volume inspect "$1" >/dev/null 2>&1; }
 
-# A volume counts as empty when it holds no regular files (images may pre-create empty folders)
+# A volume counts as empty when it holds no regular files (images may pre-create empty folders);
+# the staging folder of an interrupted copy_volume does not count
 volume_has_files() {
-  [ -n "$(docker run --rm -v "$1":/v:ro alpine find /v -type f -print -quit)" ]
+  [ -n "$(docker run --rm -v "$1":/v:ro "$ALPINE" find /v -path /v/.migrate-tmp -prune -o -type f -print -quit)" ]
 }
 
 # --- 1. Stop the old stack (volumes are kept) -------------------------------
@@ -100,8 +104,25 @@ copy_volume() {
   local old="$1" new="$2"
   if ! volume_exists "$old"; then skip "$old does not exist"; return; fi
   if ! volume_exists "$new"; then warn "$new does not exist (step 4 failed?)"; return; fi
-  if volume_has_files "$new"; then skip "$new already has data"; return; fi
-  docker run --rm -v "$old":/from:ro -v "$new":/to alpine cp -a /from/. /to/
+  if docker run --rm -v "$new":/v:ro "$ALPINE" test -e "/v/$COPIED_MARKER"; then
+    skip "$new already copied"; return
+  fi
+  if volume_has_files "$new"; then
+    warn "$new already has data that this script did not copy; left untouched"; return
+  fi
+  # Copies into a staging folder first, so an interrupted copy never looks like real data
+  # and is simply redone on the next run
+  docker run --rm -v "$old":/from:ro -v "$new":/to -e MARKER="$COPIED_MARKER" "$ALPINE" sh -ec '
+    rm -rf /to/.migrate-tmp
+    mkdir /to/.migrate-tmp
+    cp -a /from/. /to/.migrate-tmp/
+    # Only empty folders can be here (checked above); the copied data replaces them
+    find /to -mindepth 1 -maxdepth 1 ! -name .migrate-tmp -exec rm -rf {} +
+    find /to/.migrate-tmp -mindepth 1 -maxdepth 1 -exec mv {} /to/ \;
+    rmdir /to/.migrate-tmp
+    chown "$(stat -c %u:%g /from)" /to
+    chmod "$(stat -c %a /from)" /to
+    touch "/to/$MARKER"'
   log "copied $old -> $new"
 }
 copy_volume "${OLD_PROJECT}_homeflix-db"      nextflix_db
@@ -111,7 +132,7 @@ copy_volume "${OLD_PROJECT}_redis-data"       nextflix_redis-data
 # --- 6. Rename the SQLite files and fix ownership ----------------------------
 log "step 6: renaming homeflix.db -> nextflix.db"
 if volume_exists nextflix_db; then
-  docker run --rm -v nextflix_db:/data alpine sh -c '
+  docker run --rm -v nextflix_db:/data "$ALPINE" sh -c '
     cd /data
     if [ -f homeflix.db ] && [ ! -e nextflix.db ]; then
       for s in "" -wal -shm; do
