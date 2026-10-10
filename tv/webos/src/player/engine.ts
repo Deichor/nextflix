@@ -192,6 +192,8 @@ export class PlayerEngine {
   // current item
   private meta: StreamMeta;
   private startAt?: number;
+  // Where the item starts (saved progress included): a retry before any position was shown resumes here
+  private resumePos = 0;
   private given?: StreamSource;
   private seasons: SeasonInfo[];
 
@@ -335,6 +337,17 @@ export class PlayerEngine {
 
   private set(patch: Partial<PlayerState>) {
     if (this.destroyed) return;
+    // Every publish re-renders the whole player (slow on TV CPUs): nothing changed, nothing published
+    const cur = this.state as any;
+    const p = patch as any;
+    let changed = false;
+    for (const k in p) {
+      if (cur[k] !== p[k]) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) return;
     this.state = { ...this.state, ...patch };
     this.listeners.forEach(fn => fn());
   }
@@ -401,9 +414,13 @@ export class PlayerEngine {
       return ms < 12000 ? 'player.searchingIndexers' : 'player.checkingSources';
     };
     this.set({ phase: 'resolving', resolveElapsed: 0, stage: stage(0), error: null, unreleased: null, fatal: null });
+    // Published on a new stage or second (and once past 300 ms, when the status text shows), not every tick
     this.resolveTick = setInterval(() => {
       const ms = Date.now() - t0;
-      this.set({ resolveElapsed: ms, stage: stage(ms) });
+      const prev = this.state.resolveElapsed;
+      if (stage(ms) !== this.state.stage || Math.floor(ms / 1000) !== Math.floor(prev / 1000) || (prev < 300 && ms >= 300)) {
+        this.set({ resolveElapsed: ms, stage: stage(ms) });
+      }
     }, 250);
 
     const m = this.meta;
@@ -426,6 +443,7 @@ export class PlayerEngine {
           }
         }
       }
+      this.resumePos = start;
       if (saved) {
         // The same TorBox / swarm decision as resolve: TorBox when it has the release cached, the
         // torrent when its swarm keeps up at the resume position, else a fresh resolve without it
@@ -771,15 +789,23 @@ export class PlayerEngine {
 
   // ---- video events ----
 
+  private videoListeners: [string, () => void][] = [];
+
+  /** Video events; none runs after destroy() (stopStream and React's unmount pause the element later) */
   private bindVideo() {
     const v = this.video;
-    v.addEventListener('play', () => {
+    const on = (type: string, fn: () => void) => {
+      const h = () => { if (!this.destroyed) fn(); };
+      this.videoListeners.push([type, h]);
+      v.addEventListener(type, h);
+    };
+    on('play', () => {
       this.set({ playing: true });
       clearInterval(this.keepAliveTimer);
       if (this.pausedAt && Date.now() - this.pausedAt >= LONG_PAUSE_MS) this.resumedAt = Date.now();
       this.pausedAt = 0;
     });
-    v.addEventListener('pause', () => {
+    on('pause', () => {
       if (this.hold) return; // paused by the buffer hold, not the viewer
       this.set({ playing: false });
       this.persist();
@@ -788,7 +814,7 @@ export class PlayerEngine {
       clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = setInterval(() => { if (this.hash) keepSourceAlive(this.hash, this.index); }, KEEPALIVE_MS);
     });
-    v.addEventListener('waiting', () => {
+    on('waiting', () => {
       // A real stall (still waiting with under 1 s buffered after MIN_STALL_MS) with a faster source
       // in hand: switch to it instead of waiting the stall out
       clearTimeout(this.realStallTimer);
@@ -806,7 +832,7 @@ export class PlayerEngine {
       if (this.hasPlayed) this.beginStall(false);
       if (this.hasPlayed) this.confirmStall();
     });
-    v.addEventListener('playing', () => {
+    on('playing', () => {
       clearTimeout(this.stallConfirmTimer);
       this.set({ buffering: false, reconnecting: false });
       this.disarmStall();
@@ -816,14 +842,15 @@ export class PlayerEngine {
       clearTimeout(this.stallResetTimer);
       this.stallResetTimer = setTimeout(() => { this.recoveries = 0; }, 60000);
     });
-    v.addEventListener('timeupdate', () => this.onTime());
-    v.addEventListener('ended', () => this.onEnded());
-    v.addEventListener('error', () => this.onError());
+    on('timeupdate', () => this.onTime());
+    on('ended', () => this.onEnded());
+    on('error', () => this.onError());
   }
 
   private onTime() {
     const position = this.positionNow();
-    this.set({ position });
+    // timeupdate fires ~4 times a second; the UI shows whole seconds (exact time: positionNow)
+    if (Math.floor(position) !== Math.floor(this.state.position)) this.set({ position });
     const m = this.meta;
     const next = this.state.next;
     if (m.media_type === 'tv' && next && !this.nextWarm && nextWarmDue(position, this.state.duration)) {
@@ -1544,13 +1571,15 @@ export class PlayerEngine {
   }
 
   retry() {
+    // The last shown position (positionNow keeps an old offset without a stream), else where the item was to start
+    const at = this.state.position > 0 ? this.state.position : this.resumePos;
     if (this.state.phase === 'error') {
-      this.startItem({ refresh: true });
+      this.startItem({ refresh: true, startAt: at });
       return;
     }
     this.set({ fatal: null });
     this.recoveries = 0;
-    if (!this.sourceFailed(this.positionNow(), false)) this.restartAt(this.positionNow(), 'retry');
+    if (!this.sourceFailed(at, false)) this.restartAt(at, 'retry');
   }
 
   // ---- subtitles ----
@@ -1730,7 +1759,10 @@ export class PlayerEngine {
     this.autoRefreshes = 0;
     this.avoid = [];
     this.lengthRetries = 0;
-    this.set({ meta: this.meta, ended: false });
+    // Each episode may switch up once
+    this.upgraded = false;
+    this.resumePos = 0;
+    this.set({ meta: this.meta, ended: false, position: 0 });
     this.updateNext();
     this.fillEpisodeInfo();
     this.startItem({});
@@ -1769,6 +1801,8 @@ export class PlayerEngine {
     const duration = this.state.duration;
     // duration is reset while a new source opens, so a late pause event never saves a mix of two sources
     if (this.destroyed || !this.pid || !this.hash || duration <= 0 || this.state.phase !== 'ready') return;
+    // Nothing played from this source yet: the saved progress stays (a retry or failed start never overwrites it)
+    if (!opts.finished && !this.everPlayed) return;
     const pos = opts.finished ? duration : this.exact ? Math.min(duration, this.positionNow()) : this.offset;
     if (pos < 10) return;
     saveProgress({
@@ -1811,6 +1845,12 @@ export class PlayerEngine {
     clearInterval(this.keepAliveTimer);
     if (this.countdownTimer) clearInterval(this.countdownTimer);
     clearTimeout(this.toastTimer);
+    clearTimeout(this.realStallTimer);
+    clearTimeout(this.stallConfirmTimer);
+    clearTimeout(this.seekRetry);
+    clearTimeout(this.cueTimer);
+    this.videoListeners.forEach(([type, h]) => this.video.removeEventListener(type, h));
+    this.videoListeners = [];
     document.removeEventListener('visibilitychange', this.onVisibility);
     releaseTitle(paramsOf(this.meta));
     if (this.nextWarm) releaseTitle(this.nextWarm);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useI18n } from '../lib/i18n';
 import { pauseInfo, type PauseInfo } from '../lib/catalog';
 import { episodeLabel, type StreamMeta } from '../lib/stream';
@@ -8,15 +8,26 @@ export default function PauseScreen({ meta, shown }: { meta: StreamMeta; shown: 
   const i18n = useI18n();
   const { t, locale } = i18n;
   const [info, setInfo] = useState<PauseInfo | null>(null);
-  const key = `${meta.media_type}|${meta.tmdb_id}|${meta.season || 0}|${meta.episode || 0}`;
+  const key = `${meta.media_type}|${meta.tmdb_id}|${meta.season || 0}|${meta.episode || 0}|${locale}`;
+  // Key whose info is loaded or loading ('' = not yet)
+  const loadedRef = useRef('');
 
   useEffect(() => {
-    let cancelled = false;
     setInfo(null);
-    pauseInfo(meta).then(i => { if (!cancelled) setInfo(i); }).catch(() => {});
-    return () => { cancelled = true; };
+    loadedRef.current = '';
+  }, [key]);
+
+  // Loaded only once the pause screen first shows; a failed load is tried again on the next pause
+  useEffect(() => {
+    if (!shown || loadedRef.current === key) return;
+    loadedRef.current = key;
+    pauseInfo(meta).then(i => {
+      if (loadedRef.current !== key) return;
+      if (i) setInfo(i);
+      else loadedRef.current = '';
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, locale]);
+  }, [key, shown]);
 
   const isTv = meta.media_type === 'tv';
   const episodeTitle = meta.episode_title || info?.episodeTitle || '';

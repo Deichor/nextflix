@@ -1,6 +1,6 @@
 # Shared by the scripts in this folder (sourced, not run)
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODE_IMAGE="node:22-bookworm"
+NODE_IMAGE="node:24-bookworm"
 ARES_IMAGE="nextflix-ares:3.2.6"
 # node_modules lives in a named volume: fast installs and nothing on the Windows drive
 NODE_VOLUMES=(-v "$DIR:/app" -v nextflix-tv-node-modules:/app/node_modules -v nextflix-npm-cache:/root/.npm -w /app)

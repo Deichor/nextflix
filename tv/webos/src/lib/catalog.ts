@@ -193,6 +193,8 @@ export interface Details {
   backdrop: string;
   vote: number;
   runtime: number;
+  /** TV: typical episode length in minutes (0 when unknown) */
+  episodeRunTime: number;
   genres: string[];
   cast: string[];
   directors: string[];
@@ -233,6 +235,7 @@ export async function details(id: number, type: MediaType): Promise<Details> {
     backdrop: d.backdrop_path || '',
     vote: Number(d.vote_average) || 0,
     runtime: isTv ? 0 : Number(d.runtime) || 0,
+    episodeRunTime: isTv && Array.isArray(d.episode_run_time) ? Number(d.episode_run_time[0]) || 0 : 0,
     genres: (d.genres || []).map((g: any) => g?.name).filter(Boolean),
     cast: (d.credits?.cast || []).slice(0, 6).map((p: any) => p?.name).filter(Boolean),
     directors: crew.filter(p => p?.job === 'Director').map(p => p.name),
@@ -271,38 +274,42 @@ export interface EpisodeInfo {
   air_date: string;
 }
 
-export async function seasonEpisodes(tvId: number, season: SeasonInfo): Promise<EpisodeInfo[]> {
-  try {
-    const data = await getJson(`/api/tmdb/tv/${tvId}/season/${season.season_number}`);
-    const eps: any[] = Array.isArray(data?.episodes) ? data.episodes : [];
-    if (eps.length > 0) {
-      return eps.map(e => ({
-        episode_number: e.episode_number,
-        season_number: e.season_number ?? season.season_number,
-        name: e.name || `Episode ${e.episode_number}`,
-        overview: e.overview || '',
-        still_path: e.still_path || '',
-        runtime: e.runtime || 0,
-        air_date: e.air_date || '',
-      }));
-    }
-  } catch {
-    /* numbered placeholders below */
-  }
-  return Array.from({ length: season.episode_count }, (_, i) => ({
+/** Numbered entries without names (shown as "Episode N" in the UI language). */
+export const placeholderEpisodes = (season: SeasonInfo): EpisodeInfo[] =>
+  Array.from({ length: season.episode_count }, (_, i) => ({
     episode_number: i + 1,
     season_number: season.season_number,
-    name: `Episode ${i + 1}`,
+    name: '',
     overview: '',
     still_path: '',
     runtime: 0,
     air_date: '',
   }));
+
+/** Episodes of a season; throws when the request fails (callers must not cache a failure). */
+export async function loadSeasonEpisodes(tvId: number, season: SeasonInfo): Promise<EpisodeInfo[]> {
+  const data = await getJson(`/api/tmdb/tv/${tvId}/season/${season.season_number}`);
+  const eps: any[] = Array.isArray(data?.episodes) ? data.episodes : [];
+  if (eps.length === 0) return placeholderEpisodes(season);
+  return eps.map(e => ({
+    episode_number: e.episode_number,
+    season_number: e.season_number ?? season.season_number,
+    name: e.name || '',
+    overview: e.overview || '',
+    still_path: e.still_path || '',
+    runtime: e.runtime || 0,
+    air_date: e.air_date || '',
+  }));
 }
 
-/** TMDB names untitled episodes "Episode 3" (en-US) or "3. Bölüm" (tr-TR). */
+/** Like loadSeasonEpisodes, but numbered placeholders on failure. */
+export function seasonEpisodes(tvId: number, season: SeasonInfo): Promise<EpisodeInfo[]> {
+  return loadSeasonEpisodes(tvId, season).catch(() => placeholderEpisodes(season));
+}
+
+/** No name, or TMDB's own for untitled episodes: "Episode 3" (en-US) or "3. Bölüm" (tr-TR). */
 export const isPlaceholderEpisodeName = (ep: Pick<EpisodeInfo, 'name' | 'episode_number'>) =>
-  ep.name === `Episode ${ep.episode_number}` || ep.name === `${ep.episode_number}. Bölüm`;
+  !ep.name || ep.name === `Episode ${ep.episode_number}` || ep.name === `${ep.episode_number}. Bölüm`;
 
 export async function tvSeasons(tvId: number): Promise<SeasonInfo[]> {
   try {
@@ -322,19 +329,35 @@ export interface PauseInfo {
   episodeTitle: string;
 }
 
-/** Text of the player's pause screen: the episode's (else the show's) or the film's overview. */
-export function pauseInfo(m: { tmdb_id: number; media_type: MediaType; season?: number; episode?: number }): Promise<PauseInfo> {
+/**
+ * Text of the player's pause screen: the episode's (else the show's) or the film's overview.
+ * null when nothing could be loaded; only complete answers are cached, so the next pause asks again.
+ */
+export function pauseInfo(m: { tmdb_id: number; media_type: MediaType; season?: number; episode?: number }): Promise<PauseInfo | null> {
   const key = scoped(`pause|${m.media_type}|${m.tmdb_id}|${m.season || 0}|${m.episode || 0}`);
-  return cached(key, 6 * 60 * 60 * 1000, async () => {
+  const load = async (): Promise<{ info: PauseInfo | null; complete: boolean }> => {
     if (m.media_type === 'tv' && m.season && m.episode) {
-      const eps = await seasonEpisodes(m.tmdb_id, { season_number: m.season, episode_count: 0 });
+      let seasonOk = true;
+      const [eps, d] = await Promise.all([
+        loadSeasonEpisodes(m.tmdb_id, { season_number: m.season, episode_count: 0 })
+          .catch(() => { seasonOk = false; return [] as EpisodeInfo[]; }),
+        details(m.tmdb_id, 'tv').catch(() => null),
+      ]);
       const ep = eps.find(e => e.episode_number === m.episode);
-      const episodeTitle = ep && !isPlaceholderEpisodeName(ep) ? ep.name : '';
-      if (ep?.overview) return { overview: ep.overview, runtime: ep.runtime, episodeTitle };
-      const d = await details(m.tmdb_id, 'tv').catch(() => null);
-      return { overview: d?.overview || '', runtime: ep?.runtime || 0, episodeTitle };
+      if (!ep?.overview && !d) return { info: null, complete: false };
+      return {
+        info: {
+          overview: ep?.overview || d?.overview || '',
+          year: d ? yearOf(d.date) : undefined,
+          runtime: ep?.runtime || d?.episodeRunTime || 0,
+          episodeTitle: ep && !isPlaceholderEpisodeName(ep) ? ep.name : '',
+        },
+        complete: seasonOk && !!d,
+      };
     }
-    const d = await details(m.tmdb_id, m.media_type);
-    return { overview: d.overview, year: yearOf(d.date), runtime: d.runtime, episodeTitle: '' };
-  });
+    const d = await details(m.tmdb_id, m.media_type).catch(() => null);
+    if (!d) return { info: null, complete: false };
+    return { info: { overview: d.overview, year: yearOf(d.date), runtime: d.runtime, episodeTitle: '' }, complete: true };
+  };
+  return cached(key, 6 * 60 * 60 * 1000, load, r => r.complete).then(r => r.info, () => null);
 }

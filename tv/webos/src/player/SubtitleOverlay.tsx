@@ -41,6 +41,8 @@ function renderCue(text: string, key: number): React.ReactNode {
 }
 
 const SCRIM_HOLD_MS = 1500;
+// Cue lookup rate (~10 Hz): close enough for subtitles, far cheaper than every frame on a TV
+const CUE_CHECK_MS = 100;
 
 /** Static subtitle look for previews (Settings): the sample text with the profile's style. */
 export function SubtitleSample({ text }: { text: string }) {
@@ -56,7 +58,7 @@ export function SubtitleSample({ text }: { text: string }) {
 }
 
 // Same timing rule as the web player: the cue for (stream offset + video time - delay),
-// looked up every frame so it stays right across stream restarts.
+// looked up every CUE_CHECK_MS so it stays right across stream restarts.
 // `sample` shows while no cue does (live preview of the appearance settings).
 export default function SubtitleOverlay({ cues, time, raised, sample, previewing }: {
   cues: Cue[];
@@ -72,7 +74,6 @@ export default function SubtitleOverlay({ cues, time, raised, sample, previewing
 
   useEffect(() => {
     if (cues.length === 0) { setShown([]); return; }
-    let raf = 0;
     let lastKey = '';
     const tick = () => {
       const now = activeCues(cues, time());
@@ -81,10 +82,10 @@ export default function SubtitleOverlay({ cues, time, raised, sample, previewing
         lastKey = key;
         setShown(now);
       }
-      raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    tick();
+    const id = setInterval(tick, CUE_CHECK_MS);
+    return () => clearInterval(id);
   }, [cues, time]);
 
   // The dimmed band stays through short gaps between cues instead of blinking

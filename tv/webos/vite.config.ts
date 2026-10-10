@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
-import pkg from './package.json';
+import pkg from './package.json' with { type: 'json' };
 
 // webOS starts packaged apps from file://, where module scripts and `crossorigin` fail to load.
 // The build is one classic IIFE script, loaded with `defer` at the end of <body>.
@@ -36,10 +36,12 @@ export default defineConfig({
     modulePreload: false,
     cssCodeSplit: false,
     sourcemap: false,
-    rollupOptions: {
+    // One script on purpose (see classicScript)
+    chunkSizeWarningLimit: 1024,
+    rolldownOptions: {
       output: {
         format: 'iife',
-        inlineDynamicImports: true,
+        codeSplitting: false,
       },
     },
   },

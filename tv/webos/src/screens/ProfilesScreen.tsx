@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Plus, Settings } from 'lucide-react';
 import Avatar from '../components/Avatar';
 import Spinner from '../components/Spinner';
@@ -6,6 +6,7 @@ import { profiles as loadProfiles } from '../lib/catalog';
 import { useT } from '../lib/i18n';
 import { MAX_PROFILES, getProfileId, type Profile } from '../lib/profile';
 import { useFocusRestore, useRouter } from '../nav/router';
+import { focusById, focusDefault } from '../nav/spatial';
 
 interface ProfilesScreenProps {
   onPick: (p: Profile) => void;
@@ -35,6 +36,20 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
     : list[0] ? `profile-${list[0].id}`
     : canAdd ? 'profile-add' : 'profiles-retry';
   useFocusRestore(list !== null, fallback);
+
+  // Retry removes the focused button: focus the first profile (or Retry again) once the answer is in
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!refocus.current || list === null) return;
+    const raf = requestAnimationFrame(() => {
+      refocus.current = false;
+      // The viewer already moved on (e.g. to "Change server")
+      const cur = document.activeElement as HTMLElement | null;
+      if (cur && cur !== document.body && document.body.contains(cur) && cur.hasAttribute('data-nav')) return;
+      if (!focusById(fallback)) focusDefault();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [list, fallback]);
 
   return (
     <div className="screen profiles-screen">
@@ -68,7 +83,7 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
       {!!error && (
         <div className="profiles-error">
           <p>{t('profiles.couldNotReach', { error })}</p>
-          <button type="button" className="btn btn-primary" data-nav data-nav-id="profiles-retry" onClick={() => { setList(null); setAttempt(a => a + 1); }}>
+          <button type="button" className="btn btn-primary" data-nav data-nav-id="profiles-retry" onClick={() => { refocus.current = true; setList(null); setAttempt(a => a + 1); }}>
             {t('common.retry')}
           </button>
         </div>

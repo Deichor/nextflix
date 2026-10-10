@@ -75,25 +75,44 @@ export function img(path: string | null | undefined, size: string): string {
 
 // ---- In-memory answer cache: screens that remount (Back from detail) paint at once ----
 
-const cache = new Map<string, { at: number; data: unknown }>();
+// Oldest insert first; `ttl` is the one the entry was stored with (pruned once past it)
+const cache = new Map<string, { at: number; ttl: number; data: unknown }>();
 const inflight = new Map<string, Promise<unknown>>();
+const CACHE_MAX = 150;
 
 /** Cache key that includes the profile and language (answers depend on both). */
 export const scoped = (key: string) => `${getProfileId() ?? 0}|${profileLocale()}|${key}`;
 
 export function peek<T>(key: string, ttlMs: number): T | undefined {
   const hit = cache.get(key);
-  return hit && Date.now() - hit.at < ttlMs ? (hit.data as T) : undefined;
+  if (!hit) return undefined;
+  const age = Date.now() - hit.at;
+  if (age >= hit.ttl) {
+    cache.delete(key);
+    return undefined;
+  }
+  return age < ttlMs ? (hit.data as T) : undefined;
 }
 
-export function cached<T>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T> {
+function store(key: string, ttl: number, data: unknown) {
+  const now = Date.now();
+  const expired: string[] = [];
+  cache.forEach((v, k) => { if (now - v.at >= v.ttl) expired.push(k); });
+  expired.forEach(k => cache.delete(k));
+  cache.delete(key);
+  cache.set(key, { at: now, ttl, data });
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value as string);
+}
+
+/** `keep` false: the answer is returned but not cached (the next call loads again). */
+export function cached<T>(key: string, ttlMs: number, load: () => Promise<T>, keep?: (data: T) => boolean): Promise<T> {
   const hit = peek<T>(key, ttlMs);
   if (hit !== undefined) return Promise.resolve(hit);
   const pending = inflight.get(key);
   if (pending) return pending as Promise<T>;
   const p = load()
     .then(data => {
-      cache.set(key, { at: Date.now(), data });
+      if (!keep || keep(data)) store(key, ttlMs, data);
       return data;
     })
     .finally(() => inflight.delete(key));

@@ -79,8 +79,18 @@ export default function SearchScreen() {
   const filtered = hasFilters(filters);
   const browsing = !q && filtered;
   const wanted = `${q}#${filtersKey(filters)}`;
+  const wantedRef = useRef(wanted);
+  wantedRef.current = wanted;
+  const moreCtrlRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { moreCtrlRef.current?.abort(); }, []);
 
   useEffect(() => {
+    // A pending next page belongs to the old query
+    if (moreCtrlRef.current) {
+      moreCtrlRef.current.abort();
+      moreCtrlRef.current = null;
+      moreRef.current = false;
+    }
     if (!q && !filtered) { setResults(null); setDidYouMean(''); setLoading(false); return; }
     if (wanted === resultsFor && results) return;
     const ctrl = new AbortController();
@@ -115,15 +125,24 @@ export default function SearchScreen() {
     if (!browsing || moreRef.current || !results || pages.page >= pages.total || resultsFor !== wanted) return;
     moreRef.current = true;
     const next = pages.page + 1;
-    discover(filters, '', next)
+    const forWanted = wanted;
+    const ctrl = new AbortController();
+    moreCtrlRef.current = ctrl;
+    discover(filters, '', next, ctrl.signal)
       .then(r => {
+        // A page of older filters must not land in the new results
+        if (ctrl.signal.aborted || wantedRef.current !== forWanted) return;
         const seen: Record<string, boolean> = {};
         results.forEach(it => { seen[it.key] = true; });
         setResults(results.concat(r.items.filter(it => !seen[it.key])));
         setPages({ page: next, total: r.totalPages });
       })
       .catch(() => {})
-      .finally(() => { moreRef.current = false; });
+      .finally(() => {
+        if (moreCtrlRef.current !== ctrl) return;
+        moreCtrlRef.current = null;
+        moreRef.current = false;
+      });
   };
 
   const setType = (type: TypeFilter) => setFilters({

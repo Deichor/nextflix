@@ -186,7 +186,15 @@ export interface Cue {
   text: string;
 }
 
+// Parsed subtitle files, least recently used first (a few files only: they can be large)
 const cueCache = new Map<string, Promise<Cue[]>>();
+const CUE_CACHE_MAX = 5;
+
+function rememberCues(id: string, cues: Cue[]) {
+  cueCache.delete(id);
+  cueCache.set(id, Promise.resolve(cues));
+  while (cueCache.size > CUE_CACHE_MAX) cueCache.delete(cueCache.keys().next().value as string);
+}
 
 // The server marks a partial live answer with this note (more cues follow while the file plays)
 const PARTIAL_NOTE = 'NOTE nextflix-partial';
@@ -207,14 +215,19 @@ export function fetchCues(id: string): Promise<Cue[]> {
  */
 export function fetchCueFile(id: string, at?: number): Promise<{ cues: Cue[]; partial: boolean }> {
   const hit = cueCache.get(id);
-  if (hit) return hit.then(cues => ({ cues, partial: false }));
+  if (hit) {
+    // Most recently used goes last
+    cueCache.delete(id);
+    cueCache.set(id, hit);
+    return hit.then(cues => ({ cues, partial: false }));
+  }
   const t = at !== undefined && at > 0 ? `&t=${Math.floor(at)}` : '';
   const req = request(`/api/subtitles/file?id=${encodeURIComponent(id)}${t}`)
     .then(res => (res.ok ? res.text() : ''))
     .then(text => ({ cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0 }))
     .catch(() => ({ cues: [] as Cue[], partial: false }));
   req.then(f => {
-    if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve(f.cues));
+    if (f.cues.length > 0 && !f.partial) rememberCues(id, f.cues);
   });
   return req;
 }

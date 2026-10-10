@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { CalendarClock, Clapperboard, Heart, Play, ThumbsDown, ThumbsUp } from 'lucide-react';
 import DoubleThumbsUp from '../components/DoubleThumbsUp';
 import Row, { CardImage } from '../components/Row';
@@ -11,7 +11,7 @@ import { useEntry, useEntryState, useFocusRestore, useRouter } from '../nav/rout
 import { usePlayer } from '../nav/player';
 import { focusById } from '../nav/spatial';
 import {
-  details, isPlaceholderEpisodeName, matchPercent, movieLogo, related, seasonEpisodes, yearOf,
+  details, isPlaceholderEpisodeName, loadSeasonEpisodes, matchPercent, movieLogo, placeholderEpisodes, related, yearOf,
   type Details, type EpisodeInfo, type MediaType,
 } from '../lib/catalog';
 import {
@@ -187,9 +187,11 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
   const activeSeason = d?.seasons.find(s => s.season_number === (season || plan?.ep?.season)) || d?.seasons[0];
   const episodes = useQuery(
     d && activeSeason ? scoped(`season-${d.id}-${activeSeason.season_number}`) : null,
-    () => seasonEpisodes(id, activeSeason!),
+    () => loadSeasonEpisodes(id, activeSeason!),
     6 * 60 * 60 * 1000,
   );
+  // A failed load is not cached: numbered entries for now, the next visit asks again
+  const episodeList = episodes.data ?? (episodes.failed && activeSeason ? placeholderEpisodes(activeSeason) : undefined);
   const seasonTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(seasonTimer.current), []);
 
@@ -238,7 +240,7 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
   const nextLabel = !resume && d.type === 'tv' && plan?.ep && entries && entries.length > 0 ? episodeLabel(locale, plan.ep.season, plan.ep.episode) : '';
   const left = resume ? Math.max(1, Math.round((resume.duration - resume.position) / 60)) : 0;
 
-  const actions: { key: string; label: MessageKey; active: boolean; onClick: () => void; icon: JSX.Element }[] = [
+  const actions: { key: string; label: MessageKey; active: boolean; onClick: () => void; icon: ReactElement }[] = [
     {
       key: 'favorite', label: rating.favorite ? 'rating.unfavorite' : 'rating.favorite', active: rating.favorite,
       onClick: () => saveRating({ favorite: !rating.favorite }),
@@ -368,8 +370,8 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
               </div>
               <div className="row-scroller" data-scroll-x="start" data-scroll-pad="8">
                 <div key={activeSeason?.season_number} className="row-track" data-scroll-content data-nav-group={`episodes-${activeSeason?.season_number}`}>
-                  {!episodes.data && [0, 1, 2, 3].map(i => <div key={i} className="episode-card card-skeleton" />)}
-                  {episodes.data && episodes.data.map(ep => {
+                  {!episodeList && [0, 1, 2, 3].map(i => <div key={i} className="episode-card card-skeleton" />)}
+                  {episodeList && episodeList.map(ep => {
                     const p = entries ? findProgress(entries, ep.season_number, ep.episode_number) : null;
                     const future = isFuture(ep.air_date);
                     return (
@@ -385,7 +387,7 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
                           <CardImage src={img(ep.still_path || d.backdrop, 'w300')} />
                           {!!p && p.position > 0 && <span className="card-progress"><span style={{ width: `${progressPercent(p)}%` }} /></span>}
                         </span>
-                        <span className="episode-name">{isPlaceholderEpisodeName(ep) ? ep.name : `${ep.episode_number}. ${ep.name}`}</span>
+                        <span className="episode-name">{isPlaceholderEpisodeName(ep) ? t('detail.episodeN', { n: ep.episode_number }) : `${ep.episode_number}. ${ep.name}`}</span>
                         <span className="episode-meta">
                           {future ? t('availability.airsOn', { date: i18n.date(ep.air_date) }) : ep.runtime > 0 ? i18n.duration(ep.runtime) : ''}
                         </span>

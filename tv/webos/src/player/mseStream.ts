@@ -90,10 +90,22 @@ function sameFamily(a: string, b: string): boolean {
   return families(a) === families(b);
 }
 
+// Removed by hand: Chromium < 55 reads { once: true } as capture and never drops the listener
 const settled = (sb: SourceBuffer) => new Promise<void>(resolve => {
-  if (!sb.updating) resolve();
-  else sb.addEventListener('updateend', () => resolve(), { once: true });
+  if (!sb.updating) {
+    resolve();
+    return;
+  }
+  const done = () => {
+    sb.removeEventListener('updateend', done);
+    resolve();
+  };
+  sb.addEventListener('updateend', done);
 });
+
+// Native abortable fetch (Chromium 66+). The polyfill of older webOS only rejects its own promise and
+// lets the request run on, so there the feed awaits the real one and cancels its body (Feed.run).
+const nativeAbort = typeof Request === 'function' && Object.prototype.hasOwnProperty.call(Request.prototype, 'signal');
 
 /** One HTTP response of a /play stream, read into a queue of chunks (the init segment first) */
 class Feed {
@@ -173,12 +185,16 @@ class Feed {
   private async run() {
     let res: Response;
     try {
-      res = await fetch(this.url, { signal: this.ctrl.signal });
+      res = await fetch(this.url, nativeAbort ? { signal: this.ctrl.signal } : {});
     } catch (e: any) {
       this.fail({ message: String(e?.message || e) });
       return;
     }
-    if (this.stopped) return;
+    if (this.stopped) {
+      // Stopped before the response came: close the connection
+      if (res.body) res.body.cancel().catch(() => {});
+      return;
+    }
     if (!res.ok || !res.body) {
       this.fail({ status: res.status, message: `HTTP ${res.status}` });
       return;
