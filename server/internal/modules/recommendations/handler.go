@@ -34,6 +34,10 @@ func (h handler) get(c *gin.Context) {
 		return
 	}
 	resp, err := h.s.For(id, httpserver.Lang(c))
+	if errors.Is(err, ErrUnknownProfile) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Unknown profile"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recommendations"})
 		return
@@ -50,6 +54,8 @@ func (h handler) surprise(c *gin.Context) {
 	}
 	resp, err := h.s.Surprise(id, httpserver.Lang(c), ParseExclude(c.Query("exclude")))
 	switch {
+	case errors.Is(err, ErrUnknownProfile):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Unknown profile"})
 	case errors.Is(err, ErrNoSurprise):
 		c.JSON(http.StatusNotFound, gin.H{"error": "Nothing to suggest right now"})
 	case err != nil:

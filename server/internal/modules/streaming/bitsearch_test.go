@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,17 +163,34 @@ func bitsearchServer(t *testing.T, page string, hits *atomic.Int32) *httptest.Se
 	return srv
 }
 
+// bsNamedHosts serves every host name from one test server (dispatch on r.Host), so tests
+// can use real looking names like bitsearch.to.
+func bsNamedHosts(t *testing.T, b *bitsearch, h http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().String()
+	b.client = &http.Client{Timeout: bsRequestTime, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}}
+}
+
 func TestBitsearchSearchCachesAndPaces(t *testing.T) {
-	var hits atomic.Int32
-	srv := bitsearchServer(t, readFixture(t, "bitsearch_kardesler.html"), &hits)
+	page := readFixture(t, "bitsearch_kardesler.html")
+	var hits, redirects atomic.Int32
+	b := newBitsearch("http://bitsearch.to", "")
 	// The configured URL redirects like bitsearch.to -> bitsearch.eu
-	var redirects atomic.Int32
-	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		redirects.Add(1)
-		http.Redirect(w, r, srv.URL+r.URL.RequestURI(), http.StatusMovedPermanently)
-	}))
-	defer old.Close()
-	b := newBitsearch(old.URL, "")
+	bsNamedHosts(t, b, func(w http.ResponseWriter, r *http.Request) {
+		if r.Host == "bitsearch.to" {
+			redirects.Add(1)
+			http.Redirect(w, r, "http://bitsearch.eu"+r.URL.RequestURI(), http.StatusMovedPermanently)
+			return
+		}
+		hits.Add(1)
+		w.Write([]byte(page))
+	})
 
 	ctx := context.Background()
 	start := time.Now()
@@ -192,6 +211,111 @@ func TestBitsearchSearchCachesAndPaces(t *testing.T) {
 	}
 	if hits.Load() != 2 || redirects.Load() != 1 {
 		t.Fatalf("%d requests, %d redirects", hits.Load(), redirects.Load())
+	}
+}
+
+// A redirect is only followed for good to a Bitsearch host that answered a result page;
+// block pages, errors and other hosts leave the base as it was.
+func TestBitsearchFollowsOnlyRealPages(t *testing.T) {
+	page := readFixture(t, "bitsearch_kardesler.html")
+	for _, tc := range []struct {
+		name, target string
+		status       int
+		body         string
+		want         string
+	}{
+		{"other host with results", "http://blocked.example", 200, page, "http://bitsearch.to"},
+		{"bitsearch host without results", "http://bitsearch.eu", 200, "<html>Blocked by your ISP</html>", "http://bitsearch.to"},
+		{"bitsearch host failing", "http://bitsearch.eu", 503, "down", "http://bitsearch.to"},
+		{"bitsearch host with results", "http://bitsearch.eu", 200, page, "http://bitsearch.eu"},
+	} {
+		b := newBitsearch("http://bitsearch.to", "")
+		bsNamedHosts(t, b, func(w http.ResponseWriter, r *http.Request) {
+			if r.Host == "bitsearch.to" {
+				http.Redirect(w, r, tc.target+r.URL.RequestURI(), http.StatusFound)
+				return
+			}
+			w.WriteHeader(tc.status)
+			w.Write([]byte(tc.body))
+		})
+		b.Search(context.Background(), "Kardesler Arastirma")
+		if b.base != tc.want {
+			t.Errorf("%s: base %s, want %s", tc.name, b.base, tc.want)
+		}
+	}
+}
+
+// Cloudflare cookies go only to the host they were solved for.
+func TestBitsearchCookiesBoundToHost(t *testing.T) {
+	b := newBitsearch("http://bitsearch.to", "")
+	var mu sync.Mutex
+	got := map[string]string{}
+	bsNamedHosts(t, b, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got[r.Host] = r.Header.Get("Cookie")
+		mu.Unlock()
+		w.Write([]byte("<html></html>"))
+	})
+	b.cfCookies, b.cfHost, b.cfUA, b.cfExpires = "cf_clearance=x", "bitsearch.to", "UA", time.Now().Add(time.Hour)
+	for _, u := range []string{"http://bitsearch.to/search?q=a", "http://other.example/search?q=a"} {
+		if _, _, err := b.get(context.Background(), u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got["bitsearch.to"] != "cf_clearance=x" || got["other.example"] != "" {
+		t.Fatalf("cookies sent: %q", got)
+	}
+}
+
+// The shared request does not run on the first caller's context: when it gives up, the
+// others still get the answer, and nobody's leaving pauses Bitsearch.
+func TestBitsearchSharedRequestOutlivesFirstCaller(t *testing.T) {
+	page := readFixture(t, "bitsearch_kardesler.html")
+	var hits atomic.Int32
+	b := newBitsearch("http://bitsearch.to", "")
+	bsNamedHosts(t, b, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		select {
+		case <-time.After(150 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Write([]byte(page))
+	})
+	first, cancel := context.WithCancel(context.Background())
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := b.Search(first, "Kardesler Arastirma")
+		firstErr <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	second := make(chan int, 1)
+	go func() {
+		res, _ := b.Search(context.Background(), "Kardesler Arastirma")
+		second <- len(res)
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	if err := <-firstErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: %v", err)
+	}
+	if n := <-second; n != 1 || hits.Load() != 1 {
+		t.Fatalf("second caller got %d results after %d requests", n, hits.Load())
+	}
+
+	// Every caller leaves: the request stops, and the next search is not paused
+	alone, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := b.Search(alone, "other"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lone caller: %v", err)
+	}
+	if res, err := b.Search(context.Background(), "other"); err != nil || len(res) != 1 {
+		t.Fatalf("after an abandoned request: %d results, %v", len(res), err)
 	}
 }
 

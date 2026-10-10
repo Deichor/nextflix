@@ -5,6 +5,18 @@ import "time"
 const (
 	continueWatchingLimit = 20
 	finishedRatio         = 0.92
+
+	// Next-episode lookups (TMDB) per Continue Watching request
+	maxNextLookups    = 12
+	maxNextSteps      = 5 // finished episodes skipped in a row
+	nextLookupWorkers = 4
+	nextLookupTimeout = 4 * time.Second
+
+	// Input caps: real values are far shorter
+	maxTitleLen  = 500  // runes, title and episode_title
+	maxPathLen   = 256  // bytes, poster/backdrop path
+	maxMagnetLen = 8192 // bytes, magnet links carry tracker lists
+	maxHashLen   = 64
 )
 
 // StreamProgress is the resume position of a torrent-streamed movie or episode for one profile.

@@ -21,6 +21,7 @@ type TitleRating struct {
 	Rating       *string    `json:"rating" gorm:"type:text"`
 	Favorite     bool       `json:"favorite" gorm:"not null;default:false;index"`
 	FavoritedAt  *time.Time `json:"-"` // orders the Favorites list by the time a title was added
+	BackfilledAt *time.Time `json:"-"` // last TMDB lookup for missing title data
 	CreatedAt    time.Time  `json:"-"`
 	UpdatedAt    time.Time  `json:"updated_at" gorm:"index"`
 }
@@ -38,6 +39,12 @@ func (dataMigration) TableName() string { return "rating_migrations" }
 func Models() []any {
 	return []any{&TitleRating{}, &dataMigration{}}
 }
+
+// Input caps: real TMDB values are far shorter.
+const (
+	maxTitleLen = 500 // runes
+	maxPathLen  = 256 // bytes
+)
 
 func validMediaType(t string) bool { return t == "movie" || t == "tv" }
 

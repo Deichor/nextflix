@@ -57,7 +57,8 @@ var (
 
 // POST /api/playback-log (JSON body, any content type; text/plain avoids a CORS preflight)
 func (s *Service) receive(c *gin.Context) {
-	if !s.allow(c.RemoteIP()) {
+	ip := c.RemoteIP()
+	if !s.allowIP(ip) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many playback logs"})
 		return
 	}
@@ -77,11 +78,20 @@ func (s *Service) receive(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid playback log"})
 		return
 	}
-	lines := format(b)
-	for _, line := range lines {
-		log.Printf("playback: %s", line)
+	if !s.allow(ip, b.SID) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many playback logs"})
+		return
 	}
-	s.files.write(s.now(), lines)
+	lines := format(b)
+	if s.files != nil {
+		// The full batch goes to the file; stdout only gets the header line
+		log.Printf("playback: %s", lines[0])
+		s.files.write(s.now(), lines)
+	} else {
+		for _, line := range lines {
+			log.Printf("playback: %s", line)
+		}
+	}
 	c.Status(http.StatusNoContent)
 }
 

@@ -34,7 +34,7 @@ func (c *Client) GetPopularMovies(page int) ([]Movie, error) {
 }
 
 // DiscoverMovies forwards params to /discover/movie (language defaults to the client's, page to 1).
-// Cached for 24h per query.
+// Cached for 24h per query: callers must pass validated params, not raw client input.
 func (c *Client) DiscoverMovies(params map[string]string) ([]Movie, error) {
 	q := url.Values{}
 	for k, v := range params {
@@ -87,7 +87,7 @@ func (c *Client) GetUpcomingMoviesList(page int) ([]MovieWithVideos, error) {
 }
 
 // withVideos fetches the video list of every movie (a few at a time); failures leave Videos
-// empty and return errPartial.
+// empty and return ErrPartial.
 func (c *Client) withVideos(movies []Movie) ([]MovieWithVideos, error) {
 	out := make([]MovieWithVideos, len(movies))
 	sem := make(chan struct{}, 5)
@@ -111,13 +111,13 @@ func (c *Client) withVideos(movies []Movie) ([]MovieWithVideos, error) {
 	}
 	wg.Wait()
 	if failed.Load() {
-		return out, errPartial
+		return out, ErrPartial
 	}
 	return out, nil
 }
 
 // GetUpcomingMovies bundles daily/weekly trending, now playing and upcoming movies.
-// A failing sub-list becomes empty instead of failing the whole call (see errPartial).
+// A failing sub-list becomes empty instead of failing the whole call (see ErrPartial).
 func (c *Client) GetUpcomingMovies() (*UpcomingMovies, error) {
 	if !c.Enabled() {
 		return nil, ErrNoAPIKey
@@ -221,7 +221,7 @@ func (p *partial) tv(items []TV, err error) []TV {
 
 func (p *partial) err() error {
 	if p.failed {
-		return errPartial
+		return ErrPartial
 	}
 	return nil
 }

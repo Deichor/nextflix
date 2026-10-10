@@ -49,6 +49,19 @@ type tsVideoPlan struct {
 	tonemap string // HDR transfer of a re-encoded source; mapped to SDR so colours stay right
 }
 
+// Torrent files are untrusted: ffmpeg / ffprobe may only open them as plain video containers
+// over HTTP (TorrServer, the loopback TorBox proxy). Playlists (hls, concat, ...) and other
+// protocols (file, https, ...) are refused, so a crafted file cannot make ffmpeg fetch other URLs.
+const (
+	tsProtocolWhitelist = "http,tcp"
+	tsFormatWhitelist   = "matroska,webm,mov,mp4,m4a,avi,mpegts,mpeg,flv,asf,ogg,rm"
+)
+
+// tsInputGuard returns the input options that go before ffmpeg's -i (or ffprobe's input).
+func tsInputGuard() []string {
+	return []string{"-protocol_whitelist", tsProtocolWhitelist, "-format_whitelist", tsFormatWhitelist}
+}
+
 // probeFile runs ffprobe on a torrent file through TorrServer (cached per hash:index).
 func (s *Service) probeFile(ctx context.Context, hash string, index int) (*tsProbe, error) {
 	return s.probeFileTimeout(ctx, hash, index, 90*time.Second)
@@ -101,6 +114,12 @@ func (s *Service) probeFileTimeout(ctx context.Context, hash string, index int, 
 				s.probeCache.Store(key, call.p)
 			}
 			s.probeMu.Lock()
+			if call.err == nil {
+				if s.probeAt == nil {
+					s.probeAt = map[string]time.Time{}
+				}
+				s.probeAt[key] = time.Now()
+			}
 			delete(s.probing, key)
 			s.probeMu.Unlock()
 			close(call.done)
@@ -132,8 +151,9 @@ func (s *Service) runProbe(ctx context.Context, hash string, index int, timeout 
 	if s.probeFn != nil {
 		return s.probeFn(ctx, hash, index)
 	}
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-print_format", "json",
-		"-show_format", "-show_streams", "-show_chapters", s.fileURL(hash, index)).Output()
+	args := append([]string{"-v", "error"}, tsInputGuard()...)
+	args = append(args, "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", s.fileURL(hash, index))
+	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe failed: %w", err)
 	}

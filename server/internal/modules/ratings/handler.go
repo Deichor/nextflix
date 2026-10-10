@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 )
@@ -149,6 +150,10 @@ func (h handler) put(c *gin.Context) {
 	}
 	if in.TmdbID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "tmdb_id is required"})
+		return
+	}
+	if utf8.RuneCountInString(in.Title) > maxTitleLen || len(in.PosterPath) > maxPathLen || len(in.BackdropPath) > maxPathLen {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title or image path too long"})
 		return
 	}
 	if in.Rating.Value != nil && !validRating(*in.Rating.Value) {

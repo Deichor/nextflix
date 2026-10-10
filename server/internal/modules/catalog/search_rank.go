@@ -176,7 +176,7 @@ func resultKey(mediaType string, id int) string { return mediaType + ":" + strco
 // When TMDB finds nothing that matches well and the typo index knows a close title, the
 // corrected query is searched too, merged in, and named in DidYouMean.
 func (s *Service) RankedSearch(tm *tmdb.Client, raw string, f Filter, profileID uint) (*DiscoverPage, error) {
-	q := newQuery(strings.TrimSpace(raw))
+	q := newQuery(clampQuery(raw))
 	pages := rankPages
 	if !f.Empty() {
 		pages = filteredPages
@@ -383,13 +383,15 @@ type tasteEntry struct {
 }
 
 // tasteCache holds the genre affinity per profile. It is computed in the background: a search
-// never waits for it.
+// never waits for it. gen counts invalidations per profile: a compute that started before the
+// last one is dropped.
 type tasteCache struct {
 	mu      sync.Mutex
 	source  RatingsSource
 	tm      *tmdb.Client
 	entries map[uint]tasteEntry
-	running map[uint]bool
+	running map[uint]uint64 // generation of the running compute
+	gen     map[uint]uint64
 }
 
 // SetRatings enables personalization with the profile's ratings.
@@ -403,9 +405,19 @@ func (s *Service) SetRatings(src RatingsSource) {
 // InvalidateTaste drops a profile's cached affinity (ratings changed).
 func (s *Service) InvalidateTaste(profileID uint) {
 	s.local.invalidate()
-	s.taste.mu.Lock()
-	delete(s.taste.entries, profileID)
-	s.taste.mu.Unlock()
+	t := &s.taste
+	t.mu.Lock()
+	t.init()
+	delete(t.entries, profileID)
+	delete(t.running, profileID)
+	t.gen[profileID]++
+	t.mu.Unlock()
+}
+
+func (t *tasteCache) init() {
+	if t.entries == nil {
+		t.entries, t.running, t.gen = map[uint]tasteEntry{}, map[uint]uint64{}, map[uint]uint64{}
+	}
 }
 
 func (t *tasteCache) affinity(profileID uint) map[int]float64 {
@@ -417,13 +429,12 @@ func (t *tasteCache) affinity(profileID uint) map[int]float64 {
 	if t.source == nil {
 		return nil
 	}
-	if t.entries == nil {
-		t.entries, t.running = map[uint]tasteEntry{}, map[uint]bool{}
-	}
+	t.init()
 	e, ok := t.entries[profileID]
-	if (!ok || time.Now().After(e.expires)) && !t.running[profileID] {
-		t.running[profileID] = true
-		go t.compute(profileID)
+	if _, busy := t.running[profileID]; (!ok || time.Now().After(e.expires)) && !busy {
+		gen := t.gen[profileID]
+		t.running[profileID] = gen
+		go t.compute(profileID, gen, t.source, t.tm)
 	}
 	return e.affinity
 }
@@ -444,17 +455,21 @@ func ratingWeight(r RatedTitle) float64 {
 	return w
 }
 
-// compute sums rating weights per genre (details from the shared TMDB cache) and scales the
-// sums to [-1, 1].
-func (t *tasteCache) compute(profileID uint) {
+// compute sums rating weights per genre (details from the shared TMDB cache) and stores them
+// scaled to [-1, 1], unless the profile was invalidated meanwhile.
+func (t *tasteCache) compute(profileID uint, gen uint64, source RatingsSource, tm *tmdb.Client) {
 	aff := map[int]float64{}
 	defer func() {
 		t.mu.Lock()
-		t.entries[profileID] = tasteEntry{affinity: aff, expires: time.Now().Add(tasteTTL)}
-		delete(t.running, profileID)
+		if t.gen[profileID] == gen {
+			t.entries[profileID] = tasteEntry{affinity: aff, expires: time.Now().Add(tasteTTL)}
+		}
+		if g, ok := t.running[profileID]; ok && g == gen {
+			delete(t.running, profileID)
+		}
 		t.mu.Unlock()
 	}()
-	rated, err := t.source(profileID)
+	rated, err := source(profileID)
 	if err != nil {
 		log.Printf("catalog: taste of profile %d: %v", profileID, err)
 		return
@@ -462,17 +477,25 @@ func (t *tasteCache) compute(profileID uint) {
 	if len(rated) > tasteMaxTitles {
 		rated = rated[:tasteMaxTitles]
 	}
-	tm := t.tm.WithLang(tmdb.LangEN)
+	tm = tm.WithLang(tmdb.LangEN)
+	aff = affinityOf(rated, func(mediaType string, id int) []int {
+		if res := titleResult(tm, mediaType, id); res != nil {
+			return res.GenreIDs
+		}
+		return nil
+	})
+}
+
+// affinityOf sums rating weights per (common) genre and scales them to [-1, 1]. It is empty
+// when every sum is 0, so no score turns NaN.
+func affinityOf(rated []RatedTitle, genres func(mediaType string, id int) []int) map[int]float64 {
+	aff := map[int]float64{}
 	for _, r := range rated {
 		w := ratingWeight(r)
 		if w == 0 {
 			continue
 		}
-		res := titleResult(tm, r.MediaType, r.TmdbID)
-		if res == nil {
-			continue
-		}
-		for _, g := range res.GenreIDs {
+		for _, g := range genres(r.MediaType, r.TmdbID) {
 			aff[commonGenre(r.MediaType, g)] += w
 		}
 	}
@@ -480,7 +503,13 @@ func (t *tasteCache) compute(profileID uint) {
 	for _, v := range aff {
 		top = max(top, math.Abs(v))
 	}
-	for g, v := range aff {
-		aff[g] = v / top
+	if top <= 0 || math.IsNaN(top) || math.IsInf(top, 0) {
+		return map[int]float64{}
 	}
+	for g, v := range aff {
+		if aff[g] = v / top; aff[g] == 0 {
+			delete(aff, g)
+		}
+	}
+	return aff
 }

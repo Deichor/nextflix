@@ -33,14 +33,22 @@ func tsLateBetter(raw []JackettResult, q tsResolveQuery, checked []tsCandidate, 
 	return out
 }
 
+// tsLateQuery is the query late candidates are ranked and checked with: the one the search
+// left in the seed (other names, episode numbers, runtime for the duration check), with the
+// job's warm state.
+func tsLateQuery(q tsResolveQuery, seed *tsUpgradeSeed) tsResolveQuery {
+	late := seed.q
+	late.warm = q.warm
+	return late
+}
+
 // mergeLate waits for the indexers still searching after a pick and checks better
 // candidates among their results (see above).
 func (s *Service) mergeLate(key string, q tsResolveQuery, pick *tsResolveResult, seed *tsUpgradeSeed) {
 	if seed == nil || seed.late == nil || q.upgradeFrom > 0 {
 		return
 	}
-	q.names, q.origLang = seed.q.names, seed.q.origLang // late results are matched against the other names too
-	q.seasonEps, q.absEp = seed.q.seasonEps, seed.q.absEp
+	q = tsLateQuery(q, seed)
 	ctx := q.warmCtx()
 	raw := append([]JackettResult(nil), seed.raw...)
 	got := 0
@@ -83,6 +91,7 @@ func (s *Service) mergeLate(key string, q tsResolveQuery, pick *tsResolveResult,
 		wg.Add(1)
 		go func(c tsCandidate) {
 			defer wg.Done()
+			defer tsCatch("late candidate check", func(error) {})
 			r, err := s.checkCandidate(cctx, c, q, seed.base, tsWarmWindowTop, nil, nil)
 			if err != nil {
 				log.Printf("resolve %q: late candidate %q rejected: %v", q.title, c.raw.Title, err)

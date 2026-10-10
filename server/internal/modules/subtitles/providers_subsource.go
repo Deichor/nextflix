@@ -311,8 +311,9 @@ func (s *subSource) fetch(ctx context.Context, ref, lang string, st Settings) ([
 		episode, _ = strconv.Atoi(p[2])
 	}
 	b, name, err := pickFromArchive(raw, season, episode, lang)
-	if err != nil && episode > 0 && !isRar(raw) {
-		// A single episode's zip whose file name does not say the episode
+	if err != nil && episode > 0 && !isRar(raw) && !archiveNamesEpisodes(raw) {
+		// A single episode's zip whose file names do not say the episode (names of other
+		// episodes mean the asked one is missing: no fallback then)
 		return pickFromArchive(raw, 0, 0, lang)
 	}
 	return b, name, err

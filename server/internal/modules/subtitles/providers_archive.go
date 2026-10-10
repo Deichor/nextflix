@@ -58,6 +58,36 @@ func episodeOf(name string) (season, episode int) {
 	return 0, 0
 }
 
+// subtitleEntry reports whether a zip entry is a subtitle file worth reading, and its format score.
+func subtitleEntry(f *zip.File) (int, bool) {
+	if f.FileInfo().IsDir() || f.UncompressedSize64 > 20<<20 {
+		return 0, false
+	}
+	low := strings.ToLower(f.Name)
+	if strings.HasPrefix(path.Base(low), "._") || strings.Contains(low, "__macosx/") {
+		return 0, false
+	}
+	score, ok := subExts[path.Ext(low)]
+	return score, ok
+}
+
+// archiveNamesEpisodes reports whether any subtitle file of a zip names an episode.
+func archiveNamesEpisodes(raw []byte) bool {
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return false
+	}
+	for _, f := range zr.File {
+		if _, ok := subtitleEntry(f); !ok {
+			continue
+		}
+		if _, e := episodeOf(f.Name); e != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // pickFromArchive returns the subtitle file of a zip that fits: the episode for packs (season and
 // episode > 0), a file in lang when the names tell, else the biggest .srt.
 func pickFromArchive(raw []byte, season, episode int, lang string) ([]byte, string, error) {
@@ -74,18 +104,11 @@ func pickFromArchive(raw []byte, season, episode int, lang string) ([]byte, stri
 	var best *zip.File
 	bestScore := -1
 	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || f.UncompressedSize64 > 20<<20 {
-			continue
-		}
-		name := f.Name
-		low := strings.ToLower(name)
-		if strings.HasPrefix(path.Base(low), "._") || strings.Contains(low, "__macosx/") {
-			continue
-		}
-		extScore, ok := subExts[path.Ext(low)]
+		extScore, ok := subtitleEntry(f)
 		if !ok {
 			continue
 		}
+		name := f.Name
 		score := extScore
 		if episode > 0 {
 			s, e := episodeOf(name)

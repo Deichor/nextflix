@@ -30,7 +30,7 @@ func fail(c *gin.Context, status int, msg string, err error) {
 // GET /api/tmdb/search?q=&type=multi|movie|tv&page= – multi (default) is ranked by RankedSearch
 // (one page, did_you_mean on typos); movie and tv pass TMDB's answer through.
 func (s *Service) search(c *gin.Context) {
-	query := c.Query("q")
+	query := searchQuery(c)
 	if query == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Search query is required"})
 		return
@@ -69,7 +69,7 @@ func (s *Service) search(c *gin.Context) {
 
 // GET /api/tmdb/suggestions?q= – the 5 best ranked search results for the navbar dropdown.
 func (s *Service) suggestions(c *gin.Context) {
-	query := c.Query("q")
+	query := searchQuery(c)
 	if query == "" {
 		c.JSON(http.StatusOK, gin.H{"results": []any{}, "total_results": 0})
 		return
@@ -196,14 +196,9 @@ func pagedList[T any](s *Service, fetch func(tm *tmdb.Client, page int) ([]T, er
 	}
 }
 
-// GET /api/tmdb/discover/movie – every query param is forwarded to TMDB.
+// GET /api/tmdb/discover/movie – the whitelisted query params (see discoverParams) go to TMDB.
 func (s *Service) discoverMovies(c *gin.Context) {
-	params := map[string]string{}
-	for k, v := range c.Request.URL.Query() {
-		if len(v) > 0 {
-			params[k] = v[0]
-		}
-	}
+	params := discoverParams(c.Request.URL.Query())
 	movies, err := s.client(c).DiscoverMovies(params)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Failed to discover movies", err)

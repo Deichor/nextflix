@@ -35,6 +35,7 @@ const (
 	bsUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 	bsMaxPageBytes    = 4 << 20
 	bsFlareSolverTime = 75 * time.Second
+	bsFetchTime       = bsFlareSolverTime + 2*bsRequestTime // a shared request at most, pacing included
 )
 
 // tsOpenTrackers are well-known open trackers added to magnets built from a bare info hash.
@@ -69,9 +70,12 @@ type bsCacheEntry struct {
 }
 
 type bsFlight struct {
-	done chan struct{}
-	res  []JackettResult
-	err  error
+	done      chan struct{}
+	res       []JackettResult
+	err       error
+	cancel    context.CancelFunc
+	waiters   int  // callers still waiting (b.mu)
+	abandoned bool // every caller left before it finished (b.mu)
 }
 
 type bitsearch struct {
@@ -85,6 +89,7 @@ type bitsearch struct {
 	cache     map[string]bsCacheEntry
 	flights   map[string]*bsFlight
 	cfCookies string
+	cfHost    string // the host the cookies were solved for
 	cfUA      string
 	cfExpires time.Time
 }
@@ -178,39 +183,57 @@ func (b *bitsearch) Search(ctx context.Context, query string) ([]JackettResult, 
 		b.mu.Unlock()
 		return nil, errBitsearchDown
 	}
-	if f, ok := b.flights[key]; ok {
-		b.mu.Unlock()
-		select {
-		case <-f.done:
-			return f.res, f.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	f, ok := b.flights[key]
+	if !ok {
+		// The request belongs to no caller: it runs until done, or until every caller left
+		fctx, cancel := context.WithTimeout(context.Background(), bsFetchTime)
+		f = &bsFlight{done: make(chan struct{}), cancel: cancel}
+		b.flights[key] = f
+		go b.run(fctx, key, f)
 	}
-	f := &bsFlight{done: make(chan struct{})}
-	b.flights[key] = f
+	f.waiters++
 	b.mu.Unlock()
+	select {
+	case <-f.done:
+		return f.res, f.err
+	case <-ctx.Done():
+		b.mu.Lock()
+		if f.waiters--; f.waiters == 0 && b.flights[key] == f {
+			// Nobody waits any more: stop it, and let the next caller start a new one
+			f.abandoned = true
+			delete(b.flights, key)
+			f.cancel()
+		}
+		b.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
 
-	f.res, f.err = b.fetch(ctx, key)
+// run does the shared request of a query and caches its answer.
+func (b *bitsearch) run(ctx context.Context, key string, f *bsFlight) {
+	defer f.cancel()
+	res, err := b.fetch(ctx, key)
 
 	b.mu.Lock()
-	delete(b.flights, key)
+	f.res, f.err = res, err
+	if b.flights[key] == f {
+		delete(b.flights, key)
+	}
 	now := time.Now()
 	switch {
-	case f.err == nil:
+	case err == nil:
 		for k, e := range b.cache {
 			if now.Sub(e.at) >= bsCacheTTL {
 				delete(b.cache, k)
 			}
 		}
-		b.cache[key] = bsCacheEntry{res: f.res, at: now}
-	case ctx.Err() == nil:
+		b.cache[key] = bsCacheEntry{res: res, at: now}
+	case !f.abandoned:
 		b.downUntil = now.Add(bsDownFor)
-		log.Printf("bitsearch: %v (paused for %s)", f.err, bsDownFor)
+		log.Printf("bitsearch: %v (paused for %s)", err, bsDownFor)
 	}
 	b.mu.Unlock()
 	close(f.done)
-	return f.res, f.err
 }
 
 // wait keeps the requests at least bsGap apart.
@@ -241,12 +264,16 @@ func (b *bitsearch) fetch(ctx context.Context, key string) ([]JackettResult, err
 	b.mu.Lock()
 	pageURL := b.base + "/search?" + url.Values{"q": {key}}.Encode()
 	b.mu.Unlock()
-	page, err := b.get(ctx, pageURL)
+	page, final, err := b.get(ctx, pageURL)
 	if err != nil {
 		return nil, err
 	}
+	items := tsParseBitsearch(page)
+	if final != nil && len(items) > 0 {
+		b.followBase(final) // a real result page: not a block page or a parked domain
+	}
 	var out []JackettResult
-	for _, it := range tsParseBitsearch(page) {
+	for _, it := range items {
 		if bsVideoCategory(it.Category) {
 			out = append(out, it.result())
 		}
@@ -254,14 +281,16 @@ func (b *bitsearch) fetch(ctx context.Context, key string) ([]JackettResult, err
 	return out, nil
 }
 
-func (b *bitsearch) get(ctx context.Context, pageURL string) (string, error) {
+// get loads a page; final is where a direct 200 answer came from (nil through FlareSolverr).
+func (b *bitsearch) get(ctx context.Context, pageURL string) (string, *url.URL, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	ua := bsUserAgent
 	b.mu.Lock()
-	if time.Now().Before(b.cfExpires) {
+	// The clearance cookies only go to the host they were solved for
+	if time.Now().Before(b.cfExpires) && strings.EqualFold(req.URL.Host, b.cfHost) {
 		ua = b.cfUA
 		req.Header.Set("Cookie", b.cfCookies)
 	}
@@ -271,31 +300,34 @@ func (b *bitsearch) get(ctx context.Context, pageURL string) (string, error) {
 	req.Header.Set("Accept-Language", "en-US,en;q=0.8")
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bitsearch request failed: %w", err)
+		return "", nil, fmt.Errorf("bitsearch request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, bsMaxPageBytes))
 	if err != nil {
-		return "", err
-	}
-	if final := resp.Request.URL; final != nil {
-		b.followBase(final)
+		return "", nil, err
 	}
 	if bsChallenge(resp, body) {
-		return b.solve(ctx, pageURL)
+		page, err := b.solve(ctx, pageURL)
+		return page, nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("bitsearch returned status %d", resp.StatusCode)
+		return "", nil, fmt.Errorf("bitsearch returned status %d", resp.StatusCode)
 	}
-	return string(body), nil
+	return string(body), resp.Request.URL, nil
 }
 
 // followBase remembers where the site redirected to, so later searches skip the redirect.
+// Only a Bitsearch host is adopted.
 func (b *bitsearch) followBase(final *url.URL) {
+	if final == nil || (final.Scheme != "https" && final.Scheme != "http") ||
+		!strings.Contains(strings.ToLower(final.Hostname()), "bitsearch") {
+		return
+	}
 	base := final.Scheme + "://" + final.Host
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if final.Host != "" && base != b.base {
+	if base != b.base {
 		log.Printf("bitsearch: now at %s (was %s)", base, b.base)
 		b.base = base
 	}
@@ -351,8 +383,13 @@ func (b *bitsearch) solve(ctx context.Context, pageURL string) (string, error) {
 	for _, c := range res.Solution.Cookies {
 		cookies = append(cookies, c.Name+"="+c.Value)
 	}
+	host := ""
+	if u, err := url.Parse(pageURL); err == nil {
+		host = u.Host
+	}
 	b.mu.Lock()
 	b.cfCookies, b.cfUA, b.cfExpires = strings.Join(cookies, "; "), res.Solution.UserAgent, time.Now().Add(bsCookieTTL)
+	b.cfHost = host
 	b.mu.Unlock()
 	return res.Solution.Response, nil
 }

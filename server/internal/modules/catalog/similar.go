@@ -382,7 +382,7 @@ func (s *Service) personalizeSimilar(items []SimilarItem, profileID uint) []Simi
 		return items
 	}
 	out := make([]SimilarItem, 0, len(items))
-	block := 0
+	block, leading := 0, true
 	for _, it := range items {
 		m := marks[resultKey(it.MediaType, it.ID)]
 		if m.disliked {
@@ -401,7 +401,8 @@ func (s *Service) personalizeSimilar(items []SimilarItem, profileID uint) []Simi
 		case m.started:
 			it.score -= simStartedW
 		}
-		if it.Reason != "match" {
+		// Only the leading collection/spin-off run keeps its place
+		if leading = leading && it.Reason != "match"; leading {
 			block++
 		}
 		out = append(out, it)

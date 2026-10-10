@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +36,9 @@ const (
 // ErrNoAPIKey is returned by every call when TMDB_API_KEY is empty.
 var ErrNoAPIKey = errors.New("TMDB API key not configured")
 
-// errPartial marks a combined result with failed parts: Cached prefers stale complete data
-// over it and keeps it only briefly.
-var errPartial = errors.New("tmdb: partial result")
+// ErrPartial marks a combined result with failed parts: Cached prefers stale complete data
+// over it and keeps it only briefly. Fetch functions passed to Cached may return it (wrapped).
+var ErrPartial = errors.New("tmdb: partial result")
 
 // Client talks to the TMDB v3 API using a v4 read access token (Bearer auth).
 // It owns a 24h in-memory cache shared by everyone holding the client.
@@ -46,6 +47,7 @@ type Client struct {
 	apiKey string
 	http   *upstream.Client
 	cache  *memoryCache
+	flight *flightGroup
 	base   string // API root (tests point it at a fake server)
 	lang   string // "" means LangEN
 }
@@ -60,8 +62,9 @@ func New(apiKey string) *Client {
 			MaxBody:    16 << 20,
 			UserAgent:  "Nextflix",
 		}),
-		cache: newMemoryCache(cacheTTL, cacheMax),
-		base:  baseURL,
+		cache:  newMemoryCache(cacheTTL, cacheMax),
+		flight: &flightGroup{},
+		base:   baseURL,
 	}
 }
 
@@ -140,15 +143,34 @@ func (c *Client) Get(path string, params url.Values, dst any) error {
 // Cached returns the value cached under key, or calls fetch and caches a successful result for 24h.
 // When fetch fails, an expired value (up to 7 days old) is returned instead of the error.
 // The key is kept per content language of c. Cached values are shared: callers must not mutate them.
+// Concurrent misses on one key share a single fetch; fetch must not call Cached with its own key.
 func Cached[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
 	if c == nil {
 		v, err := fetch()
-		if errors.Is(err, errPartial) {
+		if errors.Is(err, ErrPartial) {
 			err = nil
 		}
 		return v, err
 	}
 	key = c.cacheKey(key)
+	if v, fresh, ok := c.cache.get(key); ok && fresh {
+		if t, ok := v.(T); ok {
+			return t, nil
+		}
+	}
+	if c.flight == nil {
+		return refresh(c, key, fetch)
+	}
+	v, err := c.flight.do(key, func() (any, error) { return refresh(c, key, fetch) })
+	if t, ok := v.(T); ok {
+		return t, err
+	}
+	var zero T
+	return zero, err
+}
+
+// refresh fetches key unless a fresh value arrived meanwhile; a failure falls back to stale data.
+func refresh[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
 	var stale T
 	hasStale := false
 	if v, fresh, ok := c.cache.get(key); ok {
@@ -168,7 +190,7 @@ func Cached[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
 		log.Printf("tmdb: %s: serving stale data: %v", key, err)
 		c.cache.retryLater(key, retryAfter)
 		return stale, nil
-	case errors.Is(err, errPartial):
+	case errors.Is(err, ErrPartial):
 		c.cache.set(key, v, retryAfter)
 		return v, nil
 	}
@@ -276,21 +298,64 @@ func (m *memoryCache) retryLater(key string, d time.Duration) {
 	}
 }
 
-// evict drops entries past their stale time, then expired ones, then everything.
+// evict drops entries past their stale time, then the ones that expired (or expire) first
+// until the cache is at 90% of max. Long-expired stale copies go first; recent ones survive.
 func (m *memoryCache) evict() {
 	now := time.Now()
-	for _, past := range []func(cacheEntry) time.Time{
-		func(e cacheEntry) time.Time { return e.stale },
-		func(e cacheEntry) time.Time { return e.expires },
-	} {
-		for k, e := range m.items {
-			if now.After(past(e)) {
-				delete(m.items, k)
-			}
-		}
-		if len(m.items) < m.max {
-			return
+	for k, e := range m.items {
+		if now.After(e.stale) {
+			delete(m.items, k)
 		}
 	}
-	m.items = map[string]cacheEntry{}
+	target := m.max * 9 / 10
+	if len(m.items) <= target {
+		return
+	}
+	type aged struct {
+		key     string
+		expires time.Time
+	}
+	all := make([]aged, 0, len(m.items))
+	for k, e := range m.items {
+		all = append(all, aged{k, e.expires})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].expires.Before(all[j].expires) })
+	for _, a := range all[:len(all)-target] {
+		delete(m.items, a.key)
+	}
+}
+
+// flightGroup lets concurrent callers of one key share a single call (a tiny singleflight).
+type flightGroup struct {
+	mu    sync.Mutex
+	calls map[string]*flightCall
+}
+
+type flightCall struct {
+	done chan struct{}
+	v    any
+	err  error
+}
+
+func (g *flightGroup) do(key string, fn func() (any, error)) (any, error) {
+	g.mu.Lock()
+	if g.calls == nil {
+		g.calls = map[string]*flightCall{}
+	}
+	if cl, ok := g.calls[key]; ok {
+		g.mu.Unlock()
+		<-cl.done
+		return cl.v, cl.err
+	}
+	cl := &flightCall{done: make(chan struct{}), err: errors.New("tmdb: fetch panicked")}
+	g.calls[key] = cl
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+		close(cl.done)
+	}()
+	cl.v, cl.err = fn()
+	return cl.v, cl.err
 }

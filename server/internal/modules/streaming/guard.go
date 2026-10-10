@@ -29,6 +29,8 @@ func (s *Service) streamBusyLocked(hash string, now time.Time) string {
 		return "a player probes it"
 	case s.seeking[hash] > 0:
 		return "a player asks for a seek point"
+	case s.thumbing[hash] > 0:
+		return "a thumbnail is being made"
 	}
 	if at, ok := s.streamEnd[hash]; ok {
 		if d := now.Sub(at); d < s.streamKeep {
@@ -39,7 +41,8 @@ func (s *Service) streamBusyLocked(hash string, now time.Time) string {
 	return ""
 }
 
-// readerLocked: a player reads hash right now (stream, probe or seekpoint). Needs s.warmMu.
+// readerLocked: a player reads hash right now (stream, probe or seekpoint). Thumbnail jobs do
+// not count: they keep the torrent loaded but never keep a title or a release alive. Needs s.warmMu.
 func (s *Service) readerLocked(hash string) bool {
 	return s.playing[hash] > 0 || s.starting[hash] > 0 || s.seeking[hash] > 0
 }
@@ -192,6 +195,96 @@ func (s *Service) seekEnd(hash string) {
 		delete(s.seeking, hash)
 	}
 	s.warmMu.Unlock()
+}
+
+// thumbBegin / thumbEnd mark a running thumbnail job: its torrent is not dropped under ffmpeg,
+// but the job is no player (readerLocked). A drop vetoed meanwhile is retried when it ends.
+func (s *Service) thumbBegin(hash string) {
+	s.warmMu.Lock()
+	if s.thumbing == nil {
+		s.thumbing = map[string]int{}
+	}
+	s.thumbing[hash]++
+	s.warmMu.Unlock()
+}
+
+func (s *Service) thumbEnd(hash string) {
+	s.warmMu.Lock()
+	if s.thumbing[hash]--; s.thumbing[hash] <= 0 {
+		delete(s.thumbing, hash)
+	}
+	retry := s.dropLater[hash] && s.streamBusyLocked(hash, time.Now()) == ""
+	s.warmMu.Unlock()
+	if retry {
+		go s.retryDrops(time.Now())
+	}
+}
+
+const (
+	tsLastUseKeep = 10 * time.Minute // lastUse only matters for tsRecentUse; older entries go
+	tsProbeKeep   = 6 * time.Hour    // a cached probe of a torrent nobody uses is dropped after this
+)
+
+// pruneState drops bookkeeping of torrents nobody used for a while (janitor).
+func (s *Service) pruneState(now time.Time) {
+	s.warmMu.Lock()
+	for h, at := range s.lastUse {
+		if now.Sub(at) > tsLastUseKeep && s.streamBusyLocked(h, now) == "" {
+			delete(s.lastUse, h)
+		}
+	}
+	for h, at := range s.streamEnd {
+		if now.Sub(at) >= s.streamKeep {
+			delete(s.streamEnd, h)
+		}
+	}
+	held := map[string]bool{}
+	for _, w := range s.warms {
+		for h := range w.hashes {
+			held[h] = true
+		}
+		held[w.source] = true
+	}
+	for h := range s.playing {
+		held[h] = true
+	}
+	for _, m := range []map[string]int{s.starting, s.seeking, s.thumbing} {
+		for h := range m {
+			held[h] = true
+		}
+	}
+	s.warmMu.Unlock()
+	s.pruneProbes(now, held)
+}
+
+// pruneProbes drops cached probes older than tsProbeKeep whose torrent is not in held.
+func (s *Service) pruneProbes(now time.Time, held map[string]bool) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probeAt == nil {
+		s.probeAt = map[string]time.Time{}
+	}
+	live := map[string]bool{}
+	s.probeCache.Range(func(k, _ any) bool {
+		key := k.(string)
+		live[key] = true
+		at, ok := s.probeAt[key]
+		if !ok {
+			s.probeAt[key] = now // stored elsewhere: its age counts from now
+			return true
+		}
+		hash, _, _ := strings.Cut(key, ":")
+		if now.Sub(at) > tsProbeKeep && !held[hash] {
+			s.probeCache.Delete(key)
+			delete(s.probeAt, key)
+		}
+		return true
+	})
+	for key := range s.probeAt {
+		if !live[key] {
+			delete(s.probeAt, key)
+		}
+	}
 }
 
 // idle: no player uses hash (see streamBusyLocked).

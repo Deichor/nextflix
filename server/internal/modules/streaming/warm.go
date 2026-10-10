@@ -478,6 +478,7 @@ func (s *Service) janitor() {
 		}
 		s.priorityTick(now)
 		s.retryDrops(now)
+		s.pruneState(now)
 	}
 }
 

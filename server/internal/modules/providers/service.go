@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -57,12 +58,13 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 	}
 	key := fmt.Sprintf("discover_tv_provider_%d_page_%d_sort_%s", providerID, page, sortBy)
 	return tmdb.Cached(tm, key, func() (*ContentResponse, error) {
+		if !tm.Enabled() {
+			return nil, tmdb.ErrNoAPIKey
+		}
 		byID := map[int]DiscoverResult{}
 		totalResults, totalPages := 0, 0
+		var errs []error
 		for _, region := range SupportedRegions {
-			if !tm.Enabled() {
-				break
-			}
 			params := url.Values{
 				"with_watch_providers": {strconv.Itoa(providerID)},
 				"watch_region":         {region},
@@ -77,6 +79,7 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 			}
 			if err := tm.Get("/discover/tv", params, &res); err != nil {
 				log.Printf("providers: discover tv for provider %d in %s: %v", providerID, region, err)
+				errs = append(errs, fmt.Errorf("%s: %w", region, err))
 				continue
 			}
 			for _, r := range res.Results {
@@ -88,6 +91,9 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 			totalResults = max(totalResults, res.TotalResults)
 			totalPages = max(totalPages, res.TotalPages)
 		}
+		if len(errs) == len(SupportedRegions) {
+			return nil, errors.Join(errs...)
+		}
 
 		results := make([]DiscoverResult, 0, len(byID))
 		for _, r := range byID {
@@ -98,14 +104,19 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 			s.fillFromEnglish(tm.Lang(), results, providerID, page, sortBy)
 		}
 
-		return &ContentResponse{
+		resp := &ContentResponse{
 			ProviderID:   providerID,
 			Regions:      SupportedRegions,
 			Page:         page,
 			TotalPages:   totalPages,
 			TotalResults: totalResults,
 			Results:      results,
-		}, nil
+		}
+		if len(errs) > 0 {
+			// Some regions failed: cached briefly, a stale complete copy wins
+			return resp, tmdb.ErrPartial
+		}
+		return resp, nil
 	})
 }
 

@@ -112,6 +112,7 @@ type surprisePick struct {
 }
 
 type surpriseState struct {
+	pickMu  sync.Mutex // see pick
 	mu      sync.Mutex
 	pools   map[cacheKey]surprisePool
 	recent  map[uint][]surprisePick
@@ -178,6 +179,9 @@ func ParseExclude(raw string) []titleKey {
 // Surprise picks one title for the profile, different from its last 30 picks, the exclude
 // list, rated titles and titles it has played.
 func (s *Service) Surprise(profileID uint, lang string, exclude []titleKey) (*Surprise, error) {
+	if err := s.checkProfile(profileID); err != nil {
+		return nil, err
+	}
 	history := s.historyOf(profileID)
 	pool, err := s.surprisePool(profileID, lang, history)
 	if err != nil {
@@ -191,30 +195,10 @@ func (s *Service) Surprise(profileID uint, lang string, exclude []titleKey) (*Su
 	for _, w := range history {
 		skip[keyOf(w.MediaType, w.TmdbID)] = true
 	}
-	s.surprise.mu.Lock()
-	recent := append([]surprisePick(nil), s.surprise.recent[profileID]...)
-	s.surprise.mu.Unlock()
-
-	g, c := s.draw(pool.groups, skip, recent, true)
-	if c == nil && len(recent) > 0 {
-		// Everything good was shown lately: the memory starts over (the guards still see the last picks)
-		g, c = s.draw(pool.groups, skip, recent, false)
-		recent = nil
-	}
+	g, c := s.pick(profileID, pool.groups, skip)
 	if c == nil {
 		return nil, ErrNoSurprise
 	}
-
-	recent = append(recent, surprisePick{
-		key: keyOf(c.item.MediaType, c.item.ID), bucket: g.bucket, group: g.id, genre: c.genre,
-		genres: append(canonGenres(c.item.GenreIDs), c.genre), mediaType: c.item.MediaType,
-	})
-	if len(recent) > surpriseMemory {
-		recent = recent[len(recent)-surpriseMemory:]
-	}
-	s.surprise.mu.Lock()
-	s.surprise.recent[profileID] = recent
-	s.surprise.mu.Unlock()
 
 	item := c.item
 	if item.GenreIDs == nil {
@@ -434,4 +418,35 @@ func (s *Service) surprisePool(profileID uint, lang string, history []Watched) (
 		s.surprise.mu.Unlock()
 	}
 	return pool, nil
+}
+
+// pick draws a title and records it in the profile's memory. Concurrent presses are
+// serialized here so both cannot read the same memory and lose a pick.
+func (s *Service) pick(profileID uint, groups []*surpriseGroup, skip map[titleKey]bool) (*surpriseGroup, *surpriseCand) {
+	s.surprise.pickMu.Lock()
+	defer s.surprise.pickMu.Unlock()
+	s.surprise.mu.Lock()
+	recent := append([]surprisePick(nil), s.surprise.recent[profileID]...)
+	s.surprise.mu.Unlock()
+
+	g, c := s.draw(groups, skip, recent, true)
+	if c == nil && len(recent) > 0 {
+		// Everything good was shown lately: the memory starts over (the guards still see the last picks)
+		g, c = s.draw(groups, skip, recent, false)
+		recent = nil
+	}
+	if c == nil {
+		return nil, nil
+	}
+	recent = append(recent, surprisePick{
+		key: keyOf(c.item.MediaType, c.item.ID), bucket: g.bucket, group: g.id, genre: c.genre,
+		genres: append(canonGenres(c.item.GenreIDs), c.genre), mediaType: c.item.MediaType,
+	})
+	if len(recent) > surpriseMemory {
+		recent = recent[len(recent)-surpriseMemory:]
+	}
+	s.surprise.mu.Lock()
+	s.surprise.recent[profileID] = recent
+	s.surprise.mu.Unlock()
+	return g, c
 }

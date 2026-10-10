@@ -3,25 +3,88 @@ package subtitles
 import (
 	"bytes"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/charmap"
 )
 
-// Subtitle files come in whatever the uploader's editor saved. Turkish ones are mostly Windows-1254 or
-// ISO-8859-9 when not UTF-8, so those are tried first and the decoded text is scored to pick the right one.
+// Subtitle files come in whatever the uploader's editor saved. When not UTF-8, the legacy code
+// pages of the subtitle's language are tried (Turkish: Windows-1254 or ISO-8859-9 first) and the
+// decoded text is scored to pick the right one.
 
 type charsetCandidate struct {
 	name   string
 	decode func([]byte) string
 }
 
-var singleByteCandidates = []charsetCandidate{
-	{"windows-1254", decodeWith(charmap.Windows1254)},
-	{"iso-8859-9", decodeWith(charmap.ISO8859_9)},
-	{"windows-1252", decodeWith(charmap.Windows1252)},
-	{"iso-8859-1", decodeWith(charmap.ISO8859_1)},
+var (
+	cp1250    = charsetCandidate{"windows-1250", decodeWith(charmap.Windows1250)}
+	cp1251    = charsetCandidate{"windows-1251", decodeWith(charmap.Windows1251)}
+	cp1252    = charsetCandidate{"windows-1252", decodeWith(charmap.Windows1252)}
+	cp1253    = charsetCandidate{"windows-1253", decodeWith(charmap.Windows1253)}
+	cp1254    = charsetCandidate{"windows-1254", decodeWith(charmap.Windows1254)}
+	cp1255    = charsetCandidate{"windows-1255", decodeWith(charmap.Windows1255)}
+	cp1256    = charsetCandidate{"windows-1256", decodeWith(charmap.Windows1256)}
+	iso8859_1 = charsetCandidate{"iso-8859-1", decodeWith(charmap.ISO8859_1)}
+	iso8859_2 = charsetCandidate{"iso-8859-2", decodeWith(charmap.ISO8859_2)}
+	iso8859_7 = charsetCandidate{"iso-8859-7", decodeWith(charmap.ISO8859_7)}
+	iso8859_9 = charsetCandidate{"iso-8859-9", decodeWith(charmap.ISO8859_9)}
+)
+
+// Turkish (and unknown languages: Turkish comes first in this app).
+var singleByteCandidates = []charsetCandidate{cp1254, iso8859_9, cp1252, iso8859_1}
+
+// charsetPlan is what a legacy file of a language is tried as and how the results are scored.
+type charsetPlan struct {
+	candidates []charsetCandidate
+	score      func(string) int
+}
+
+func planFor(lang string) charsetPlan {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if i := strings.IndexAny(lang, "-_"); i >= 0 {
+		lang = lang[:i]
+	}
+	script := func(t *unicode.RangeTable, cs ...charsetCandidate) charsetPlan {
+		// Windows-1252 last: a wrong language tag on a Western file still decodes
+		return charsetPlan{append(cs, cp1252), func(s string) int { return scriptScore(s, t) }}
+	}
+	switch lang {
+	case "", "tr":
+		return charsetPlan{singleByteCandidates, turkishScore}
+	case "ru", "bg", "uk", "sr", "mk", "be":
+		return script(unicode.Cyrillic, cp1251)
+	case "ar", "fa", "ur":
+		return script(unicode.Arabic, cp1256)
+	case "el":
+		return script(unicode.Greek, cp1253, iso8859_7)
+	case "he":
+		return script(unicode.Hebrew, cp1255)
+	case "pl", "cs", "sk", "hu", "ro", "hr", "sl", "bs":
+		return script(unicode.Latin, cp1250, iso8859_2)
+	}
+	return charsetPlan{[]charsetCandidate{cp1252, iso8859_1}, func(s string) int { return scriptScore(s, unicode.Latin) }}
+}
+
+// scriptScore rates decoded text for a language written in script: its letters score up,
+// symbols and controls a wrong code page leaves behind score down.
+func scriptScore(s string, script *unicode.RangeTable) int {
+	score := 0
+	for _, r := range s {
+		switch {
+		case r < 0x80:
+		case r == utf8.RuneError || r <= 0x9F:
+			score -= 5
+		case unicode.Is(script, r):
+			score += 2
+		case unicode.IsLetter(r):
+		default:
+			score--
+		}
+	}
+	return score - 4*mojibakeCount(s)
 }
 
 func decodeWith(cm *charmap.Charmap) func([]byte) string {
@@ -35,15 +98,18 @@ func decodeWith(cm *charmap.Charmap) func([]byte) string {
 }
 
 // decodeText converts raw subtitle bytes to UTF-8 text with LF line endings and reports the charset it chose.
-func decodeText(raw []byte) (string, string) {
-	text, charset := detectAndDecode(raw)
+func decodeText(raw []byte) (string, string) { return decodeTextLang(raw, "") }
+
+// decodeTextLang is decodeText for a subtitle in lang (ISO 639-1; "" unknown).
+func decodeTextLang(raw []byte, lang string) (string, string) {
+	text, charset := detectAndDecode(raw, planFor(lang))
 	text = strings.ReplaceAll(text, "\x00", "")
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	return text, charset
 }
 
-func detectAndDecode(raw []byte) (string, string) {
+func detectAndDecode(raw []byte, plan charsetPlan) (string, string) {
 	switch {
 	case bytes.HasPrefix(raw, []byte{0xEF, 0xBB, 0xBF}):
 		return string(bytes.ToValidUTF8(raw[3:], []byte("�"))), "utf-8-bom"
@@ -70,11 +136,11 @@ func detectAndDecode(raw []byte) (string, string) {
 	best, bestName, bestScore := "", "", 0
 	// A mostly UTF-8 file with a few broken bytes competes as well.
 	lossy := string(bytes.ToValidUTF8(raw, []byte("�")))
-	best, bestName, bestScore = lossy, "utf-8", turkishScore(lossy)
-	for _, c := range singleByteCandidates {
+	best, bestName, bestScore = lossy, "utf-8", plan.score(lossy)
+	for _, c := range plan.candidates {
 		s := c.decode(raw)
-		// Strictly better only: ties keep the earlier (more Turkish) candidate.
-		if score := turkishScore(s); score > bestScore {
+		// Strictly better only: ties keep the earlier (more likely) candidate.
+		if score := plan.score(s); score > bestScore {
 			best, bestName, bestScore = s, c.name, score
 		}
 	}

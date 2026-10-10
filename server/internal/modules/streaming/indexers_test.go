@@ -385,6 +385,42 @@ func TestGatherAddsLaterJobs(t *testing.T) {
 	}
 }
 
+// The early-cut check is not run again for every answer of a burst while its last run was
+// slow, and not at all when nothing new arrived; a check put off still runs later without
+// another answer.
+func TestGatherThrottlesEnoughCheck(t *testing.T) {
+	ms := time.Millisecond
+	var ids []string
+	delays := map[string]time.Duration{}
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("ix%02d", i)
+		ids = append(ids, id)
+		delays[id] = time.Duration(i+1) * ms
+	}
+	calls := 0
+	pol := tsGatherPolicy{soft: 2 * time.Second, lateLimit: 3 * time.Second, quick: time.Millisecond,
+		wait: func(string) bool { return true }, fast: func(string) bool { return true },
+		enough: func(early []JackettResult, settled bool) bool {
+			calls++
+			time.Sleep(10 * ms) // a costly ranking
+			return len(early) == 20
+		}}
+	// A slow 21st source keeps the gather from ending as "every waited indexer answered"
+	ids = append(ids, "slow")
+	delays["slow"] = time.Second
+	start := time.Now()
+	g, err := tsGatherJobs(context.Background(), context.Background(), tsJobs(ids, []string{"q"}), fakeIndexers(delays, nil), pol)
+	if err != nil || g.cut != "enough results" || len(g.early) != 20 {
+		t.Fatalf("cut %q with %d results (%v)", g.cut, len(g.early), err)
+	}
+	if took := time.Since(start); took > 500*ms {
+		t.Fatalf("cut after %s", took)
+	}
+	if calls > 8 {
+		t.Fatalf("enough checked %d times for 20 answers", calls)
+	}
+}
+
 // Settled, any 1080p+ counts: a couple of 4K among plenty of 1080p no longer holds the
 // search until the soft deadline.
 func TestEnoughResultsAnyHDOnceSettled(t *testing.T) {

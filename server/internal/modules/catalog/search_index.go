@@ -29,7 +29,7 @@ import (
 // distances. It backs "did you mean" and suggest-as-you-type.
 
 const (
-	exportBase       = "http://files.tmdb.org/p/exports/"
+	exportBase       = "https://files.tmdb.org/p/exports/"
 	indexMaxTitles   = 200_000
 	indexMinPop      = 1.0
 	indexMaxAge      = 24 * time.Hour

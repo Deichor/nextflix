@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,7 +151,9 @@ func (s *Service) community(ctx context.Context, tmdbID, season, episode int, du
 		s.mu.Lock()
 		s.pausedTo = time.Now().Add(pause)
 		s.mu.Unlock()
-	} else if s.db != nil {
+	}
+	// What was found is kept even when a database failed (cached() gives it the short TTL)
+	if s.db != nil && (err == nil || row.Source != "") {
 		s.save(row)
 	}
 	s.mu.Lock()
@@ -161,8 +164,9 @@ func (s *Service) community(ctx context.Context, tmdbID, season, episode int, du
 	return row
 }
 
-// fetch asks TheIntroDB, then IntroDB for what it lacks. An error is returned only when
-// nothing was found and a database failed (a miss is cached, a failure is not).
+// fetch asks TheIntroDB, then IntroDB for what it lacks. An error is returned when nothing was
+// found and a database failed (a miss is cached, a failure is not), and for a rate limit
+// (429) also with a row, so the lookups pause.
 func (s *Service) fetch(ctx context.Context, tmdbID, season, episode int, duration float64) (SkipSegment, error) {
 	row := SkipSegment{TmdbID: tmdbID, Season: season, Episode: episode, Duration: int(math.Round(duration)), FetchedAt: time.Now()}
 	f, err1 := s.theIntroDB(ctx, tmdbID, season, episode, duration)
@@ -182,13 +186,15 @@ func (s *Service) fetch(ctx context.Context, tmdbID, season, episode int, durati
 		row.CreditsStart, row.CreditsEnd = g.creditsStart, g.creditsEnd
 		row.Source = joinSource(row.Source, "introdb")
 	}
-	if row.Source == "" {
-		if err1 != nil {
-			return row, fmt.Errorf("theintrodb: %w", err1)
-		}
-		if err2 != nil {
-			return row, fmt.Errorf("introdb: %w", err2)
-		}
+	switch {
+	case errors.Is(err1, errRateLimited):
+		return row, fmt.Errorf("theintrodb: %w", err1)
+	case errors.Is(err2, errRateLimited):
+		return row, fmt.Errorf("introdb: %w", err2)
+	case row.Source == "" && err1 != nil:
+		return row, fmt.Errorf("theintrodb: %w", err1)
+	case row.Source == "" && err2 != nil:
+		return row, fmt.Errorf("introdb: %w", err2)
 	}
 	return row, nil
 }
@@ -214,8 +220,9 @@ func (s *Service) cached(tmdbID, season, episode int, duration float64) (SkipSeg
 		if gap > durationSlack {
 			continue
 		}
+		// Without TheIntroDB's answer (missing, failed, rate limited) it is asked again sooner
 		ttl := foundTTL
-		if r.Source == "" {
+		if !strings.Contains(r.Source, "theintrodb") {
 			ttl = missingTTL
 		}
 		if time.Since(r.FetchedAt) > ttl {

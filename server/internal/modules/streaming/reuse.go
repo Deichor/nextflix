@@ -179,6 +179,17 @@ func (s *Service) reuseTorrent(ctx context.Context, q tsResolveQuery, sv tsSaved
 	if link == "" {
 		link = sv.hash
 	}
+	// A saved TorBox source's index is its place in TorBox's list: its file is found in the
+	// torrent by path and size, and the hash plays as a torrent from now on
+	var want *tsDebridSource
+	if reg, ok := s.debrid.registered(sv.hash, sv.index); ok {
+		want = &reg
+	} else if cached != nil && cached.Debrid && cached.Index == sv.index {
+		want = &tsDebridSource{path: cached.FileName, size: cached.Size}
+	}
+	if want != nil {
+		s.debrid.unregisterHash(sv.hash)
+	}
 	s.trackTorrent(w, sv.hash)
 	runtime := s.lookupRuntime(q)
 	sctx, cancel := context.WithTimeout(ctx, tsReuseStatTime)
@@ -192,16 +203,13 @@ func (s *Service) reuseTorrent(ctx context.Context, q tsResolveQuery, sv tsSaved
 		s.dropFrom(w, sv.hash)
 		return tsReuseAnswer{Action: "resolve", Reason: "no torrent metadata: " + err.Error()}
 	}
-	var file tsFileStat
-	for _, f := range st.FileStats {
-		if f.ID == sv.index {
-			file = f
-		}
-	}
-	if file.ID == 0 {
+	file, ok := tsReuseTorrentFile(st.FileStats, sv.index, want)
+	if !ok {
 		s.dropFrom(w, sv.hash)
 		return tsReuseAnswer{Action: "resolve", Reason: fmt.Sprintf("file %d is not in the torrent", sv.index)}
 	}
+	debridIndex := sv.index
+	sv.index = file.ID
 	res := &tsResolveResult{
 		Magnet: link, Hash: sv.hash, Index: sv.index, FileName: filepath.Base(file.Path), TorrentTitle: st.Name,
 		Size: file.Length, Cached: true,
@@ -209,7 +217,7 @@ func (s *Service) reuseTorrent(ctx context.Context, q tsResolveQuery, sv tsSaved
 	if !strings.HasPrefix(res.Magnet, "magnet:?") {
 		res.Magnet = tsBuildMagnet(sv.hash, st.Name, nil)
 	}
-	if cached != nil && cached.Index == sv.index && !cached.Debrid {
+	if cached != nil && cached.Index == debridIndex && (cached.Debrid == (want != nil)) {
 		res.Quality, res.HDR, res.Format, res.Cinema = cached.Quality, cached.HDR, cached.Format, cached.Cinema
 		res.Duration, res.DurationVerified, res.TorrentTitle = cached.Duration, cached.DurationVerified, cached.TorrentTitle
 	} else {
@@ -242,6 +250,36 @@ func (s *Service) reuseTorrent(ctx context.Context, q tsResolveQuery, sv tsSaved
 	}
 	s.dropFrom(w, sv.hash)
 	return tsReuseAnswer{Action: "resolve", Reason: "its swarm does not keep up: " + health.String()}
+}
+
+// tsReuseTorrentFile finds the saved file among TorrServer's files: by TorrServer's id, or
+// for a TorBox index (want set) by path and size.
+func tsReuseTorrentFile(files []tsFileStat, index int, want *tsDebridSource) (tsFileStat, bool) {
+	if want == nil {
+		for _, f := range files {
+			if f.ID == index && f.ID != 0 {
+				return f, true
+			}
+		}
+		return tsFileStat{}, false
+	}
+	if want.path == "" && want.size <= 0 {
+		return tsFileStat{}, false
+	}
+	list := make([]torbox.File, 0, len(files))
+	for _, f := range files {
+		list = append(list, torbox.File{ID: int64(f.ID), Name: f.Path, Size: f.Length})
+	}
+	id, ok := tsDebridMatchFile(list, tsDebridSource{path: want.path, size: want.size}, nil)
+	if !ok {
+		return tsFileStat{}, false
+	}
+	for _, f := range files {
+		if int64(f.ID) == id {
+			return f, true
+		}
+	}
+	return tsFileStat{}, false
 }
 
 // reuseOffset is where playback resumes in the file (1 MiB aligned): the pieces measured

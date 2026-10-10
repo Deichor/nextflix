@@ -369,9 +369,36 @@ func (t *Torrent) Ready() bool {
 	return t.DownloadPresent || t.DownloadFinished || t.DownloadState == "cached" || t.DownloadState == "completed"
 }
 
-// MyList returns the torrents in the account (bypass skips TorBox's own 10 min list cache).
-func (c *Client) MyList(ctx context.Context, bypass bool) ([]Torrent, error) {
-	q := url.Values{"limit": {"1000"}}
+// myListPage is how many torrents one mylist call asks for; myListMaxPages bounds a lookup.
+var myListPage = 1000
+
+const myListMaxPages = 50
+
+// FindTorrent returns the account's torrent id of hash (0 when it is not there), reading
+// mylist page by page (bypass skips TorBox's own 10 min list cache).
+func (c *Client) FindTorrent(ctx context.Context, hash string, bypass bool) (int64, error) {
+	hash = strings.ToLower(hash)
+	for page := 0; page < myListMaxPages; page++ {
+		list, err := c.MyList(ctx, bypass, page*myListPage)
+		if err != nil {
+			return 0, err
+		}
+		for _, t := range list {
+			if t.Hash == hash {
+				return t.ID, nil
+			}
+		}
+		if len(list) < myListPage {
+			return 0, nil
+		}
+	}
+	return 0, nil
+}
+
+// MyList returns one page of the torrents in the account, from offset (bypass skips TorBox's
+// own 10 min list cache).
+func (c *Client) MyList(ctx context.Context, bypass bool, offset int) ([]Torrent, error) {
+	q := url.Values{"limit": {strconv.Itoa(myListPage)}, "offset": {strconv.Itoa(offset)}}
 	if bypass {
 		q.Set("bypass_cache", "true")
 	}

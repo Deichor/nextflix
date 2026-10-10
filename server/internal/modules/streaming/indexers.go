@@ -36,6 +36,14 @@ var (
 // tsSearchEnough usable candidates of the top wanted resolution let resolve rank early.
 const tsSearchEnough = 3
 
+// The early-cut check ranks every result so far; after a run it waits tsEnoughCost times as
+// long as that run took (at most tsEnoughMaxGap), so a burst of answers is not re-ranked
+// on each one.
+const (
+	tsEnoughCost   = 4
+	tsEnoughMaxGap = 250 * time.Millisecond
+)
+
 // Indexers that rarely carry useful movie / TV releases: queried, but never waited for.
 var tsBackgroundIndexers = map[string]bool{"internetarchive": true}
 
@@ -385,6 +393,17 @@ func tsGatherJobs(ctx, bg context.Context, jobs []tsJob, fetch tsIndexerFetch, p
 		}
 	}
 	softPassed, quickPassed, settlePassed := false, false, false
+	// pol.enough ranks everything that arrived: it runs again only once something changed,
+	// and not before tsEnoughCost times its last run time passed (evalC fires then)
+	dirty, lastSettled := true, false
+	var nextEval time.Time
+	var evalC <-chan time.Time
+	var evalT *time.Timer
+	defer func() {
+		if evalT != nil {
+			evalT.Stop()
+		}
+	}()
 	cut := "all answered"
 	for {
 		if pending == 0 && !ok {
@@ -403,9 +422,20 @@ func tsGatherJobs(ctx, bg context.Context, jobs []tsJob, fetch tsIndexerFetch, p
 				break
 			}
 			settled := (fastLeft == 0 && quickPassed) || settlePassed
-			if pol.enough != nil && (fastLeft == 0 || quickPassed) && pol.enough(early, settled) {
-				cut = "enough results"
-				break
+			if pol.enough != nil && (fastLeft == 0 || quickPassed) && (dirty || settled != lastSettled) {
+				if now := time.Now(); now.Before(nextEval) {
+					if evalC == nil {
+						evalT = time.NewTimer(nextEval.Sub(now))
+						evalC = evalT.C
+					}
+				} else {
+					dirty, lastSettled = false, settled
+					if pol.enough(early, settled) {
+						cut = "enough results"
+						break
+					}
+					nextEval = time.Now().Add(min(tsEnoughCost*time.Since(now), tsEnoughMaxGap))
+				}
 			}
 		}
 		select {
@@ -415,14 +445,18 @@ func tsGatherJobs(ctx, bg context.Context, jobs []tsJob, fetch tsIndexerFetch, p
 			} else {
 				ok = true
 				early = append(early, d.res...)
+				dirty = dirty || len(d.res) > 0
 			}
 			finish(d)
 		case batch, open := <-moreC:
+			dirty = true // the other names may be known now
 			if !open {
 				moreC = nil
 				break
 			}
 			launch(batch)
+		case <-evalC:
+			evalC = nil
 		case <-softC:
 			softPassed = true
 		case <-quickC:

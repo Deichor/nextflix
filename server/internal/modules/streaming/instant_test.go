@@ -494,3 +494,16 @@ func TestInstantHandler(t *testing.T) {
 		t.Fatalf("bad body: status %d", w.Code)
 	}
 }
+
+func TestInstantHandlerCapsTheBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := newInstantService(t, newInstantTorBox(t), nil, false)
+	r := gin.New()
+	Register(r.Group("/api"), s)
+	big := `{"items":[{"type":"movie","tmdb_id":1,"title":"` + strings.Repeat("x", tsInstantMaxBody) + `"}]}`
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/torrent-stream/instant", strings.NewReader(big)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("oversized body: status %d", w.Code)
+	}
+}

@@ -2,6 +2,7 @@ package subtitles
 
 import (
 	"errors"
+	"log"
 	"strings"
 	"sync"
 
@@ -37,26 +38,42 @@ func (r *settingsRepo) ensure() error {
 	return err
 }
 
+// get returns the settings; on a database error the defaults (not cached, keys empty).
 func (r *settingsRepo) get() Settings {
+	s, err := r.load()
+	if err != nil {
+		log.Printf("subtitles: settings: %v", err)
+		return defaultSettings()
+	}
+	return s
+}
+
+// load reads the settings row. Only a missing row means the defaults; other errors are
+// returned and not cached, so a later save cannot overwrite the stored keys with defaults.
+func (r *settingsRepo) load() (Settings, error) {
 	r.mu.RLock()
 	if r.cached != nil {
 		s := *r.cached
 		r.mu.RUnlock()
-		return s
+		return s, nil
 	}
 	r.mu.RUnlock()
 
 	s := defaultSettings()
 	if r.db != nil {
 		var row Settings
-		if err := r.db.First(&row, settingsID).Error; err == nil {
+		err := r.db.First(&row, settingsID).Error
+		switch {
+		case err == nil:
 			s = row
+		case !errors.Is(err, gorm.ErrRecordNotFound):
+			return Settings{}, err
 		}
 	}
 	r.mu.Lock()
 	r.cached = &s
 	r.mu.Unlock()
-	return s
+	return s, nil
 }
 
 func (r *settingsRepo) save(s Settings) error {

@@ -12,8 +12,10 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -98,6 +100,7 @@ type tsResolveQuery struct {
 	mediaType string
 	title     string
 	year      int
+	firstAir  int // TV: TMDB's first-air year (0 = unknown); a name dated otherwise is another show
 	season    int
 	episode   int
 	avoid     []string // torrents that failed to play or had the wrong length, ranked last
@@ -184,6 +187,8 @@ var (
 	tsDVPattern     = regexp.MustCompile(`\bdv\b|\bdovi\b|dolby.?vision`)
 	// Bonus material and compilations, matched on the normalized name (see tsExtrasName)
 	tsExtrasPattern = regexp.MustCompile(`\b(greatest moments|making of|inside the episodes?|behind the scenes|recaps?|samples?|featurettes?|bloopers|deleted scenes|trailers?|teasers?|extras?|bonus|interviews?|documentary|prologue|promo)\b`)
+	// Of those, the ones that are no episode title ("S01E01 Recap"; "S01E05 Prologue" may be one)
+	tsBonusOnlyPattern = regexp.MustCompile(`\b(greatest moments|making of|inside the episodes?|behind the scenes|recaps?|samples?|featurettes?|bloopers|deleted scenes|trailers?|teasers?)\b`)
 	// The same in Cyrillic names (tsNormalize drops other scripts): trailer, teaser, making-of,
 	// bonus, interview, sample, promo, prologue
 	tsExtrasCyrillic = regexp.MustCompile(`трейлер|тизер|фильм о фильме|о съ[её]мках|бонус|интервью|с[еэ]мпл|промо|пролог`)
@@ -390,6 +395,35 @@ func tsDisclaimed(tokens []string, q tsResolveQuery) bool {
 	return false
 }
 
+// tsSourceParts are the halves of split source tags ("HD-TS", "Tele-Sync", "DVD-Scr").
+var tsSourceParts = map[string]bool{"hd": true, "hq": true, "tele": true, "sync": true, "dvd": true, "bd": true, "rip": true, "pre": true}
+
+var tsResolutionPattern = regexp.MustCompile(`^\d{3,4}[pi]$`)
+
+// tsEpisodeTitleSpan is the [from, to) range of the words between a single-episode tag and
+// the first release tag after it ("S02E05 The Line 1080p" -> "The Line"): the episode's own
+// title. Empty without both tags, or when the words are only a source tag ("S01E01 HD TS 720p").
+func tsEpisodeTitleSpan(tokens []string) (int, int) {
+	for i, t := range tokens {
+		if !tsEpPattern.MatchString(t) && !tsXEpPattern.MatchString(t) {
+			continue
+		}
+		for j := i + 1; j < len(tokens); j++ {
+			if !tsReleaseTokens[tokens[j]] && !tsResolutionPattern.MatchString(tokens[j]) {
+				continue
+			}
+			for _, w := range tokens[i+1 : j] {
+				if !tsBadSourceTokens[w] && !tsSourceParts[w] {
+					return i + 1, j
+				}
+			}
+			return 0, 0
+		}
+		return 0, 0
+	}
+	return 0, 0
+}
+
 // tsScore ranks one Jackett result; ok=false means it is rejected.
 // Order of importance: source tier (cinema leaks last), resolution, codec/HDR fit for the client,
 // then within a tier audio / HDR / bitrate for what the client can use, and seeders (see
@@ -404,8 +438,17 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 		return c, false
 	}
 	// Cinema recordings only when the viewer asked for one (?cinema=1, see cinema.go)
+	// An episode's own title ("Show S02E05 The Line 1080p") is not a source or bonus tag
+	tv := q.mediaType == "tv"
+	from, to := 0, 0
+	if tv {
+		from, to = tsEpisodeTitleSpan(rest)
+	}
 	recording := false
 	for i, t := range rest {
+		if i >= from && i < to {
+			continue
+		}
 		// "HD-TS", "Tele-Sync", "DVD-Scr" are split by tsNormalize
 		if tsBadSourceTokens[t] || (i+1 < len(rest) && len(t) > 1 && len(rest[i+1]) > 1 && tsBadSourceTokens[t+rest[i+1]]) {
 			if !q.cinema {
@@ -417,7 +460,14 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 	// Specials, compilations and bonus material ("Greatest Moments", "The Making of an Epic")
 	// are not the title, and neither is a namesake ("... (NOT The Chris Nolan FILM)"). The
 	// whole name counts: an IMDb id match is scored with the name's own title.
-	if all := tsNormalize(r.Title); tsExtrasName(r.Title, all, q) || tsDisclaimed(all, q) {
+	all := tsNormalize(r.Title)
+	extras := all
+	if tv {
+		if f, t := tsEpisodeTitleSpan(all); t > f && !tsBonusOnlyPattern.MatchString(strings.Join(all[f:t], " ")) {
+			extras = slices.Concat(all[:f], all[t:])
+		}
+	}
+	if tsExtrasName(r.Title, extras, q) || tsDisclaimed(all, q) {
 		return c, false
 	}
 
@@ -452,13 +502,20 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 		minSize, maxSize = 7*tsGB/10, 20*tsGB
 	} else {
 		// Optional year / country right after the show name ("Doctor Who 2005", "The Office US")
-		dated := false
+		year := 0
 		for len(rest) > 0 && (tsYearPattern.MatchString(rest[0]) || tsCountryTokens[rest[0]]) {
-			dated = dated || tsYearPattern.MatchString(rest[0])
+			if year == 0 && tsYearPattern.MatchString(rest[0]) {
+				year, _ = strconv.Atoi(rest[0])
+			}
 			rest = rest[1:]
 		}
-		if dated {
+		if year > 0 {
+			n := len(rest)
 			rest = tsDropDate(rest) // "Show 2024 10 15": a date, not episodes 10-15
+			// A show of the same name from another year ("Doctor Who 2023" for the 2005 one)
+			if len(rest) == n && q.firstAir > 0 && (year < q.firstAir-1 || year > q.firstAir+1) {
+				return c, false
+			}
 		}
 		if len(rest) == 0 {
 			return c, false
@@ -929,6 +986,13 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 	headerRead := make(chan struct{})
 	var headerOnce sync.Once
 	go func() {
+		// A panic still answers (no health) so the check does not wait forever
+		defer tsCatch("health check of "+c.raw.Title, func(error) {
+			select {
+			case healthCh <- nil:
+			default:
+			}
+		})
 		need := tsNeedRate(file.Length, q.runtime, q.mediaType)
 		s.awaitHeader(hctx, hash, need, headerRead)
 		measured := time.Now()
@@ -1031,7 +1095,7 @@ func tsPickFile(files []tsFileStat, q tsResolveQuery, c tsCandidate) (tsFileStat
 	sort.Slice(videos, func(i, j int) bool { return videos[i].Length > videos[j].Length })
 
 	if q.mediaType == "movie" {
-		return videos[0], true
+		return tsPickMovieFile(videos, q)
 	}
 
 	// The episode by its season and number, else its absolute number (see episodes.go)
@@ -1043,6 +1107,61 @@ func tsPickFile(files []tsFileStat, q tsResolveQuery, c tsCandidate) (tsFileStat
 		return videos[0], true
 	}
 	return tsFileStat{}, false
+}
+
+// tsPickMovieFile picks the film among videos (largest first). A collection ("The Matrix
+// 1999 2003 Trilogy") holds several full-length films: the file (or its folder) named with
+// the title and year wins, and without one the torrent is rejected. Videos under half the
+// largest (extras, trailers) do not make a collection.
+func tsPickMovieFile(videos []tsFileStat, q tsResolveQuery) (tsFileStat, bool) {
+	var full []tsFileStat
+	dirs := map[string]int{}
+	for _, f := range videos {
+		if f.Length*2 >= videos[0].Length {
+			full = append(full, f)
+			dirs[path.Dir(strings.ReplaceAll(f.Path, "\\", "/"))]++
+		}
+	}
+	if len(full) < 2 {
+		return videos[0], true
+	}
+	titles := tsTitleTokens(q)
+	for _, f := range full {
+		p := strings.ReplaceAll(f.Path, "\\", "/")
+		if tsMovieFileNamed(strings.TrimSuffix(path.Base(p), path.Ext(p)), titles, q.year) {
+			return f, true
+		}
+	}
+	// A folder of its own names the film ("The.Matrix.1999.1080p/xyz.mkv"); the pack's
+	// folder that holds them all does not
+	for _, f := range full {
+		dir := path.Dir(strings.ReplaceAll(f.Path, "\\", "/"))
+		if dirs[dir] == 1 && dir != "." && tsMovieFileNamed(path.Base(dir), titles, q.year) {
+			return f, true
+		}
+	}
+	return tsFileStat{}, false
+}
+
+// tsMovieFileNamed: name is the title, followed by its year (+-1, when known), a release
+// tag or nothing ("The Matrix Reloaded 2003" is not "The Matrix").
+func tsMovieFileNamed(name string, titles [][]string, year int) bool {
+	tokens := tsNormalize(name)
+	for _, title := range titles {
+		rest, ok := tsMatchTitle(tokens, title)
+		if !ok {
+			continue
+		}
+		if len(rest) == 0 || tsReleaseTokens[rest[0]] || tsResolutionPattern.MatchString(rest[0]) {
+			return true
+		}
+		if tsYearPattern.MatchString(rest[0]) {
+			if y, _ := strconv.Atoi(rest[0]); year == 0 || (y >= year-1 && y <= year+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // searchTitle runs the search of a resolve that started at started: the title's queries at
@@ -1607,6 +1726,17 @@ func (p *tsPick) stopMeasure(i int) {
 	p.stop(i)
 }
 
+// tsCatch, deferred directly in a goroutine, turns a panic into an error for onPanic (logged
+// with its stack) instead of killing the server.
+func tsCatch(what string, onPanic func(error)) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	log.Printf("resolve: %s panicked: %v\n%s", what, r, debug.Stack())
+	onPanic(fmt.Errorf("%s panicked: %v", what, r))
+}
+
 // tsPickBest runs check for candidates 0..n-1 (best first) in parallel and returns the
 // best-ranked one that succeeded and keeps up (see tsChoose). It returns as soon as every
 // better-ranked check has finished, or grace after the first success when a better one is
@@ -1644,11 +1774,17 @@ func tsPickBestKeep(ctx, checkCtx context.Context, n int, graceFor func(best int
 		cancels[i], measures[i] = cancel, mcancel
 		go func(i int) {
 			defer cancel()
-			res, err := check(tsWithMeasure(cctx, mctx), i)
-			if res == nil && err == nil {
-				err = errors.New("no result")
-			}
-			outs <- tsOutcome{i, res, err}
+			var res *tsResolveResult
+			var err error
+			// Always report an outcome, a panicking check as a failed one
+			defer func() {
+				if res == nil && err == nil {
+					err = errors.New("no result")
+				}
+				outs <- tsOutcome{i, res, err}
+			}()
+			defer tsCatch(fmt.Sprintf("candidate check %d", i), func(perr error) { res, err = nil, perr })
+			res, err = check(tsWithMeasure(cctx, mctx), i)
 		}(i)
 	}
 

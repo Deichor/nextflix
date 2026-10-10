@@ -432,3 +432,68 @@ func TestBroadEpisodeQueries(t *testing.T) {
 		t.Fatalf("movie: %q", got)
 	}
 }
+
+func TestSpecialsSeasonZero(t *testing.T) {
+	special := tsEpTarget{season: 0, episode: 5}
+	regular := tsEpTarget{season: 1, episode: 5, abs: 5}
+	cases := []struct {
+		name            string
+		special, normal int // kind for S00E05 and for S01E05
+	}{
+		{"Show S00E05 1080p", 1, 0},
+		{"Show 0x05 1080p", 1, 0},
+		{"Show S00E04 1080p", 0, 0},
+		{"Show S00E04-E06 1080p", 2, 0},
+		{"Show Season 0 Episode 5 1080p", 1, 0},
+		{"Show S00 1080p", 2, 0},
+		{"Show Specials 1080p", 2, 0},
+		{"Show S01E05 1080p", 0, 1},
+		{"Show S01 1080p", 0, 2},
+		{"Show S00-S05 1080p", 0, 3},
+		{"Show Complete Series 1080p", 3, 3},
+	}
+	for _, tc := range cases {
+		e := tsTestEpisode(t, tc.name, "Show")
+		if got := tsEpisodeKind(e, special); got != tc.special {
+			t.Errorf("%q [%s] for S00E05: kind %d, want %d", tc.name, e, got, tc.special)
+		}
+		if got := tsEpisodeKind(e, regular); got != tc.normal {
+			t.Errorf("%q [%s] for S01E05: kind %d, want %d", tc.name, e, got, tc.normal)
+		}
+	}
+
+	// Ranked and picked from packs
+	q := tsResolveQuery{mediaType: "tv", title: "Show", season: 0, episode: 5}
+	if c, ok := tsScore(JackettResult{Title: "Show.S00E05.1080p.WEB-DL.x264", Seeders: 10, Size: tsGB, InfoHash: strings.Repeat("a", 40)}, q,
+		tsNormalize("Show")); !ok || c.kind != 1 {
+		t.Fatalf("S00E05 release: ok %v kind %d", ok, c.kind)
+	}
+	picks := []struct {
+		release string
+		q       tsResolveQuery
+		files   []tsFileStat
+		want    string
+	}{
+		{"Show.S00.1080p.WEB-DL.x264", q,
+			files("Show.S00/Show.S00E04.mkv", "Show.S00/Show.S00E05.mkv", "Show.S00/Show.S00E06.mkv"), "Show.S00/Show.S00E05.mkv"},
+		{"Show.S00.1080p.WEB-DL.x264", q, files("Show.S00/04.mkv", "Show.S00/05.mkv"), "Show.S00/05.mkv"},
+		{"Show.Complete.Series.1080p.WEB-DL.x264", q,
+			files("Show/Season 1/Show.S01E05.mkv", "Show/Specials/05.mkv", "Show/Season 1/05.mkv"), "Show/Specials/05.mkv"},
+		{"Show.Complete.Series.1080p.WEB-DL.x264", tsResolveQuery{mediaType: "tv", title: "Show", season: 1, episode: 5},
+			files("Show/Season 1/Show.S01E05.mkv", "Show/Specials/Show.S00E05.mkv"), "Show/Season 1/Show.S01E05.mkv"},
+		{"Show.Complete.Series.1080p.WEB-DL.x264", q, files("Show/Season 1/Show.S01E05.mkv", "Show/Season 1/05.mkv"), ""},
+	}
+	for _, p := range picks {
+		c, ok := tsScore(JackettResult{Title: p.release, Seeders: 10, Size: 10 * tsGB, InfoHash: strings.Repeat("a", 40)}, p.q, tsNormalize("Show"))
+		if !ok {
+			t.Fatalf("%q rejected for S%02dE%02d", p.release, p.q.season, p.q.episode)
+		}
+		got := ""
+		if f, ok := tsPickFile(p.files, p.q, c); ok {
+			got = f.Path
+		}
+		if got != p.want {
+			t.Errorf("%q S%02dE%02d in %v: picked %q, want %q", p.release, p.q.season, p.q.episode, p.files, got, p.want)
+		}
+	}
+}

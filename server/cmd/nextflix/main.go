@@ -63,8 +63,13 @@ func run() error {
 
 	rc, err := cache.New(cfg.RedisURL)
 	if err != nil {
-		log.Printf("Redis unavailable, running without cache: %v", err)
+		log.Printf("Redis disabled, running without cache: %v", err)
 		rc = nil
+	} else if rc != nil {
+		// Keep the client either way: it reconnects once redis is back
+		if err := rc.Ping(context.Background()); err != nil {
+			log.Printf("Redis not reachable yet, will keep retrying: %v", err)
+		}
 	}
 	defer rc.Close()
 
@@ -101,6 +106,7 @@ func run() error {
 	catalogSvc.SetLocalSignals(localSignals(profilesSvc, progressSvc, ratingsSvc))
 	progressSvc.SetNextEpisode(catalogSvc.NextEpisode)
 	recommendationsSvc.SetSimilar(similarTitles(catalogSvc))
+	recommendationsSvc.SetProfiles(profilesSvc.Exists)
 
 	imagesSvc := images.NewService(images.Config{
 		Dir:       envOr("IMAGE_CACHE_DIR", "/app/data/img-cache"),
@@ -140,6 +146,7 @@ func run() error {
 	if err := subtitlesSvc.EnsureSettings(); err != nil {
 		log.Printf("seed subtitle settings: %v", err)
 	}
+	subtitlesSvc.Start(ctx)
 
 	segmentsSvc := segments.NewService(db, segments.Config{
 		Chapters: fileChapters(streamingSvc),

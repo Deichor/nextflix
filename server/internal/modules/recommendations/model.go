@@ -116,3 +116,7 @@ type HistorySource interface {
 type HistoryFunc func(profileID uint) ([]Watched, error)
 
 func (f HistoryFunc) History(profileID uint) ([]Watched, error) { return f(profileID) }
+
+// ProfileChecker reports whether a profile exists (the profiles module, wired in main.go).
+// Unknown ids are refused before they cost any TMDB calls.
+type ProfileChecker func(profileID uint) (bool, error)

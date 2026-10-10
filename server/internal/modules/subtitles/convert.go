@@ -24,8 +24,11 @@ type cue struct {
 
 // ToWebVTT converts any supported subtitle (srt, ass/ssa, vtt, microdvd .sub) in any common encoding
 // (UTF-8 with/without BOM, UTF-16 LE/BE BOM, Windows-1254, ISO-8859-9, Windows-1252, ISO-8859-1) to UTF-8 WebVTT.
-func ToWebVTT(raw []byte, nameHint string) ([]byte, error) {
-	text, _ := decodeText(raw)
+func ToWebVTT(raw []byte, nameHint string) ([]byte, error) { return toWebVTTLang(raw, nameHint, "") }
+
+// toWebVTTLang is ToWebVTT for a subtitle in lang: legacy files are decoded with its code pages (encoding.go).
+func toWebVTTLang(raw []byte, nameHint, lang string) ([]byte, error) {
+	text, _ := decodeTextLang(raw, lang)
 	var cues []cue
 	switch detectFormat(text, nameHint) {
 	case "vtt":
@@ -80,7 +83,11 @@ func firstLine(s string) string {
 }
 
 // SRT and WebVTT timing lines. Tolerates missing hours, dots or colons before the milliseconds and stray spaces.
-var timingLine = regexp.MustCompile(`^\s*((?:\d+\s*:\s*)?\d{1,2}\s*:\s*\d{1,2}(?:\s*[,.:]\s*\d{1,3})?)\s*-{1,2}>\s*((?:\d+\s*:\s*)?\d{1,2}\s*:\s*\d{1,2}(?:\s*[,.:]\s*\d{1,3})?)`)
+// Hours have at most 3 digits (parseClock caps the time at maxCueTime).
+var timingLine = regexp.MustCompile(`^\s*((?:\d{1,3}\s*:\s*)?\d{1,2}\s*:\s*\d{1,2}(?:\s*[,.:]\s*\d{1,3})?)\s*-{1,2}>\s*((?:\d{1,3}\s*:\s*)?\d{1,2}\s*:\s*\d{1,2}(?:\s*[,.:]\s*\d{1,3})?)`)
+
+// maxCueTime: later cue times are broken (or hostile: the timing math sizes buffers by them).
+const maxCueTime = 100 * time.Hour
 
 var numberLine = regexp.MustCompile(`^\s*\d+\s*$`)
 
@@ -157,7 +164,7 @@ func parseClock(s string) (time.Duration, bool) {
 	nums := make([]int, len(parts))
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
-		if err != nil {
+		if err != nil || n < 0 || n > 1e6 {
 			return 0, false
 		}
 		nums[i] = n
@@ -176,7 +183,7 @@ func parseClock(s string) (time.Duration, bool) {
 		ms, _ = strconv.Atoi(frac[:3])
 	}
 	d := time.Duration(h)*time.Hour + time.Duration(m)*time.Minute + time.Duration(sec)*time.Second + time.Duration(ms)*time.Millisecond
-	return d, true
+	return d, d <= maxCueTime
 }
 
 // ASS/SSA
@@ -391,6 +398,9 @@ func parseMicroDVD(text string) []cue {
 				fps = v
 				continue
 			}
+		}
+		if max(startF, endF)/fps > maxCueTime.Seconds() {
+			continue
 		}
 		cues = append(cues, cue{start: frames(startF, fps), end: frames(endF, fps), text: microDVDText(body)})
 	}

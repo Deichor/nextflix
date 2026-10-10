@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	"nextflix/internal/platform/database"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -283,5 +286,74 @@ func TestBackfillKeepsOrderAndValues(t *testing.T) {
 	}
 	if fg.Title != "Mine" || fg.PosterPath != "/fg.jpg" {
 		t.Fatalf("stored title must win: %+v", fg)
+	}
+}
+
+func TestBackfillMarksTriedRows(t *testing.T) {
+	db := testDB(t)
+	s := NewService(db, fakeLookup{550: {"Fight Club", "/fc.jpg", ""}})
+	for _, id := range []int{1, 2, 550} {
+		if _, err := s.Put(Update{ProfileID: 1, MediaType: "movie", TmdbID: id, Favorite: boolp(true)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Backfill(t.Context())
+	var tried int64
+	db.Model(&TitleRating{}).Where("backfilled_at IS NOT NULL").Count(&tried)
+	if tried != 3 {
+		t.Fatalf("tried = %d, want 3", tried)
+	}
+	if fc, _ := s.Item(1, "movie", 550); fc.Title != "Fight Club" {
+		t.Fatalf("fight club: %+v", fc)
+	}
+	// Rows tried lately are skipped on the next run
+	calls := 0
+	s.titles = countingLookup{&calls}
+	s.Backfill(t.Context())
+	if calls != 0 {
+		t.Fatalf("lookups = %d, want 0", calls)
+	}
+}
+
+type countingLookup struct{ n *int }
+
+func (c countingLookup) Lookup(string, int) (TitleMeta, error) {
+	*c.n++
+	return TitleMeta{}, errors.New("not found")
+}
+
+func TestConcurrentPutsWithImmediateTx(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TABLE profiles (id INTEGER PRIMARY KEY, name TEXT)").Error; err != nil {
+		t.Fatal(err)
+	}
+	db.Exec("INSERT INTO profiles (id, name) VALUES (1, 'Home')")
+	if err := db.AutoMigrate(Models()...); err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(db, nil)
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.Put(Update{ProfileID: 1, MediaType: "movie", TmdbID: 1 + i%3, RatingSet: true, Rating: str(Like)})
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	rows, _ := s.List(1, Filter{})
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3", len(rows))
 	}
 }

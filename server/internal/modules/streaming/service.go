@@ -43,6 +43,7 @@ type Service struct {
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
+	probeAt map[string]time.Time    // "hash:index" -> when probeCache got it (pruning)
 	// Tests: replace ffprobe, and the search of a draining player's sidegrade (findSource)
 	probeFn      func(ctx context.Context, hash string, index int) (*tsProbe, error)
 	sideSearchFn func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error)
@@ -75,6 +76,7 @@ type Service struct {
 	// Stream guard (guard.go): no drop touches a torrent a player uses
 	streamEnd   map[string]time.Time            // hash -> end of its last play stream (kept streamKeep)
 	seeking     map[string]int                  // hash -> running seekpoint requests
+	thumbing    map[string]int                  // hash -> running thumbnail jobs (guard only, not a reader)
 	dropLater   map[string]bool                 // drops the guard vetoed, retried by the janitor
 	hashTitles  map[string]map[string]time.Time // hash -> titles (keys without caps) that held it
 	streamKeep  time.Duration                   // a stream that ended this recently still guards its torrent

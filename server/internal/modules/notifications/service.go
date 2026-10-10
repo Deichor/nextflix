@@ -21,7 +21,7 @@ const (
 type Service struct {
 	cache *cache.Cache
 	tm    *tmdb.Client
-	repo  *repository // nil when redis is unavailable: the feed is disabled
+	repo  *repository // nil when REDIS_URL is unset: the feed is disabled
 
 	usedMu sync.Mutex
 	used   map[int]time.Time // TMDB id -> last time it was featured
@@ -43,7 +43,7 @@ func (s *Service) enabled() bool { return s.repo != nil }
 // Start runs the background generation loop until ctx is cancelled or Close is called.
 func (s *Service) Start(ctx context.Context) {
 	if !s.enabled() {
-		log.Printf("notifications: redis unavailable, feed disabled")
+		log.Printf("notifications: REDIS_URL not set, feed disabled")
 		return
 	}
 	if !s.tm.Enabled() {
@@ -61,9 +61,9 @@ func (s *Service) Start(ctx context.Context) {
 		}
 	}()
 
-	s.repo.purgeNonTMDB(ctx)
+	purged := s.repo.purgeNonTMDB(ctx)
 	go s.initialBatch(ctx)
-	s.loop(ctx)
+	s.loop(ctx, purged)
 }
 
 func (s *Service) Close() {
@@ -95,7 +95,7 @@ func (s *Service) initialBatch(ctx context.Context) {
 }
 
 // loop creates one notification from a random TMDB generator every 20 seconds.
-func (s *Service) loop(ctx context.Context) {
+func (s *Service) loop(ctx context.Context, purged bool) {
 	generators := []func(context.Context) error{
 		s.comingSoon,
 		s.trendingMovies,
@@ -108,6 +108,7 @@ func (s *Service) loop(ctx context.Context) {
 	}
 	ticker := time.NewTicker(generateEvery)
 	defer ticker.Stop()
+	failing := false
 
 	for n := 0; ; n++ {
 		select {
@@ -118,9 +119,18 @@ func (s *Service) loop(ctx context.Context) {
 		if n%10 == 0 {
 			s.cleanupUsed()
 		}
-		if err := generators[rand.Intn(len(generators))](ctx); err != nil {
-			log.Printf("notifications: generation failed: %v", err)
+		if !purged {
+			purged = s.repo.purgeNonTMDB(ctx)
 		}
+		// Redis may be down for a while: log when generation starts and stops failing, not every tick
+		err := generators[rand.Intn(len(generators))](ctx)
+		switch {
+		case err != nil && !failing:
+			log.Printf("notifications: generation failed (will keep retrying): %v", err)
+		case err == nil && failing:
+			log.Printf("notifications: generation works again")
+		}
+		failing = err != nil
 		if n%10 == 9 {
 			s.repo.trim(ctx)
 		}

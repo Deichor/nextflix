@@ -396,8 +396,8 @@ func ffmpegLiveReader(ctx context.Context, url string, stream int, from float64)
 	if from > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(from, 'f', 3, 64))
 	}
-	args = append(args, "-copyts", "-start_at_zero", "-i", url, "-map", fmt.Sprintf("0:%d", stream), "-c:s", "webvtt",
-		"-flush_packets", "1", "-f", "webvtt", "pipe:1")
+	args = withInput(append(args, "-copyts", "-start_at_zero"), url)
+	args = append(args, "-map", fmt.Sprintf("0:%d", stream), "-c:s", "webvtt", "-flush_packets", "1", "-f", "webvtt", "pipe:1")
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {

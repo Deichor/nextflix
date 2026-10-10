@@ -1,6 +1,7 @@
 package recommendations
 
 import (
+	"errors"
 	"log"
 	"math/rand/v2"
 	"sync"
@@ -20,10 +21,11 @@ type cached struct {
 }
 
 type Service struct {
-	ratings RatingsSource
-	catalog Catalog
-	similar SimilarSource // nil = TMDB's lists for every seed
-	now     func() time.Time
+	ratings  RatingsSource
+	catalog  Catalog
+	similar  SimilarSource  // nil = TMDB's lists for every seed
+	profiles ProfileChecker // nil = every id is accepted
+	now      func() time.Time
 
 	mu       sync.Mutex
 	cache    map[cacheKey]cached
@@ -66,6 +68,26 @@ func NewService(ratings RatingsSource, catalog Catalog) *Service {
 // recommendations and similar lists. Called once at startup.
 func (s *Service) SetSimilar(src SimilarSource) { s.similar = src }
 
+// SetProfiles makes For and Surprise refuse ids of profiles that do not exist. Called once at startup.
+func (s *Service) SetProfiles(check ProfileChecker) { s.profiles = check }
+
+// ErrUnknownProfile is returned for a profile id that does not exist.
+var ErrUnknownProfile = errors.New("unknown profile")
+
+func (s *Service) checkProfile(profileID uint) error {
+	if s.profiles == nil {
+		return nil
+	}
+	ok, err := s.profiles(profileID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrUnknownProfile
+	}
+	return nil
+}
+
 // Invalidate drops a profile's cached rows and surprise pools in every language (called when its ratings change).
 func (s *Service) Invalidate(profileID uint) {
 	s.mu.Lock()
@@ -88,6 +110,11 @@ func (s *Service) For(profileID uint, lang string) (*Response, error) {
 		s.mu.Unlock()
 		return c.resp, nil
 	}
+	s.mu.Unlock()
+	if err := s.checkProfile(profileID); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
 	if cl, ok := s.inflight[key]; ok {
 		s.mu.Unlock()
 		<-cl.done

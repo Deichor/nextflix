@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 )
@@ -29,6 +30,12 @@ type saveInput struct {
 }
 
 func validMediaType(t string) bool { return t == "movie" || t == "tv" }
+
+func inputSizeOK(in saveInput) bool {
+	return utf8.RuneCountInString(in.Title) <= maxTitleLen && utf8.RuneCountInString(in.EpisodeTitle) <= maxTitleLen &&
+		len(in.PosterPath) <= maxPathLen && len(in.BackdropPath) <= maxPathLen &&
+		len(in.Magnet) <= maxMagnetLen && len(in.Hash) <= maxHashLen
+}
 
 // headerProfileID parses X-User-ID; 0 when absent or invalid.
 func headerProfileID(c *gin.Context) uint {
@@ -95,6 +102,10 @@ func (h handler) save(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid season or episode"})
 		return
 	}
+	if !inputSizeOK(in) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a text field is too long"})
+		return
+	}
 	if in.Position < 0 || in.Duration < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid position or duration"})
 		return
@@ -132,7 +143,7 @@ func (h handler) continueWatching(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.s.ContinueWatching(profileID)
+	out, err := h.s.ContinueWatching(c.Request.Context(), profileID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load progress"})
 		return

@@ -37,7 +37,16 @@ type openSubtitles struct {
 	lastReq      time.Time
 	blockedUntil time.Time // 429 Retry-After
 	dlBlocked    time.Time // download quota used up (406)
+
+	loginFailFor   string    // owner (like tokenFor) whose login failed
+	loginFailUntil time.Time // no new login try for that owner before this
 }
+
+// A failed login is not tried again for this long (network failure, 429: osLoginRetryTemp).
+const (
+	osLoginRetry     = 10 * time.Minute
+	osLoginRetryTemp = time.Minute
+)
 
 func newOpenSubtitles(base string, client *upstream.Client) *openSubtitles {
 	if base == "" {
@@ -245,6 +254,10 @@ func (o *openSubtitles) login(ctx context.Context, st Settings) (string, string)
 		o.mu.Unlock()
 		return t, b
 	}
+	if o.loginFailFor == owner && time.Now().Before(o.loginFailUntil) {
+		o.mu.Unlock()
+		return "", o.base
+	}
 	o.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"username": st.OpenSubtitlesUsername, "password": st.OpenSubtitlesPassword})
@@ -253,6 +266,17 @@ func (o *openSubtitles) login(ctx context.Context, st Settings) (string, string)
 		BaseURL string `json:"base_url"`
 	}
 	if err := o.raw(ctx, st, o.base, "", http.MethodPost, "/login", body, &res); err != nil || res.Token == "" {
+		if err == nil {
+			err = errors.New("no token in the answer")
+		}
+		wait := osLoginRetry
+		if isTemporary(err) || errors.Is(err, ErrRateLimited) {
+			wait = osLoginRetryTemp
+		}
+		o.mu.Lock()
+		o.loginFailFor, o.loginFailUntil = owner, time.Now().Add(wait)
+		o.mu.Unlock()
+		log.Printf("subtitles: OpenSubtitles login failed (API key alone for %s): %v", wait, err)
 		return "", o.base
 	}
 	apiBase := o.base

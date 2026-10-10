@@ -91,11 +91,20 @@ func (in Input) applyTo(p *Profile) error {
 
 // EnsureDefault seeds the "Home" profile when none exist.
 func (s *Service) EnsureDefault() error {
-	n, err := countProfiles(s.db)
-	if err != nil || n > 0 {
-		return err
-	}
-	return s.db.Create(&Profile{Name: defaultProfileName, Avatar: defaultProfileAvatar, Color: defaultProfileColor, Language: defaultLanguage}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		n, err := countProfiles(tx)
+		if err != nil || n > 0 {
+			return err
+		}
+		return tx.Create(&Profile{Name: defaultProfileName, Avatar: defaultProfileAvatar, Color: defaultProfileColor, Language: defaultLanguage}).Error
+	})
+}
+
+// Exists reports whether a profile with id exists.
+func (s *Service) Exists(id uint) (bool, error) {
+	var n int64
+	err := s.db.Model(&Profile{}).Where("id = ?", id).Count(&n).Error
+	return n > 0, err
 }
 
 func (s *Service) List() ([]Profile, error) {
@@ -118,14 +127,18 @@ func (s *Service) Create(in Input) (*Profile, error) {
 	if err := in.applyTo(&p); err != nil {
 		return nil, err
 	}
-	n, err := countProfiles(s.db)
+	// Count and insert in one (immediate) transaction so concurrent creates cannot pass the limit
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		n, err := countProfiles(tx)
+		if err != nil {
+			return err
+		}
+		if n >= MaxProfiles {
+			return ErrLimit
+		}
+		return tx.Create(&p).Error
+	})
 	if err != nil {
-		return nil, err
-	}
-	if n >= MaxProfiles {
-		return nil, ErrLimit
-	}
-	if err := s.db.Create(&p).Error; err != nil {
 		return nil, err
 	}
 	return &p, nil

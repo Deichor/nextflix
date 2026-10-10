@@ -203,13 +203,16 @@ func (d *tsDebrid) fetchChunk(f *tsProxyFile, c *tsProxyChunk) {
 	ctx, cancel := context.WithTimeout(context.Background(), tsProxyFetchMax)
 	defer cancel()
 	pc := &d.cache
-	fail := func() {
+	giveUp := func(broken bool) {
 		pc.mu.Lock()
 		c.failed = true
 		c.progressLocked()
 		pc.mu.Unlock()
-		d.markBroken(f.hash, f.index)
+		if broken {
+			d.markBroken(f.hash, f.index)
+		}
 	}
+	fail := func() { giveUp(true) }
 	refreshes, fails := 0, 0
 	force := false
 	for {
@@ -226,7 +229,8 @@ func (d *tsDebrid) fetchChunk(f *tsProxyFile, c *tsProxyChunk) {
 		link, err := d.link(ctx, f.hash, f.index, force)
 		force = false
 		if err != nil {
-			fail()
+			// Only TorBox's own failure marks the file; this fetch running out of time does not
+			giveUp(ctx.Err() == nil)
 			return
 		}
 		// A CDN answer slower than tsProxyFirstByte is a stalled connection (DPI): try a new one

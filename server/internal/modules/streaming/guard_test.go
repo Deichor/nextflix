@@ -199,3 +199,94 @@ func TestDropGuardCoversAllPaths(t *testing.T) {
 		t.Fatalf("dropped %q after the guard, want 7,8,a", got)
 	}
 }
+
+// A thumbnail job keeps its torrent loaded but is no player: the title's release goes through
+// at once, the hold is not extended, and the vetoed drop happens when the job ends.
+func TestThumbJobIsNoReader(t *testing.T) {
+	s, rec := newWarmService(t)
+	q := tsResolveQuery{mediaType: "movie", title: "Hoppers", year: 2026}
+	w := s.holdWarm(tsResolveKey(q))
+	s.setSource(w, hx('a'))
+	s.thumbBegin(hx('a'))
+	s.warmMu.Lock()
+	reader, streaming := s.readerLocked(hx('a')), s.streamingLocked(tsResolveKey(q))
+	busy := s.streamBusyLocked(hx('a'), time.Now())
+	s.warmMu.Unlock()
+	if reader || streaming != "" || busy == "" {
+		t.Fatalf("reader %v, streaming %q, busy %q", reader, streaming, busy)
+	}
+	s.releaseTitle(tsResolveBaseKey(q), 0)
+	if !releasedOf(s, w) {
+		t.Fatal("release ignored during a thumbnail job")
+	}
+	if got := rec.list(); got != "" {
+		t.Fatalf("dropped %q under ffmpeg", got)
+	}
+	s.thumbEnd(hx('a'))
+	if got := rec.list(); got != "a" {
+		t.Fatalf("dropped %q after the job, want a", got)
+	}
+
+	// A closing player's hash release is not ignored either
+	rec.reset()
+	w2 := warmWith(s, q, hx('b'))
+	s.thumbBegin(hx('b'))
+	s.releaseHashes([]string{hx('b')})
+	s.warmMu.Lock()
+	held := w2.hashes[hx('b')]
+	s.warmMu.Unlock()
+	if held {
+		t.Fatal("hash release ignored during a thumbnail job")
+	}
+	s.thumbEnd(hx('b'))
+	if got := rec.list(); got != "b" {
+		t.Fatalf("dropped %q, want b", got)
+	}
+
+	// Nor does a job keep an idle title's hold alive
+	w3 := warmWith(s, q, hx('c'))
+	s.thumbBegin(hx('c'))
+	defer s.thumbEnd(hx('c'))
+	s.warmTick(time.Now().Add(tsHoldTime + time.Minute))
+	if !releasedOf(s, w3) {
+		t.Fatal("a thumbnail job extended the hold")
+	}
+}
+
+func TestPruneStateDropsOldEntries(t *testing.T) {
+	s, _ := newWarmService(t)
+	now := time.Now()
+	old := now.Add(-time.Hour)
+	s.warmMu.Lock()
+	s.lastUse[hx('a')] = old
+	s.lastUse[hx('b')] = now
+	s.streamEnd[hx('c')] = old
+	s.warmMu.Unlock()
+	pa, pe := hx('d')+":0", hx('e')+":0"
+	s.probeCache.Store(pa, &tsProbe{})
+	s.probeCache.Store(pe, &tsProbe{})
+	s.pruneState(now) // adopts the probes
+	s.probeMu.Lock()
+	s.probeAt[pa], s.probeAt[pe] = now.Add(-2*tsProbeKeep), now.Add(-2*tsProbeKeep)
+	s.probeMu.Unlock()
+	s.playBegin(hx('e')) // in use: its probe stays
+	defer s.playEnd(hx('e'))
+	s.pruneState(now)
+
+	s.warmMu.Lock()
+	_, a := s.lastUse[hx('a')]
+	_, b := s.lastUse[hx('b')]
+	_, c := s.streamEnd[hx('c')]
+	s.warmMu.Unlock()
+	if a || !b || c {
+		t.Fatalf("lastUse a %v b %v, streamEnd c %v", a, b, c)
+	}
+	_, d := s.probeCache.Load(pa)
+	_, e := s.probeCache.Load(pe)
+	s.probeMu.Lock()
+	_, dAt := s.probeAt[pa]
+	s.probeMu.Unlock()
+	if d || dAt || !e {
+		t.Fatalf("probe d %v (%v), e %v", d, dAt, e)
+	}
+}

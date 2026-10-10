@@ -4,9 +4,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestChapterKind(t *testing.T) {
@@ -95,5 +101,49 @@ func TestCommunityFallbackAndShare(t *testing.T) {
 	}
 	if theCalls.Load() != 1 || introCalls.Load() != 1 {
 		t.Fatalf("calls: %d %d", theCalls.Load(), introCalls.Load())
+	}
+}
+
+func TestTheIntroDBRateLimitPausesAndShortensTheCache(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "s.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(Models()...); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/the") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"intro":{"start_ms":314500,"end_ms":331000}}`))
+	}))
+	defer srv.Close()
+	s := NewService(db, Config{IMDb: func(int) (string, error) { return "tt0903747", nil }})
+	s.theIntroDBURL, s.introDBURL = srv.URL+"/the", srv.URL+"/intro"
+
+	r := s.Get(context.Background(), Query{TmdbID: 1396, Season: 1, Episode: 2, Duration: 2900})
+	if r.Intro == nil || r.Intro.Source != "introdb" {
+		t.Fatalf("intro = %+v", r.Intro)
+	}
+	s.mu.Lock()
+	paused := time.Until(s.pausedTo)
+	s.mu.Unlock()
+	if paused < limitPause-time.Minute {
+		t.Fatalf("TheIntroDB's 429 did not pause the lookups (%v)", paused)
+	}
+	var row SkipSegment
+	if err := db.First(&row).Error; err != nil || row.Source != "introdb" {
+		t.Fatalf("saved %+v %v", row, err)
+	}
+	// Without TheIntroDB's data the row is asked again after missingTTL, with it after foundTTL
+	db.Model(&row).Update("fetched_at", time.Now().Add(-missingTTL-time.Hour))
+	if _, ok := s.cached(1396, 1, 2, 2900); ok {
+		t.Fatal("a row without TheIntroDB data kept for foundTTL")
+	}
+	db.Model(&row).Update("source", "theintrodb+introdb")
+	if _, ok := s.cached(1396, 1, 2, 2900); !ok {
+		t.Fatal("a TheIntroDB row expired early")
 	}
 }

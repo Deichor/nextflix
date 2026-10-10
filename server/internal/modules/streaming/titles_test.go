@@ -225,3 +225,41 @@ func TestEnglishTitleReplacesLocalizedTitle(t *testing.T) {
 		t.Fatalf("title without tmdb_id changed: %q", plain.title)
 	}
 }
+
+// airTMDB answers shows with a first-air date.
+type airTMDB struct{ dates map[int]string }
+
+func (f airTMDB) GetMovieDetails(id int) (*tmdb.MovieDetails, error) {
+	return &tmdb.MovieDetails{Movie: tmdb.Movie{ID: id, Title: "Film"}}, nil
+}
+
+func (f airTMDB) GetTVDetails(id int) (*tmdb.TVDetails, error) {
+	return &tmdb.TVDetails{TV: tmdb.TV{ID: id, Name: "Doctor Who", FirstAirDate: f.dates[id]}}, nil
+}
+
+func (f airTMDB) GetSeasonDetails(int, int) (*tmdb.Season, error) { return &tmdb.Season{}, nil }
+
+func TestEnglishTitleSetsFirstAirYear(t *testing.T) {
+	s := NewService(nil, Config{TMDB: airTMDB{dates: map[int]string{57243: "2005-03-26", 239770: "2023-11-25", 1: ""}}})
+	cases := []struct {
+		id, year, want int
+	}{
+		{57243, 0, 2005},
+		{239770, 0, 2023},
+		{1, 0, 0},           // no date: unknown
+		{57243, 2010, 2005}, // the client's year stays (cache key), firstAir is TMDB's
+	}
+	for _, tc := range cases {
+		q := tsResolveQuery{mediaType: "tv", title: "Doctor Who", year: tc.year, season: 1, episode: 1, tmdbID: tc.id}
+		s.englishTitle(&q)
+		if q.firstAir != tc.want || q.year != tc.year {
+			t.Errorf("tmdb %d: firstAir %d year %d, want %d / %d", tc.id, q.firstAir, q.year, tc.want, tc.year)
+		}
+	}
+	// Movies do not get one
+	m := tsResolveQuery{mediaType: "movie", title: "Film", tmdbID: 5}
+	s.englishTitle(&m)
+	if m.firstAir != 0 {
+		t.Errorf("movie firstAir %d", m.firstAir)
+	}
+}

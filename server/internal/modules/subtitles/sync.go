@@ -361,7 +361,9 @@ func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef
 	for i, c := range cues {
 		spans[i] = span{c.start, c.end}
 	}
-	fit, ok := align(spans, ref.Windows)
+	// lengthFits still sees every cue (a longer cut runs past the end)
+	timed := clampSpans(spans, ref.Probe.Duration)
+	fit, ok := align(timed, ref.Windows)
 	for round := 0; ok && !ref.Full && round < 2; round++ {
 		extra := fit.extraWindows(syncWindowLen, ref.windowCap()-len(ref.Windows))
 		if len(extra) == 0 {
@@ -372,7 +374,7 @@ func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef
 			break
 		}
 		ref = more
-		fit, ok = align(spans, ref.Windows)
+		fit, ok = align(timed, ref.Windows)
 	}
 	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: ref.kind(), Windows: len(ref.Windows)}
 	if !ok || !fit.good() || !lengthFits(spans, fit, ref.Probe.Duration) {
@@ -424,7 +426,8 @@ func vttCues(vtt []byte) []liveCue {
 }
 
 // alternatives are the other subtitles of inner's language listed for the file, best first
-// (not forced, not OpenSubtitles while its quota is used up).
+// (not forced). OpenSubtitles ones only when already on disk (a download counts against the
+// daily quota the viewer needs), after the other sources.
 func (y *syncer) alternatives(hash string, index int, inner string) []string {
 	_, lang, _, err := decodeID(inner)
 	if err != nil {
@@ -433,19 +436,22 @@ func (y *syncer) alternatives(hash string, index int, inner string) []string {
 	y.mu.Lock()
 	list := y.lists[syncFileKey(hash, index)]
 	y.mu.Unlock()
-	quota := !y.svc.OpenSubtitlesQuotaUntil().IsZero()
-	var out []string
+	var out, cached []string
 	for _, s := range list {
-		if len(out) >= syncAlternatives {
-			break
-		}
 		in, _, _, ok := unwrapSyncID(s.ID)
-		if !ok || in == inner || s.Forced || s.Language != lang || (quota && s.Source == SourceOpenSubtitles) {
+		if !ok || in == inner || s.Forced || s.Language != lang {
+			continue
+		}
+		if s.Source == SourceOpenSubtitles {
+			if y.svc.hasFile(in) {
+				cached = append(cached, in)
+			}
 			continue
 		}
 		out = append(out, in)
 	}
-	return out
+	out = append(out, cached...)
+	return out[:min(len(out), syncAlternatives)]
 }
 
 func (y *syncer) refState(fk string) *syncRefState {
@@ -494,7 +500,7 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 	probe, err := y.probeFile(ctx, hash, index, url)
 	var r syncRef
 	if cues := y.fullReference(ctx, hash, index); len(cues) > 0 {
-		r = syncRef{Probe: probe, Windows: fullCueWindows(cues, syncWindowLen), Full: true}
+		r = syncRef{Probe: probe, Windows: fullCueWindows(clampSpans(cues, probe.Duration), syncWindowLen), Full: true}
 	} else {
 		if err != nil {
 			return syncRef{}, err

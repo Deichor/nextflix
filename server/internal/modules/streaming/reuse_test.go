@@ -233,3 +233,42 @@ func TestReuseStepDownPickResumesUncappedSource(t *testing.T) {
 		t.Fatalf("capped answer %+v %+v, want the saved 1080p", ans, ans.Source)
 	}
 }
+
+// A saved TorBox source resumed while TorBox is off: its index is TorBox's list position, so
+// the torrent's file is found by path and size (TorrServer lists it as file 2).
+func TestReuseDebridSourceMapsToTheTorrentFile(t *testing.T) {
+	f := newFakeTorBox(t)
+	var hits atomic.Int32
+	ts := swappedTorrServer(t, &hits)
+	s := reuseSetup(t, f, ts.URL, false)
+	q := tsResolveQuery{mediaType: "movie", title: "Movie", year: 2020, runtime: 100}
+	res := tsResolveResult{Magnet: tsBuildMagnet(tbHash, "Movie (2020)", nil), Hash: tbHash, Index: 1, FileName: "Movie.2020.1080p.mkv",
+		TorrentTitle: "Movie (2020)", Size: 3 << 20, Source: tsSourceTorBox, Debrid: true}
+	s.resolveCache.Store(tsResolveKey(q), tsCacheEntry{res: res, expires: time.Now().Add(time.Hour)})
+	ans := reuseRun(s, tbHash, 1)
+	if ans.Action != "play" || ans.Source == nil || ans.Source.Debrid || ans.Source.Index != 2 || ans.Source.Size != 3<<20 {
+		t.Fatalf("answer %+v %+v, want the torrent's file 2", ans, ans.Source)
+	}
+	if _, ok := s.debrid.registered(tbHash, 1); ok {
+		t.Fatal("still registered as a TorBox source")
+	}
+	if u := s.fileURL(tbHash, 2); u != ts.URL+"/stream?link="+tbHash+"&index=2&play" {
+		t.Fatalf("play reads %q", u)
+	}
+}
+
+func TestReuseTorrentFileChecksPathAndSize(t *testing.T) {
+	files := []tsFileStat{{ID: 1, Path: "a/sample.mkv", Length: 10}, {ID: 2, Path: "a/movie.mkv", Length: 500}}
+	if f, ok := tsReuseTorrentFile(files, 2, nil); !ok || f.ID != 2 {
+		t.Fatalf("by id: %+v %v", f, ok)
+	}
+	if f, ok := tsReuseTorrentFile(files, 1, &tsDebridSource{path: "movie.mkv", size: 500}); !ok || f.ID != 2 {
+		t.Fatalf("debrid index 1: %+v %v, want file 2", f, ok)
+	}
+	if _, ok := tsReuseTorrentFile(files, 1, &tsDebridSource{path: "other.mkv", size: 77}); ok {
+		t.Fatal("matched a file of another size")
+	}
+	if _, ok := tsReuseTorrentFile(files, 1, &tsDebridSource{}); ok {
+		t.Fatal("matched without path or size")
+	}
+}

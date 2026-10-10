@@ -310,7 +310,7 @@ func (s *Service) searchPool(tm *tmdb.Client, query string, n int) ([]tmdb.Searc
 func (s *Service) discover(c *gin.Context) {
 	f := ParseFilter(c.Request.URL.Query())
 	tm := s.client(c)
-	query := strings.TrimSpace(c.Query("q"))
+	query := searchQuery(c)
 	var (
 		res *DiscoverPage
 		err error

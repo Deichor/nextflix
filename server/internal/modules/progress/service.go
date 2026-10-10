@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -55,22 +56,25 @@ func (s *Service) Save(row StreamProgress) (*StreamProgress, error) {
 }
 
 // ContinueWatching returns the newest unfinished entry per title, newest first. A show whose
-// newest episode is finished comes with the next episode instead (its saved position, if any).
-func (s *Service) ContinueWatching(profileID uint) ([]StreamProgress, error) {
+// newest episode is finished comes with the next unfinished episode instead (its saved
+// position, if any). The next-episode lookups run in parallel, capped and bounded by a deadline.
+func (s *Service) ContinueWatching(ctx context.Context, profileID uint) ([]StreamProgress, error) {
 	rows, err := listByProfile(s.db, profileID, 1000)
 	if err != nil {
 		return nil, err
 	}
 	saved := make(map[string]StreamProgress, len(rows))
 	for _, r := range rows {
-		key := fmt.Sprintf("%s:%d:%d:%d", r.MediaType, r.TmdbID, r.Season, r.Episode)
+		key := episodeKey(r.MediaType, r.TmdbID, r.Season, r.Episode)
 		if _, ok := saved[key]; !ok {
 			saved[key] = r
 		}
 	}
 	// The newest entry decides for each title; a finished movie (or last episode) hides it
 	seen := make(map[string]bool)
-	out := make([]StreamProgress, 0, continueWatchingLimit)
+	cands := make([]StreamProgress, 0, continueWatchingLimit)
+	var lookups []int // indexes into cands of finished episodes that need the next one
+	direct := 0
 	for _, r := range rows {
 		key := fmt.Sprintf("%s:%d", r.MediaType, r.TmdbID)
 		if seen[key] {
@@ -78,20 +82,28 @@ func (s *Service) ContinueWatching(profileID uint) ([]StreamProgress, error) {
 		}
 		seen[key] = true
 		if r.finished() {
-			if r.MediaType != "tv" || s.next == nil {
+			if r.MediaType != "tv" || s.next == nil || len(lookups) >= maxNextLookups {
 				continue
 			}
-			ns, ne, ok := s.next(r.TmdbID, r.Season, r.Episode)
+			lookups = append(lookups, len(cands))
+		} else {
+			direct++
+		}
+		cands = append(cands, r)
+		if direct >= continueWatchingLimit {
+			break
+		}
+	}
+
+	resolved := s.resolveNext(ctx, cands, lookups, saved)
+	out := make([]StreamProgress, 0, continueWatchingLimit)
+	for i, r := range cands {
+		if r.finished() {
+			n, ok := resolved[i]
 			if !ok {
 				continue
 			}
-			if p, ok := saved[fmt.Sprintf("tv:%d:%d:%d", r.TmdbID, ns, ne)]; ok && !p.finished() {
-				p.UpdatedAt = r.UpdatedAt
-				r = p
-			} else {
-				r = StreamProgress{ProfileID: r.ProfileID, MediaType: "tv", TmdbID: r.TmdbID, Season: ns, Episode: ne,
-					Title: r.Title, PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, UpdatedAt: r.UpdatedAt}
-			}
+			r = n
 		}
 		out = append(out, r)
 		if len(out) >= continueWatchingLimit {
@@ -99,6 +111,75 @@ func (s *Service) ContinueWatching(profileID uint) ([]StreamProgress, error) {
 		}
 	}
 	return out, nil
+}
+
+// resolveNext finds the next unfinished episode for each finished candidate. Lookups that are
+// not done by the deadline (or when ctx ends) drop their title from this answer.
+func (s *Service) resolveNext(ctx context.Context, cands []StreamProgress, idx []int, saved map[string]StreamProgress) map[int]StreamProgress {
+	out := make(map[int]StreamProgress, len(idx))
+	if len(idx) == 0 {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(ctx, nextLookupTimeout)
+	defer cancel()
+	type result struct {
+		i  int
+		p  StreamProgress
+		ok bool
+	}
+	results := make(chan result, len(idx)) // buffered: late workers never block
+	sem := make(chan struct{}, nextLookupWorkers)
+	for _, i := range idx {
+		go func(i int) {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results <- result{i: i}
+				return
+			}
+			defer func() { <-sem }()
+			p, ok := s.stepNext(ctx, cands[i], saved)
+			results <- result{i, p, ok}
+		}(i)
+	}
+	for range idx {
+		select {
+		case r := <-results:
+			if r.ok {
+				out[r.i] = r.p
+			}
+		case <-ctx.Done():
+			return out
+		}
+	}
+	return out
+}
+
+// stepNext walks forward from a finished episode past episodes that are finished too (at most
+// maxNextSteps), returning the saved row of the first unfinished one or a fresh row at 0.
+func (s *Service) stepNext(ctx context.Context, r StreamProgress, saved map[string]StreamProgress) (StreamProgress, bool) {
+	season, episode := r.Season, r.Episode
+	for step := 0; step < maxNextSteps && ctx.Err() == nil; step++ {
+		ns, ne, ok := s.next(r.TmdbID, season, episode)
+		if !ok || (ns == season && ne == episode) {
+			return StreamProgress{}, false
+		}
+		p, ok := saved[episodeKey("tv", r.TmdbID, ns, ne)]
+		if !ok {
+			return StreamProgress{ProfileID: r.ProfileID, MediaType: "tv", TmdbID: r.TmdbID, Season: ns, Episode: ne,
+				Title: r.Title, PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, UpdatedAt: r.UpdatedAt}, true
+		}
+		if !p.finished() {
+			p.UpdatedAt = r.UpdatedAt
+			return p, true
+		}
+		season, episode = ns, ne
+	}
+	return StreamProgress{}, false
+}
+
+func episodeKey(mediaType string, tmdbID, season, episode int) string {
+	return fmt.Sprintf("%s:%d:%d:%d", mediaType, tmdbID, season, episode)
 }
 
 func (s *Service) Item(profileID uint, mediaType string, tmdbID, season, episode int) (*StreamProgress, error) {

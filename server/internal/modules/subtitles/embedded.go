@@ -30,6 +30,20 @@ const (
 	embeddedMaxOutputSize = 20 << 20
 )
 
+// inputLimits go before every -i (and ffprobe's input): the files are untrusted, so ffmpeg may
+// only read them over HTTP(S) (TorrServer, the TorBox proxy, the local byte cap proxy) and only
+// as video containers (no playlists, concat lists or image sequences that open other files).
+var inputLimits = []string{
+	"-protocol_whitelist", "http,https,tcp,tls",
+	"-format_whitelist", "matroska,webm,mov,mp4,avi,mpegts,flv,asf",
+}
+
+// withInput appends the input limits and -i url to args.
+func withInput(args []string, url string) []string {
+	args = append(args, inputLimits...)
+	return append(args, "-i", url)
+}
+
 var textSubCodecs = map[string]bool{"subrip": true, "srt": true, "ass": true, "ssa": true, "mov_text": true, "webvtt": true, "text": true}
 
 type EmbeddedSub struct {
@@ -57,8 +71,9 @@ func ListEmbeddedSubs(ctx context.Context, torrServerURL, hash string, fileIndex
 	}
 	pctx, cancel := context.WithTimeout(ctx, embeddedProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(pctx, "ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
-		"-select_streams", "s", torrFileURL(torrServerURL, hash, fileIndex)).Output()
+	args := withInput([]string{"-v", "error", "-print_format", "json", "-show_streams", "-select_streams", "s"},
+		torrFileURL(torrServerURL, hash, fileIndex))
+	out, err := exec.CommandContext(pctx, "ffprobe", args...).Output()
 	if err != nil {
 		if pctx.Err() != nil {
 			// Killed at the time limit (a slow swarm): asked again on the next list, not cached as failed
@@ -190,8 +205,9 @@ func ExtractEmbeddedSub(ctx context.Context, torrServerURL, hash string, fileInd
 	}
 	ctx, cancel := context.WithTimeout(ctx, embeddedExtractLimit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-v", "error", "-i", torrFileURL(torrServerURL, hash, fileIndex),
-		"-map", fmt.Sprintf("0:%d", streamIndex), "-f", "webvtt", "pipe:1")
+	args := withInput([]string{"-nostdin", "-v", "error"}, torrFileURL(torrServerURL, hash, fileIndex))
+	args = append(args, "-map", fmt.Sprintf("0:%d", streamIndex), "-f", "webvtt", "pipe:1")
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stdout limitedBuffer
 	var stderr bytes.Buffer
 	stdout.max = embeddedMaxOutputSize

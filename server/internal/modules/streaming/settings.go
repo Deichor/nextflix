@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,7 +18,40 @@ import (
 
 const indexerTestTimeout = 30 * time.Second
 
-var errIndexerNotConfigured = errors.New("Jackett URL and API key must be configured")
+var (
+	errIndexerNotConfigured = errors.New("Jackett URL and API key must be configured")
+	errIndexerUnreachable   = errors.New("Jackett connection failed")
+)
+
+// tsDefaultJackettURL is the compose service (deploy/docker-compose.yml).
+const tsDefaultJackettURL = "http://jackett:9117"
+
+// jackettTestClient never follows redirects, so a test cannot be bounced to another host.
+var jackettTestClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// tsServiceName: a single-label host (a compose service or LAN machine) that starts with a
+// letter, so no resolver reads it as a numeric IP ("2130706433", "0x7f000001").
+var tsServiceName = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
+
+// jackettHostAllowed: Jackett runs next to Nextflix, so its URL may only name a loopback or
+// private (RFC 1918 / ULA) address, a compose service or LAN name, or a *.local / *.lan host.
+func jackettHostAllowed(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate()
+	}
+	if tsServiceName.MatchString(h) || h == "host.docker.internal" {
+		return true
+	}
+	for _, suf := range []string{".local", ".lan", ".home.arpa", ".localhost"} {
+		if strings.HasSuffix(h, suf) && len(h) > len(suf) {
+			return true
+		}
+	}
+	return false
+}
 
 // SettingsInput holds the optional fields of PUT /api/settings/indexer. For the API key a
 // missing field or an empty string keeps the stored key and null clears it.
@@ -85,10 +122,26 @@ func normalizeJackettURL(raw string) (string, error) {
 		return "", nil
 	}
 	u, err := url.Parse(v)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
 		return "", SettingsError{"Jackett URL must be an http(s) URL"}
 	}
+	if !jackettHostAllowed(u.Hostname()) {
+		return "", SettingsError{"Jackett URL must point to a local host (e.g. http://jackett:9117, localhost, a private IP or *.local)"}
+	}
 	return v, nil
+}
+
+// sameJackettURL compares two Jackett base URLs (scheme and host case-insensitive).
+func sameJackettURL(a, b string) bool {
+	norm := func(v string) string {
+		v = strings.TrimSuffix(strings.TrimSpace(v), "/")
+		if u, err := url.Parse(v); err == nil && u.Host != "" {
+			u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+			return u.String()
+		}
+		return v
+	}
+	return a != "" && norm(a) == norm(b)
 }
 
 func (s *Service) UpdateSettings(in SettingsInput) (*IndexerSettings, error) {
@@ -137,39 +190,77 @@ func (s *Service) UpdateSettings(in SettingsInput) (*IndexerSettings, error) {
 	return st, nil
 }
 
-// TestIndexer runs a small search against Jackett. Empty input fields fall back to the
-// saved settings, then to the env config. Returns the URL used and the result count.
+// TestIndexer runs a small search against Jackett. An empty URL falls back to the saved
+// settings, then to the env config. An empty key falls back to a stored key (saved, then env)
+// only when the URL is one resolve sends that key to: a stored key never goes to a new URL.
+// Returns the URL used and the result count.
 func (s *Service) TestIndexer(ctx context.Context, in TestInput) (string, int, error) {
 	base, err := normalizeJackettURL(in.JackettURL)
 	if err != nil {
 		return "", 0, err
 	}
-	key := strings.TrimSpace(in.JackettAPIKey)
-	if base == "" || key == "" {
+	var saved IndexerSettings
+	if s.db != nil {
 		if st, err := loadSettings(s.db); err == nil {
-			if base == "" {
-				base = st.JackettURL
-			}
-			if key == "" {
-				key = st.JackettAPIKey
-			}
+			saved = *st
 		}
 	}
+	envURL := strings.TrimSuffix(strings.TrimSpace(s.cfg.JackettURL), "/")
 	if base == "" {
-		base = strings.TrimSuffix(strings.TrimSpace(s.cfg.JackettURL), "/")
+		base = saved.JackettURL
 	}
-	if key == "" {
-		key = strings.TrimSpace(s.cfg.JackettAPIKey)
+	if base == "" {
+		base = envURL
+	}
+	key := strings.TrimSpace(in.JackettAPIKey)
+	if key == "" && (sameJackettURL(base, saved.JackettURL) || sameJackettURL(base, envURL) || sameJackettURL(base, tsDefaultJackettURL)) {
+		key = saved.JackettAPIKey
+		if key == "" {
+			key = strings.TrimSpace(s.cfg.JackettAPIKey)
+		}
 	}
 	if base == "" || key == "" {
 		return "", 0, errIndexerNotConfigured
 	}
+	// A saved or env URL from before the host check is checked too
+	if _, err := normalizeJackettURL(base); err != nil {
+		return "", 0, err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, indexerTestTimeout)
 	defer cancel()
-	res, err := NewTorrentSearcher(base, key, 0).SearchJackettRaw(ctx, "test", "2000", "5000")
+	n, err := jackettTestSearch(ctx, base, key)
 	if err != nil {
-		return base, 0, fmt.Errorf("Jackett connection failed: %w", err)
+		log.Printf("settings: Jackett test failed: %v", err)
+		return base, 0, errIndexerUnreachable
 	}
-	return base, len(res), nil
+	return base, n, nil
+}
+
+// jackettTestSearch runs Jackett's aggregate search for "test" (no redirects) and counts the
+// results. Errors never carry the request URL (it holds the key).
+func jackettTestSearch(ctx context.Context, base, key string) (int, error) {
+	params := url.Values{"apikey": {key}, "Query": {"test"}, "Category[]": {"2000", "5000"}}
+	u := strings.TrimSuffix(base, "/") + "/api/v2.0/indexers/all/results?" + params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, errors.New("invalid Jackett URL")
+	}
+	resp, err := jackettTestClient.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, errors.New("jackett returned status " + resp.Status)
+	}
+	var jr JackettResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&jr); err != nil {
+		return 0, errors.New("jackett answer is not JSON")
+	}
+	return len(jr.Results), nil
 }

@@ -169,6 +169,7 @@ func (s *Service) probeHomeReleases(q tsResolveQuery, cands []tsCandidate) {
 		wg.Add(1)
 		go func(i int, c tsCandidate) {
 			defer wg.Done()
+			defer tsCatch("home release length check", func(error) {})
 			hash := strings.ToLower(c.hash)
 			dur, err := s.probeDebridHeader(ctx, c, q, items[hash])
 			if err != nil || dur <= 0 {

@@ -563,6 +563,10 @@ func rankSimilar(src *simSource, cands []*simCand, today string, limit int) []*s
 	}
 	sort.SliceStable(related, func(i, j int) bool { return related[i].score > related[j].score })
 	if len(related) > simRelatedMax {
+		// Overflow spin-offs compete as plain matches
+		for _, c := range related[simRelatedMax:] {
+			c.related = false
+		}
 		rest = append(rest, related[simRelatedMax:]...)
 		related = related[:simRelatedMax]
 	}

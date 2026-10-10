@@ -55,8 +55,8 @@ type mediaProbeOutput struct {
 func probeMedia(ctx context.Context, url string) (mediaProbe, error) {
 	ctx, cancel := context.WithTimeout(ctx, embeddedProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-print_format", "json", "-show_format",
-		"-show_streams", url).Output()
+	args := withInput([]string{"-v", "error", "-print_format", "json", "-show_format", "-show_streams"}, url)
+	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
 		return mediaProbe{}, fmt.Errorf("ffprobe failed: %w", err)
 	}
@@ -177,11 +177,11 @@ func readSyncWindow(ctx context.Context, url string, p mediaProbe, start, length
 	frames := int(length * syncRate)
 	if p.TextSub >= 0 {
 		// -copyts: after -ss a subtitle's times count from the keyframe before start, not from start
-		args := []string{"-nostdin", "-v", "error",
+		args := withInput([]string{"-nostdin", "-v", "error",
 			"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-			"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-copyts", "-start_at_zero", "-i", url,
-			"-map", fmt.Sprintf("0:%d", p.TextSub), "-c:s", "webvtt",
-			"-to", strconv.FormatFloat(start+length, 'f', 3, 64), "-f", "webvtt", "pipe:1"}
+			"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-copyts", "-start_at_zero"}, url)
+		args = append(args, "-map", fmt.Sprintf("0:%d", p.TextSub), "-c:s", "webvtt",
+			"-to", strconv.FormatFloat(start+length, 'f', 3, 64), "-f", "webvtt", "pipe:1")
 		out, err := runFFmpeg(ctx, args, 4<<20)
 		if ctx.Err() != nil {
 			return refWindow{}, err
@@ -197,9 +197,10 @@ func readSyncWindow(ctx context.Context, url string, p mediaProbe, start, length
 	if p.Center {
 		af = []string{"-af", "pan=mono|c0=FC"}
 	}
-	args := []string{"-nostdin", "-v", "error",
+	args := withInput([]string{"-nostdin", "-v", "error",
 		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-		"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-i", url, "-map", fmt.Sprintf("0:%d", p.Audio)}
+		"-ss", strconv.FormatFloat(start, 'f', 3, 64)}, url)
+	args = append(args, "-map", fmt.Sprintf("0:%d", p.Audio))
 	args = append(args, af...)
 	args = append(args, "-ar", strconv.Itoa(syncSampleRate), "-t", strconv.FormatFloat(length, 'f', 3, 64),
 		"-f", "s16le", "pipe:1")

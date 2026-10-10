@@ -26,6 +26,10 @@ const (
 	hashLimit     = 20 * time.Second
 )
 
+// A player waits this long for a whole extraction of an embedded track; after that (or when it
+// fails) the track is read live while the extraction goes on (tests shorten it).
+var embeddedWait = 20 * time.Second
+
 // IMDbLookup returns the IMDb id ("tt0903747") of a movie or TV show (mediaType "movie" | "tv").
 type IMDbLookup func(mediaType string, tmdbID int) (string, error)
 
@@ -68,6 +72,8 @@ type Service struct {
 
 	refreshMu sync.Mutex
 	refreshed map[string]time.Time // list base key -> last refresh=1 that skipped the cache
+
+	extract func(ctx context.Context, torrServerURL, hash string, fileIndex, streamIndex int) ([]byte, error)
 }
 
 // refreshEvery: a title's provider answers are fetched again (refresh=1) at most this often.
@@ -96,6 +102,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		ta:        newTurkceAltyazi(cfg.TurkceAltyaziURL, cfg.FlareSolverrURL, files),
 		hashes:    map[string]string{},
 		refreshed: map[string]time.Time{},
+		extract:   ExtractEmbeddedSub,
 	}
 	if cfg.Debrid != nil {
 		debridHook.Store(cfg.Debrid)
@@ -129,13 +136,34 @@ func (s *Service) allowRefresh(base string) bool {
 	return true
 }
 
+// Start sweeps the disk cache (at once, then every cacheSweepEvery) until ctx ends.
+func (s *Service) Start(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(cacheSweepEvery)
+		defer t.Stop()
+		for {
+			if n := s.files.sweep(cacheMaxAge, cacheMaxBytes); n > 0 {
+				log.Printf("subtitles: cache sweep removed %d files", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+}
+
 // EnsureSettings seeds the settings row (Turkish first, turkcealtyazi.org on).
 func (s *Service) EnsureSettings() error { return s.settings.ensure() }
 
 func (s *Service) Settings() SettingsView { return s.settings.get().view() }
 
 func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
-	st := s.settings.get()
+	st, err := s.settings.load()
+	if err != nil {
+		return SettingsView{}, err // saving defaults now would wipe the stored keys
+	}
 	before := st
 	in.apply(&st)
 	if err := s.settings.save(st); err != nil {
@@ -396,7 +424,7 @@ func (s *Service) FileFor(ctx context.Context, id string, t float64) (FileAnswer
 }
 
 func (s *Service) fileAt(ctx context.Context, id string, t float64) ([]byte, bool, error) {
-	source, _, ref, err := decodeID(id)
+	source, lang, ref, err := decodeID(id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -413,6 +441,23 @@ func (s *Service) fileAt(ctx context.Context, id string, t float64) ([]byte, boo
 			vtt, partial := s.live.get(ctx, key, hash, index, stream, math.Max(t, 0))
 			return vtt, partial, nil
 		}
+		// A slow swarm can take minutes: the extraction goes on and caches the track, the player
+		// gets the live read meanwhile (also when the extraction fails)
+		call := s.startFile(source, lang, ref)
+		timer := time.NewTimer(embeddedWait)
+		defer timer.Stop()
+		select {
+		case <-call.done:
+			if call.err == nil {
+				return call.val.([]byte), false, nil
+			}
+			log.Printf("subtitles: extraction of %s failed, reading it live: %v", shortSubID(id), call.err)
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+		vtt, partial := s.live.get(ctx, key, hash, index, stream, math.Max(t, 0))
+		return vtt, partial, nil
 	}
 	b, err := s.File(ctx, id)
 	return b, false, err
@@ -473,8 +518,33 @@ func (s *Service) File(ctx context.Context, id string) ([]byte, error) {
 	if b, ok := s.files.read(source, key, ".vtt", 0); ok {
 		return b, nil
 	}
-	call := s.flights.start("file|"+key, func() (any, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), fetchLimit)
+	call := s.startFile(source, lang, ref)
+	select {
+	case <-call.done:
+		if call.err != nil {
+			return nil, call.err
+		}
+		return call.val.([]byte), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// hasFile reports whether the converted subtitle of id is on disk (File needs no download).
+func (s *Service) hasFile(id string) bool {
+	source, _, ref, err := decodeID(id)
+	return err == nil && s.files.has(source, source+"|"+ref, ".vtt")
+}
+
+// startFile downloads (or extracts) and caches a subtitle once per key in the background.
+func (s *Service) startFile(source, lang, ref string) *flightCall {
+	key := source + "|" + ref
+	return s.flights.start("file|"+key, func() (any, error) {
+		limit := fetchLimit
+		if source == SourceEmbedded {
+			limit = embeddedExtractLimit // reads the whole file
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		defer cancel()
 		vtt, err := s.download(ctx, source, lang, ref)
 		if err != nil {
@@ -485,15 +555,6 @@ func (s *Service) File(ctx context.Context, id string) ([]byte, error) {
 		}
 		return vtt, nil
 	})
-	select {
-	case <-call.done:
-		if call.err != nil {
-			return nil, call.err
-		}
-		return call.val.([]byte), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 var infoHashRe = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
@@ -518,7 +579,7 @@ func (s *Service) download(ctx context.Context, source, lang, ref string) ([]byt
 			if err2 != nil || b < 0 {
 				return nil, ErrBadID
 			}
-			return ExtractEmbeddedSub(ctx, s.cfg.TorrServerURL, p[0], a, b)
+			return s.extract(ctx, s.cfg.TorrServerURL, p[0], a, b)
 		}
 		raw, err = FetchTorrentSub(ctx, s.cfg.TorrServerURL, p[0], a)
 		name = "torrent." + firstNonEmpty(strings.Trim(p[2], "./\\"), "srt")
@@ -539,7 +600,10 @@ func (s *Service) download(ctx context.Context, source, lang, ref string) ([]byt
 	if err != nil {
 		return nil, err
 	}
-	return ToWebVTT(raw, name)
+	if lang == "" {
+		lang = GuessLanguage(name) // the archive's file name
+	}
+	return toWebVTTLang(raw, name, lang)
 }
 
 // encodeID builds the opaque id the web app passes back to /api/subtitles/file.

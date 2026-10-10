@@ -183,3 +183,41 @@ func TestDialerFallsBackToTheLastGoodAddress(t *testing.T) {
 	}
 	c.Close()
 }
+
+// The account's list is read page by page until the torrent turns up (or a short page ends it).
+func TestFindTorrentPages(t *testing.T) {
+	old := myListPage
+	myListPage = 10
+	t.Cleanup(func() { myListPage = old })
+	var mu sync.Mutex
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		mu.Lock()
+		offsets = append(offsets, q.Get("offset"))
+		mu.Unlock()
+		if r.URL.Path != "/torrents/mylist" || q.Get("limit") != "10" || q.Get("bypass_cache") != "true" {
+			t.Errorf("request %s", r.URL)
+		}
+		var off int
+		fmt.Sscanf(q.Get("offset"), "%d", &off)
+		var items []string
+		for i := off; i < min(off+10, 25); i++ {
+			items = append(items, fmt.Sprintf(`{"id":%d,"hash":"%s"}`, 100+i, strings.ToUpper(hashN(i))))
+		}
+		fmt.Fprintf(w, `{"success":true,"data":[%s]}`, strings.Join(items, ","))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k", nil)
+	id, err := c.FindTorrent(context.Background(), hashN(22), true)
+	if err != nil || id != 122 {
+		t.Fatalf("found %d, %v", id, err)
+	}
+	if strings.Join(offsets, ",") != "0,10,20" {
+		t.Fatalf("offsets %v", offsets)
+	}
+	offsets = nil
+	if id, err := c.FindTorrent(context.Background(), hashN(99), true); err != nil || id != 0 || len(offsets) != 3 {
+		t.Fatalf("missing: %d %v after %d pages", id, err, len(offsets))
+	}
+}

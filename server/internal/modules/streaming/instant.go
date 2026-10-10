@@ -39,6 +39,7 @@ const (
 	tsInstantMaxItems       = 100 // titles per request
 	tsInstantQueueMax       = 300
 	tsInstantPrewarmPerHour = 60
+	tsInstantMaxBody        = 256 << 10 // request body bytes
 )
 
 var errInstantUnknown = errors.New("torbox did not answer for every hash")
@@ -513,6 +514,7 @@ func (h handler) instant(c *gin.Context) {
 	var body struct {
 		Items []InstantItem `json:"items"`
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, tsInstantMaxBody)
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "items must be a list of {type, tmdb_id}"})
 		return

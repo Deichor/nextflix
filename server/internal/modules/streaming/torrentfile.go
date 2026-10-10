@@ -53,14 +53,22 @@ func bencodeString(data []byte, i int) (string, int, error) {
 		colon++
 	}
 	n, err := strconv.Atoi(string(data[i:colon]))
-	if err != nil || colon+1+n > len(data) || n < 0 {
+	// n is checked against the rest before adding: colon+1+n overflows for a huge n
+	if err != nil || colon >= len(data) || n < 0 || n > len(data)-colon-1 {
 		return "", 0, errors.New("invalid bencode string")
 	}
 	return string(data[colon+1 : colon+1+n]), colon + 1 + n, nil
 }
 
+// bencodeMaxDepth caps nested lists and dictionaries (real torrents nest a few levels).
+const bencodeMaxDepth = 64
+
 // bencodeSkip returns the index just after the value starting at i
 func bencodeSkip(data []byte, i int) (int, error) {
+	return bencodeSkipDepth(data, i, 0)
+}
+
+func bencodeSkipDepth(data []byte, i, depth int) (int, error) {
 	if i >= len(data) {
 		return 0, errors.New("unexpected end of bencode")
 	}
@@ -75,9 +83,12 @@ func bencodeSkip(data []byte, i int) (int, error) {
 		}
 		return end + 1, nil
 	case 'l', 'd':
+		if depth >= bencodeMaxDepth {
+			return 0, errors.New("bencode nested too deep")
+		}
 		j := i + 1
 		for j < len(data) && data[j] != 'e' {
-			next, err := bencodeSkip(data, j)
+			next, err := bencodeSkipDepth(data, j, depth+1)
 			if err != nil {
 				return 0, err
 			}

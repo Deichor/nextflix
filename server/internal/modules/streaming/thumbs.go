@@ -77,6 +77,33 @@ type thumbJob struct {
 	finished bool
 }
 
+type thumbNewest struct {
+	t  int
+	at time.Time
+}
+
+// tsThumbNewestKeep: the latest request of a file older than this no longer steers cancels.
+const tsThumbNewestKeep = 10 * time.Minute
+
+// pruneLocked drops old failure marks and latest-request entries, at most once a minute.
+// Needs th.mu.
+func (th *thumbs) pruneLocked(now time.Time) {
+	if now.Sub(th.prunedAt) < time.Minute {
+		return
+	}
+	th.prunedAt = now
+	for id, at := range th.failed {
+		if now.Sub(at) >= tsThumbFailMemory {
+			delete(th.failed, id)
+		}
+	}
+	for f, n := range th.newest {
+		if now.Sub(n.at) > tsThumbNewestKeep {
+			delete(th.newest, f)
+		}
+	}
+}
+
 type thumbQueued struct {
 	k  thumbKey
 	at time.Time
@@ -100,7 +127,8 @@ type thumbs struct {
 	perHashRefs map[string]int
 	failed      map[string]time.Time
 	userWaiters int
-	newest      map[string]int // "hash:index" -> t of the latest viewer request
+	newest      map[string]thumbNewest // "hash:index" -> the latest viewer request
+	prunedAt    time.Time
 	queue       []thumbQueued
 	queueSig    chan struct{}
 	workerOnce  sync.Once
@@ -115,7 +143,7 @@ func newThumbs(s *Service, dir string) *thumbs {
 		perHash:     map[string]chan struct{}{},
 		perHashRefs: map[string]int{},
 		failed:      map[string]time.Time{},
-		newest:      map[string]int{},
+		newest:      map[string]thumbNewest{},
 		queueSig:    make(chan struct{}, 1),
 	}
 }
@@ -335,8 +363,9 @@ func (th *thumbs) frame(ctx context.Context, k thumbKey, background bool, wait t
 	th.mu.Lock()
 	file := k.hash + ":" + strconv.Itoa(k.index)
 	if !background {
-		th.newest[file] = k.t
+		th.newest[file] = thumbNewest{t: k.t, at: time.Now()}
 	}
+	th.pruneLocked(time.Now())
 	j := th.jobs[k.id()]
 	if j == nil {
 		jctx, cancel := context.WithTimeout(context.Background(), th.jobMax)
@@ -372,7 +401,7 @@ func (th *thumbs) frame(ctx context.Context, k thumbKey, background bool, wait t
 		j.keep = true
 	}
 	if j.waiters == 0 && !j.keep && !j.finished && ctx.Err() != nil {
-		if d := k.t - th.newest[file]; d > 2*tsThumbGrid || d < -2*tsThumbGrid {
+		if d := k.t - th.newest[file].t; d > 2*tsThumbGrid || d < -2*tsThumbGrid {
 			j.cancel()
 		}
 	}
@@ -399,9 +428,10 @@ func (th *thumbs) runJob(ctx context.Context, k thumbKey, j *thumbJob) {
 		j.img = img
 		return
 	}
-	// The stream guard keeps the torrent loaded while ffmpeg reads it
-	th.s.seekBegin(k.hash)
-	defer th.s.seekEnd(k.hash)
+	// The stream guard keeps the torrent loaded while ffmpeg reads it (not as a player: a
+	// release of the title still goes through, the drop waits for the job)
+	th.s.thumbBegin(k.hash)
+	defer th.s.thumbEnd(k.hash)
 	tonemap, small := th.videoInfo(ctx, k)
 	img, err := th.run(ctx, thumbArgs(th.s.fileURL(k.hash, k.index), k, tonemap, small))
 	if err == nil && !isJPEG(img) {
@@ -479,8 +509,8 @@ func (th *thumbs) videoInfo(ctx context.Context, k thumbKey) (tonemap string, sm
 
 // thumbArgs: seek to the keyframe at or before t and write its frame as one scaled JPEG.
 func thumbArgs(src string, k thumbKey, tonemap string, small bool) []string {
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin",
-		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "2"}
+	args := append([]string{"-hide_banner", "-loglevel", "error", "-nostdin"}, tsInputGuard()...)
+	args = append(args, "-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "2")
 	if small {
 		args = append(args, "-probesize", "2000000", "-analyzeduration", "2000000")
 	}

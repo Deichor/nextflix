@@ -43,10 +43,14 @@ type tsEpInfo struct {
 	lead             bool // num is the bare number right after the title ("Cukur 94 S4 E1")
 	complete         bool
 	marked           bool // the first token belongs to the episode info (else the title goes on)
+	special          bool // season 0 ("S00E05", "0x05", "S00"): ep/epTo are the special's numbers
 }
 
 func (e tsEpInfo) String() string {
 	var b strings.Builder
+	if e.special {
+		b.WriteString("S0")
+	}
 	if e.season > 0 {
 		b.WriteString("S" + strconv.Itoa(e.season))
 		if e.seasonTo > e.season {
@@ -93,16 +97,33 @@ func tsParseEpisode(tokens []string) tsEpInfo {
 	var e tsEpInfo
 	setEp := func(from, to int) {
 		switch {
-		case e.season > 0 && e.ep == 0:
+		case (e.season > 0 || e.special) && e.ep == 0:
 			e.ep, e.epTo = from, to
-		case e.season == 0 && e.num == 0:
+		case e.season == 0 && !e.special && e.num == 0:
 			e.num, e.numTo = from, to
 		}
 	}
 	setSeason := func(from, to int) {
-		if e.season == 0 {
+		switch {
+		case e.season > 0 || e.special:
+		case from == 0 && to == 0:
+			e.special = true // "S00", "Season 0": the specials
+		case from == 0:
+			e.season, e.seasonTo = 1, to // "S00-S05": the seasons, specials included
+		default:
 			e.season, e.seasonTo = from, to
 		}
+	}
+	// setEpisode sets a season and episode tag ("S01E05", "1x05", "S00E05") unless one was read
+	setEpisode := func(s, from, to int) {
+		if e.season > 0 || e.special || e.ep > 0 {
+			return
+		}
+		if s == 0 {
+			e.special, e.ep, e.epTo = true, from, to
+			return
+		}
+		e.season, e.seasonTo, e.ep, e.epTo = s, s, from, to
 	}
 	// numRange reads "<n> <m>" ("01-107" normalizes to two tokens) starting at i
 	numRange := func(i, n int) (int, int) {
@@ -133,15 +154,11 @@ func tsParseEpisode(tokens []string) tsEpInfo {
 					i++
 				}
 			}
-			if e.season == 0 && e.ep == 0 {
-				e.season, e.seasonTo, e.ep, e.epTo = s, s, e1, e2
-			}
+			setEpisode(s, e1, e2)
 		} else if m := tsXEpPattern.FindStringSubmatch(t); m != nil {
 			s, _ := strconv.Atoi(m[1])
 			ep, _ := strconv.Atoi(m[2])
-			if e.season == 0 && e.ep == 0 {
-				e.season, e.seasonTo, e.ep, e.epTo = s, s, ep, ep
-			}
+			setEpisode(s, ep, ep)
 		} else if m := tsSeasonPattern.FindStringSubmatch(t); m != nil {
 			s, _ := strconv.Atoi(m[1])
 			to := s
@@ -198,6 +215,8 @@ func tsParseEpisode(tokens []string) tsEpInfo {
 			e.num, e.numTo, e.lead = n, to, true
 		} else if t == "complete" {
 			e.complete = true
+		} else if t == "specials" {
+			setSeason(0, 0)
 		} else if t == "series" && start == 0 {
 			// marks the episode info like the old "Show Series ..." names, says nothing itself
 		} else {
@@ -208,7 +227,7 @@ func tsParseEpisode(tokens []string) tsEpInfo {
 		}
 	}
 	// "Bölüm 5 Sezon 2": the number belongs to the season named after it
-	if e.season > 0 && e.ep == 0 && e.num > 0 && !e.lead {
+	if (e.season > 0 || e.special) && e.ep == 0 && e.num > 0 && !e.lead {
 		e.ep, e.epTo, e.num, e.numTo = e.num, e.numTo, 0, 0
 	}
 	if e.epTo < e.ep {
@@ -341,6 +360,23 @@ func tsEpisodeKind(e tsEpInfo, t tsEpTarget) int {
 		}
 		return 2
 	}
+	// Specials (season 0) only match specials; a complete series may hold them
+	switch {
+	case e.special && e.ep > 0:
+		if t.season == 0 && t.episode >= e.ep && t.episode <= e.epTo {
+			return single(e.ep, e.epTo)
+		}
+		return 0
+	case e.complete && e.season == 0 && e.num == 0:
+		return 3
+	case e.special:
+		if t.season == 0 {
+			return 2
+		}
+		return 0
+	case t.season == 0:
+		return 0
+	}
 	switch {
 	case e.season > 0 && e.ep > 0:
 		if t.absNumbers(e) {
@@ -416,13 +452,16 @@ func tsFileEpisode(path string, titles [][]string) (info tsEpInfo, dirSeason int
 func tsPickEpisodeFile(videos []tsFileStat, q tsResolveQuery, c tsCandidate) int {
 	t := q.epTarget()
 	titles := tsTitleTokens(q)
+	if t.season == 0 {
+		return tsPickSpecialFile(videos, titles, c, t.episode)
+	}
 	packSeason := 0
 	if c.ep.season > 0 && c.ep.seasonTo == c.ep.season && !t.absNumbers(c.ep) {
 		packSeason = c.ep.season
 	}
 	type parsed struct {
 		info tsEpInfo
-		ctx  int // season the file belongs to (0 = unknown)
+		ctx  int // season the file belongs to (0 = unknown, -1 = specials)
 	}
 	files := make([]parsed, len(videos))
 	maxNum := 0 // highest season-less number among the target season's files
@@ -431,6 +470,9 @@ func tsPickEpisodeFile(videos []tsFileStat, q tsResolveQuery, c tsCandidate) int
 		ctx := info.season
 		if ctx == 0 {
 			ctx = dir
+		}
+		if ctx == 0 && (info.special || tsSpecialsDir(f.Path)) {
+			ctx = -1 // a special, of no season
 		}
 		if ctx == 0 {
 			ctx = packSeason
@@ -462,11 +504,52 @@ func tsPickEpisodeFile(videos []tsFileStat, q tsResolveQuery, c tsCandidate) int
 		}
 		// The season of "Cukur.094.ser.01.sez" (a whole-show pack labelled season 1) is context only
 		if e.ep == 0 && e.num > 0 && e.num == e.numTo && e.num == t.abs &&
-			(p.ctx == 0 || p.ctx == t.season || t.abs > t.count(p.ctx) || t.season == 1) {
+			p.ctx >= 0 && (p.ctx == 0 || p.ctx == t.season || t.abs > t.count(p.ctx) || t.season == 1) {
 			return i
 		}
 	}
 	return -1
+}
+
+// tsPickSpecialFile picks special number episode (season 0): a file tagged "S00E05", or one
+// numbered 5 in a specials pack or folder ("Specials/05.mkv"). -1 when no file matches.
+func tsPickSpecialFile(videos []tsFileStat, titles [][]string, c tsCandidate, episode int) int {
+	for i, f := range videos {
+		if e, _ := tsFileEpisode(f.Path, titles); e.special && e.ep == episode && e.epTo == episode {
+			return i
+		}
+	}
+	pack := c.ep.special && c.ep.ep == 0
+	for i, f := range videos {
+		e, _ := tsFileEpisode(f.Path, titles)
+		if e.special || e.season > 0 || e.ep > 0 || e.num != episode || e.numTo != episode {
+			continue
+		}
+		if pack || tsSpecialsDir(f.Path) {
+			return i
+		}
+	}
+	return -1
+}
+
+// tsSpecialsDir: the innermost folder of path that names a season names the specials
+// ("Specials", "Season 00", "S00").
+func tsSpecialsDir(path string) bool {
+	path = strings.ReplaceAll(path, "\\", "/")
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "/" {
+		return false
+	}
+	special := false
+	for _, part := range strings.Split(dir, "/") {
+		switch d := tsParseEpisode(tsNormalize(part)); {
+		case d.special && d.ep == 0:
+			special = true
+		case d.season > 0:
+			special = false
+		}
+	}
+	return special
 }
 
 // tsAbsoluteFromNames checks the absolute number against releases that carry both kinds

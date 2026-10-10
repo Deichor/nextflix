@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -100,6 +102,69 @@ func (g *flightGroup) start(key string, fn func() (any, error)) *flightCall {
 // diskCache stores converted subtitles and scraped pages under dir.
 type diskCache struct{ dir string }
 
+const (
+	cacheMaxAge     = 30 * 24 * time.Hour // files not used this long are removed
+	cacheMaxBytes   = 1 << 30             // above this the least recently used files go
+	cacheSweepEvery = 6 * time.Hour
+)
+
+// cacheKinds are the folders under the cache dir (diskCache kinds).
+var cacheKinds = []string{SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceSubSource,
+	SourceTurkceAltyazi, "turkcealtyazi-pages", "synced", "syncref"}
+
+// sweep removes files not used for maxAge (leftover temp files after an hour), then the least
+// recently used ones while the cache holds more than maxBytes. Only regular files count.
+func (d diskCache) sweep(maxAge time.Duration, maxBytes int64) int {
+	if d.dir == "" {
+		return 0
+	}
+	type entry struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	var keep []entry
+	var total int64
+	removed := 0
+	now := time.Now()
+	// Only the folders this cache writes: dir may be shared with other data
+	for _, kind := range cacheKinds {
+		list, _ := os.ReadDir(filepath.Join(d.dir, kind))
+		for _, de := range list {
+			if !de.Type().IsRegular() {
+				continue
+			}
+			info, err := de.Info()
+			if err != nil {
+				continue
+			}
+			p := filepath.Join(d.dir, kind, de.Name())
+			age := now.Sub(info.ModTime())
+			if age > maxAge || (strings.HasPrefix(de.Name(), ".tmp-") && age > time.Hour) {
+				if os.Remove(p) == nil {
+					removed++
+				}
+				continue
+			}
+			keep = append(keep, entry{p, info.Size(), info.ModTime()})
+			total += info.Size()
+		}
+	}
+	if total > maxBytes {
+		sort.Slice(keep, func(i, j int) bool { return keep[i].mod.Before(keep[j].mod) })
+		for _, e := range keep {
+			if total <= maxBytes {
+				break
+			}
+			if os.Remove(e.path) == nil {
+				total -= e.size
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
 func hashKey(parts ...string) string {
 	h := sha1.New()
 	for _, p := range parts {
@@ -127,7 +192,20 @@ func (d diskCache) read(kind, key, ext string, maxAge time.Duration) ([]byte, bo
 	if err != nil {
 		return nil, false
 	}
+	if maxAge == 0 && time.Since(st.ModTime()) > 24*time.Hour {
+		// Kept entries age by their last use (sweep); entries with a max age keep their write time
+		now := time.Now()
+		_ = os.Chtimes(p, now, now)
+	}
 	return b, true
+}
+
+func (d diskCache) has(kind, key, ext string) bool {
+	if d.dir == "" {
+		return false
+	}
+	_, err := os.Stat(d.path(kind, key, ext))
+	return err == nil
 }
 
 // write stores data atomically (temp file + rename).

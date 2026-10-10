@@ -52,9 +52,11 @@ func (h handler) seekPoint(c *gin.Context) {
 func (s *Service) keyframeBefore(ctx context.Context, hash string, index int, t float64) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0",
+	args := append([]string{"-v", "error"}, tsInputGuard()...)
+	args = append(args, "-select_streams", "v:0",
 		"-read_intervals", "+"+strconv.FormatFloat(t, 'f', 3, 64)+"%+#1",
-		"-show_entries", "packet=pts_time:format=start_time", "-of", "csv=p=0", s.fileURL(hash, index)).Output()
+		"-show_entries", "packet=pts_time:format=start_time", "-of", "csv=p=0", s.fileURL(hash, index))
+	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe failed: %w", err)
 	}

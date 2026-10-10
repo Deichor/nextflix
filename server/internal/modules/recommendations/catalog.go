@@ -20,31 +20,40 @@ type related struct{ recs, similar []Item }
 func (c tmdbCatalog) Related(lang, mediaType string, id int) ([]Item, []Item, error) {
 	tm := c.tm.WithLang(lang)
 	r, err := tmdb.Cached(tm, fmt.Sprintf("recs_related_%s_%d", mediaType, id), func() (related, error) {
-		var out related
-		var errRecs, errSim error
-		if mediaType == "tv" {
-			var recs, sim *tmdb.RelatedTV
-			if recs, errRecs = tm.GetRecommendedTVShows(id, 1); errRecs == nil {
-				out.recs = fromTVs(recs.Results)
-			}
-			if sim, errSim = tm.GetSimilarTVShows(id, 1); errSim == nil {
-				out.similar = fromTVs(sim.Results)
-			}
-		} else {
-			var recs, sim *tmdb.RelatedMovies
-			if recs, errRecs = tm.GetRecommendedMovies(id, 1); errRecs == nil {
-				out.recs = fromMovies(recs.Results)
-			}
-			if sim, errSim = tm.GetSimilarMovies(id, 1); errSim == nil {
-				out.similar = fromMovies(sim.Results)
-			}
-		}
-		if errRecs != nil && errSim != nil {
-			return out, errors.Join(errRecs, errSim)
-		}
-		return out, nil
+		return fetchRelated(tm, mediaType, id)
 	})
 	return r.recs, r.similar, err
+}
+
+// fetchRelated reads both TMDB lists. One failed list makes a partial result (cached briefly,
+// a stale complete copy wins); both failing is an error.
+func fetchRelated(tm *tmdb.Client, mediaType string, id int) (related, error) {
+	var out related
+	var errRecs, errSim error
+	if mediaType == "tv" {
+		var recs, sim *tmdb.RelatedTV
+		if recs, errRecs = tm.GetRecommendedTVShows(id, 1); errRecs == nil {
+			out.recs = fromTVs(recs.Results)
+		}
+		if sim, errSim = tm.GetSimilarTVShows(id, 1); errSim == nil {
+			out.similar = fromTVs(sim.Results)
+		}
+	} else {
+		var recs, sim *tmdb.RelatedMovies
+		if recs, errRecs = tm.GetRecommendedMovies(id, 1); errRecs == nil {
+			out.recs = fromMovies(recs.Results)
+		}
+		if sim, errSim = tm.GetSimilarMovies(id, 1); errSim == nil {
+			out.similar = fromMovies(sim.Results)
+		}
+	}
+	if errRecs != nil && errSim != nil {
+		return out, errors.Join(errRecs, errSim)
+	}
+	if err := errors.Join(errRecs, errSim); err != nil {
+		return out, fmt.Errorf("%w: %w", tmdb.ErrPartial, err)
+	}
+	return out, nil
 }
 
 func (c tmdbCatalog) Genres(mediaType string, id int) ([]int, error) {

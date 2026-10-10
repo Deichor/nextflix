@@ -312,6 +312,12 @@ func TestThumbGuardsTheTorrentWhileReading(t *testing.T) {
 	if s.idle(thumbHashA) {
 		t.Fatal("a torrent ffmpeg reads for a frame may be dropped")
 	}
+	s.warmMu.Lock()
+	reader := s.readerLocked(thumbHashA)
+	s.warmMu.Unlock()
+	if reader {
+		t.Fatal("a thumbnail job counts as a player")
+	}
 	close(f.gate)
 	<-done
 	if !s.idle(thumbHashA) {
@@ -355,7 +361,7 @@ func TestThumbViewerLeavingCancelsTheJob(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	// The viewer's latest request is far away (the scrub moved on)
 	th.mu.Lock()
-	th.newest[thumbHashA+":0"] = 100
+	th.newest[thumbHashA+":0"] = thumbNewest{t: 100, at: time.Now()}
 	th.mu.Unlock()
 	cancel()
 	if err := <-errc; err == nil {
@@ -386,7 +392,7 @@ func TestThumbAbortNearTheLatestRequestFinishes(t *testing.T) {
 	}()
 	time.Sleep(50 * time.Millisecond)
 	th.mu.Lock()
-	th.newest[thumbHashA+":0"] = 30 // two cells on
+	th.newest[thumbHashA+":0"] = thumbNewest{t: 30, at: time.Now()} // two cells on
 	th.mu.Unlock()
 	cancel()
 	if err := <-errc; err == nil {
@@ -488,5 +494,24 @@ func TestThumbPrefetchOnlyBehindASteadyStream(t *testing.T) {
 	}
 	if f.count() != 3 || f.maxAll != 1 {
 		t.Fatalf("runs %d (want 3), at once %d", f.count(), f.maxAll)
+	}
+}
+
+func TestThumbStateIsPruned(t *testing.T) {
+	_, th, _, _ := newThumbTest(t)
+	now := time.Now()
+	th.mu.Lock()
+	th.failed["old"] = now.Add(-2 * tsThumbFailMemory)
+	th.failed["new"] = now
+	th.newest["old:0"] = thumbNewest{t: 10, at: now.Add(-2 * tsThumbNewestKeep)}
+	th.newest["new:0"] = thumbNewest{t: 10, at: now}
+	th.pruneLocked(now)
+	_, fo := th.failed["old"]
+	_, fn := th.failed["new"]
+	_, no := th.newest["old:0"]
+	_, nn := th.newest["new:0"]
+	th.mu.Unlock()
+	if fo || !fn || no || !nn {
+		t.Fatalf("failed old %v new %v, newest old %v new %v", fo, fn, no, nn)
 	}
 }

@@ -43,6 +43,7 @@ type fakeTorBox struct {
 	ranges    []string         // Range headers of the CDN reads
 	delay     time.Duration    // before every CDN answer (first-byte latency)
 	malformed bool             // checkcached answers garbage
+	apiDelay  time.Duration    // before every API answer
 
 	checks, creates, lists, dls, cdnReads atomic.Int32
 	cdnOpen, cdnPeak                      atomic.Int32 // CDN reads running, most at once
@@ -69,8 +70,9 @@ func (f *fakeTorBox) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	fail := f.failAPI
+	fail, delay := f.failAPI, f.apiDelay
 	f.mu.Unlock()
+	time.Sleep(delay)
 	if fail != 0 {
 		w.WriteHeader(fail)
 		fmt.Fprint(w, `{"success":false,"error":"BAD_TOKEN","detail":"bad"}`)
@@ -509,5 +511,135 @@ func TestDebridPackIndexMapsToTheListPosition(t *testing.T) {
 	video, _ := s.debrid.source(tbHash, 1)
 	if id, ok := tsDebridMatchFile(files, video, s.debrid.cachedNames(tbHash)); !ok || id != 1 {
 		t.Fatalf("index 1 -> TorBox file %d %v, want 1", id, ok)
+	}
+}
+
+// A problem of one torrent or file (not in the TorBox torrent) does not pause TorBox for
+// everything; a transport failure still does.
+func TestDebridTorrentProblemDoesNotPause(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 5, path: "Movie (2020)/Extras/gone.mkv", size: 12345, title: "Movie (2020)"})
+	_, err := s.debrid.link(context.Background(), tbHash, 5, false)
+	if !errors.Is(err, errDebridTorrent) || !errors.Is(err, errDebridUnavailable) {
+		t.Fatalf("missing file: %v", err)
+	}
+	if !s.debrid.usable() {
+		t.Fatal("TorBox paused by one missing file")
+	}
+	if _, err := s.debrid.link(context.Background(), tbHash, 1, false); err != nil {
+		t.Fatalf("other file: %v", err)
+	}
+	s.debrid.fail(fmt.Errorf("torbox torrents/mylist: %w", errors.New("connection reset by peer")))
+	if s.debrid.usable() {
+		t.Fatal("a transport failure did not pause TorBox")
+	}
+}
+
+// A caller whose own ctx runs out gets its ctx error, but the shared request goes on: the
+// next caller gets the link, TorBox is not paused and the file is not marked broken.
+func TestDebridLinkCallerTimeoutPausesNothing(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	f.mu.Lock()
+	f.apiDelay = 300 * time.Millisecond
+	f.mu.Unlock()
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.debrid.link(short, tbHash, 1, false); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("short caller: %v", err)
+	}
+	l, err := s.debrid.link(context.Background(), tbHash, 1, false)
+	if err != nil || l.fileID != 1 {
+		t.Fatalf("second caller: %+v %v", l, err)
+	}
+	if !s.debrid.usable() || s.debrid.isBroken(tbHash, 1) {
+		t.Fatalf("usable %v, broken %v", s.debrid.usable(), s.debrid.isBroken(tbHash, 1))
+	}
+	if f.creates.Load() != 1 || f.dls.Load() != 1 {
+		t.Fatalf("creates %d, requestdl %d: want one shared request", f.creates.Load(), f.dls.Load())
+	}
+}
+
+// swappedTorrServer lists the torrent the other way round than TorBox: 1 is the sample, 2 the
+// video. Streams are served at 4 MB/s.
+func swappedTorrServer(t *testing.T, hits *atomic.Int32) *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if _, ok := r.URL.Query()["stat"]; ok {
+			fmt.Fprintf(w, `{"hash":%q,"name":"Movie (2020)","download_speed":4000000,"active_peers":4,"connected_seeders":3,`+
+				`"file_stats":[{"id":1,"path":%q,"length":1000},{"id":2,"path":%q,"length":%d}]}`, tbHash, tbSample, tbVideo, 3<<20)
+			return
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		chunk := make([]byte, 200_000)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-time.After(50 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TorBox off: a registered debrid source's index (TorBox's list position) is mapped to
+// TorrServer's file by path and size, never passed on as is.
+func TestDebridOffRemapsTheIndex(t *testing.T) {
+	f := newFakeTorBox(t)
+	var hits atomic.Int32
+	ts := swappedTorrServer(t, &hits)
+	s := reuseSetup(t, f, ts.URL, false)
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 1, path: tbVideo, size: 3 << 20, title: "Movie (2020)"})
+	if u := s.fileURL(tbHash, 1); u != ts.URL+"/stream?link="+tbHash+"&index=2&play" {
+		t.Fatalf("fileURL %q, want TorrServer's file 2", u)
+	}
+	// Unregistered files keep TorrServer's ids
+	if u := s.fileURL(tbHash, 2); u != ts.URL+"/stream?link="+tbHash+"&index=2&play" {
+		t.Fatalf("fileURL of TorrServer's file 2: %q", u)
+	}
+}
+
+func TestDebridPruneForgetsIdleState(t *testing.T) {
+	d := newDebrid(nil, "")
+	other := strings.Repeat("e", 40)
+	d.register(tsDebridSource{hash: tbHash, index: 1, path: tbVideo, size: 1})
+	d.register(tsDebridSource{hash: other, index: 1, path: tbVideo, size: 1})
+	now := time.Now()
+	k := tsDebridKey(tbHash, 1)
+	d.mu.Lock()
+	d.sources[tbHash].used = now.Add(-tsDebridSourceIdle - time.Minute)
+	d.links[k] = &tsDebridLink{at: now}
+	d.links[tsDebridKey(other, 1)] = &tsDebridLink{at: now}
+	d.remaps[k] = 2
+	d.warmed[k] = now.Add(-time.Hour)
+	d.broken[k] = now.Add(-time.Hour)
+	d.added[tbHash] = now.Add(-tsDebridKeep)
+	d.adoptTried[tbHash] = now.Add(-tsAdoptRetry)
+	d.torrents[tbHash] = tsDebridTorrentRef{id: 1, at: now.Add(-tsDebridKeep)}
+	d.torrents[other] = tsDebridTorrentRef{id: 2, at: now.Add(-tsDebridKeep)}
+	d.checks[tbHash] = tsDebridCheck{at: now.Add(-tsDebridCacheTTL)}
+	d.mu.Unlock()
+	d.pruneDebrid(now)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sources[tbHash] != nil || d.sources[other] == nil {
+		t.Fatalf("sources: idle kept %v, used dropped %v", d.sources[tbHash] != nil, d.sources[other] == nil)
+	}
+	if len(d.links) != 1 || len(d.remaps) != 0 || len(d.warmed) != 0 || len(d.broken) != 0 || len(d.added) != 0 ||
+		len(d.adoptTried) != 0 || len(d.checks) != 0 {
+		t.Fatalf("left: links %d remaps %d warmed %d broken %d added %d adopt %d checks %d",
+			len(d.links), len(d.remaps), len(d.warmed), len(d.broken), len(d.added), len(d.adoptTried), len(d.checks))
+	}
+	if _, ok := d.torrents[other]; !ok || len(d.torrents) != 1 {
+		t.Fatalf("torrents %v: want only the registered hash", d.torrents)
 	}
 }

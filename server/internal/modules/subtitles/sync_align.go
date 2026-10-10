@@ -79,6 +79,26 @@ func (w refWindow) lineStarts() ([]float64, int) {
 // span is a cue's time in seconds.
 type span struct{ start, end float64 }
 
+// syncMaxUnknown: with the file's length unknown, cues past this are not timed.
+const syncMaxUnknown = 6 * 3600.0
+
+// clampSpans drops cues starting past the end of the file (+60 s) and cuts their ends there:
+// the signals are sized by the last cue, a broken one at 99:59:59 would take hundreds of MB.
+func clampSpans(spans []span, duration float64) []span {
+	limit := syncMaxUnknown
+	if duration > 0 {
+		limit = duration + 60
+	}
+	out := make([]span, 0, len(spans))
+	for _, s := range spans {
+		if s.start < 0 || s.start > limit {
+			continue
+		}
+		out = append(out, span{s.start, math.Min(s.end, limit)})
+	}
+	return out
+}
+
 // syncSegment: subtitle times (after Scale) from From on are moved by Offset. The first
 // segment covers everything before the second one (its From is not used).
 type syncSegment struct {

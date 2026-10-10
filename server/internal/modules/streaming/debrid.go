@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,16 +33,23 @@ const (
 	tsDebridCheckTimeout  = 2500 * time.Millisecond
 	tsDebridLinkFresh     = 2 * time.Hour // TorBox links open for 3 h
 	tsDebridLinkTimeout   = 15 * time.Second
+	tsDebridFetchTimeout  = 30 * time.Second // one shared link request (torrent lookup, add, requestdl)
 	tsDebridSettingsFresh = 10 * time.Second
 	tsDebridAddPerHour    = 20 // "add uncached" torrents sent to TorBox per hour
 
 	tsSourceTorBox = "torbox" // tsResolveResult.Source of a debrid source
+
+	tsDebridSourceIdle = 6 * time.Hour   // a registered source nothing asked for this long is forgotten
+	tsDebridKeep       = 24 * time.Hour  // torrent ids and "added" marks of unregistered hashes
+	tsDebridPruneEvery = 5 * time.Minute // how often the maps above are pruned
 )
 
 var (
 	errDebridOff         = errors.New("torbox is off")
 	errDebridUnavailable = errors.New("torbox unavailable")
 	errDebridPaused      = errors.New("torbox paused after a failure")
+	// errDebridTorrent: one torrent or file is not usable on TorBox; TorBox itself works
+	errDebridTorrent = errors.New("torbox torrent problem")
 )
 
 // tsDebridSource is a file played from TorBox: path and size find it among the files of
@@ -67,6 +75,17 @@ type tsDebridCheck struct {
 	at   time.Time
 }
 
+// tsDebridTorrent holds the registered files of one hash.
+type tsDebridTorrent struct {
+	files map[int]tsDebridSource // index -> source
+	used  time.Time              // last lookup
+}
+
+type tsDebridTorrentRef struct {
+	id int64
+	at time.Time
+}
+
 type tsDebridCall struct {
 	done chan struct{}
 	link *tsDebridLink
@@ -81,17 +100,17 @@ type tsDebrid struct {
 	mu        sync.Mutex
 	st        *DebridSettings
 	stAt      time.Time
-	checks    map[string]tsDebridCheck  // hash -> checkcached answer
-	sources   map[string]tsDebridSource // "hash:index" -> registered debrid source
-	torrents  map[string]int64          // hash -> TorBox torrent id
-	links     map[string]*tsDebridLink  // "hash:index" -> download link
-	calls     map[string]*tsDebridCall  // running link requests
-	remaps    map[string]int            // "hash:index" -> TorrServer file id (fallback)
-	broken    map[string]time.Time      // "hash:index" -> when its CDN reads gave up (plays from TorrServer for a while)
-	warmed    map[string]time.Time      // "hash:index" -> last keep-alive read
+	checks    map[string]tsDebridCheck      // hash -> checkcached answer
+	sources   map[string]*tsDebridTorrent   // hash -> registered debrid sources
+	torrents  map[string]tsDebridTorrentRef // hash -> TorBox torrent id
+	links     map[string]*tsDebridLink      // "hash:index" -> download link
+	calls     map[string]*tsDebridCall      // running link requests
+	remaps    map[string]int                // "hash:index" -> TorrServer file id (fallback)
+	broken    map[string]time.Time          // "hash:index" -> when its CDN reads gave up (plays from TorrServer for a while)
+	warmed    map[string]time.Time          // "hash:index" -> last keep-alive read
 	downUntil time.Time
 	downWhy   string
-	added     map[string]bool // hashes sent with "add uncached"
+	added     map[string]time.Time // hashes sent with "add uncached"
 	addTimes  []time.Time
 	// hash -> last look for a cached TorBox source naming it (adoptSaved, reuse.go)
 	adoptTried map[string]time.Time
@@ -105,12 +124,67 @@ type tsDebrid struct {
 }
 
 func newDebrid(s *Service, base string) *tsDebrid {
-	return &tsDebrid{
+	d := &tsDebrid{
 		s: s, base: base, hc: torbox.NewHTTPClient(),
-		checks: map[string]tsDebridCheck{}, sources: map[string]tsDebridSource{}, torrents: map[string]int64{},
+		checks: map[string]tsDebridCheck{}, sources: map[string]*tsDebridTorrent{}, torrents: map[string]tsDebridTorrentRef{},
 		links: map[string]*tsDebridLink{}, calls: map[string]*tsDebridCall{}, remaps: map[string]int{},
 		broken: map[string]time.Time{}, warmed: map[string]time.Time{},
-		added: map[string]bool{}, adoptTried: map[string]time.Time{},
+		added: map[string]time.Time{}, adoptTried: map[string]time.Time{},
+	}
+	go func() {
+		t := time.NewTicker(tsDebridPruneEvery)
+		defer t.Stop()
+		for now := range t.C {
+			d.pruneDebrid(now)
+		}
+	}()
+	return d
+}
+
+// pruneDebrid forgets what grew stale: idle sources (with their links and remaps), old
+// keep-alive, broken, adoption and add marks, unused torrent ids and expired cache answers.
+func (d *tsDebrid) pruneDebrid(now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for h, t := range d.sources {
+		if now.Sub(t.used) >= tsDebridSourceIdle {
+			delete(d.sources, h)
+		}
+	}
+	live := func(k string) bool {
+		h, _, _ := strings.Cut(k, ":")
+		return d.sources[h] != nil
+	}
+	for k, l := range d.links {
+		if !live(k) || now.Sub(l.at) >= tsDebridLinkFresh {
+			delete(d.links, k)
+		}
+	}
+	for k := range d.remaps {
+		if !live(k) {
+			delete(d.remaps, k)
+		}
+	}
+	prune := func(m map[string]time.Time, keep time.Duration) {
+		for k, at := range m {
+			if now.Sub(at) >= keep {
+				delete(m, k)
+			}
+		}
+	}
+	prune(d.warmed, tsDebridWarmEvery)
+	prune(d.broken, tsDebridBrokenFor)
+	prune(d.added, tsDebridKeep)
+	prune(d.adoptTried, tsAdoptRetry)
+	for h, r := range d.torrents {
+		if d.sources[h] == nil && now.Sub(r.at) >= tsDebridKeep {
+			delete(d.torrents, h)
+		}
+	}
+	for h, c := range d.checks {
+		if now.Sub(c.at) >= tsDebridCacheTTL {
+			delete(d.checks, h)
+		}
 	}
 }
 
@@ -139,7 +213,7 @@ func (d *tsDebrid) settingsChanged() {
 	d.mu.Lock()
 	d.st = nil
 	d.downUntil, d.downWhy = time.Time{}, ""
-	d.torrents = map[string]int64{}
+	d.torrents = map[string]tsDebridTorrentRef{}
 	d.links = map[string]*tsDebridLink{}
 	d.mu.Unlock()
 }
@@ -167,10 +241,11 @@ func (d *tsDebrid) client() *torbox.Client {
 	return torbox.New(d.base, d.settings().TorBoxAPIKey, d.hc)
 }
 
-// fail pauses TorBox after a failure that will not go away at once, so resolve and play take
-// the torrent path without waiting for it. Malformed answers do not pause it.
+// fail pauses TorBox after a failure that will not go away at once (transport errors, 5xx,
+// timeouts), so resolve and play take the torrent path without waiting for it. Malformed
+// answers and problems of one torrent (errDebridTorrent) do not pause it.
 func (d *tsDebrid) fail(err error) {
-	if err == nil || errors.Is(err, torbox.ErrMalformed) || errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, torbox.ErrMalformed) || errors.Is(err, context.Canceled) || errors.Is(err, errDebridTorrent) {
 		return
 	}
 	pause, why := 30*time.Second, "unreachable"
@@ -256,16 +331,28 @@ func (d *tsDebrid) register(src tsDebridSource) {
 	if d == nil {
 		return
 	}
+	src.hash = strings.ToLower(src.hash)
 	d.mu.Lock()
-	d.sources[tsDebridKey(src.hash, src.index)] = src
+	t := d.sources[src.hash]
+	if t == nil {
+		t = &tsDebridTorrent{files: map[int]tsDebridSource{}}
+		d.sources[src.hash] = t
+	}
+	t.files[src.index] = src
+	t.used = time.Now()
 	d.mu.Unlock()
 }
 
 func (d *tsDebrid) unregister(hash string, index int) {
-	k := tsDebridKey(hash, index)
+	hash = strings.ToLower(hash)
 	d.mu.Lock()
-	delete(d.sources, k)
-	delete(d.links, k)
+	if t := d.sources[hash]; t != nil {
+		delete(t.files, index)
+		if len(t.files) == 0 {
+			delete(d.sources, hash)
+		}
+	}
+	delete(d.links, tsDebridKey(hash, index))
 	d.mu.Unlock()
 }
 
@@ -277,11 +364,11 @@ func (d *tsDebrid) unregisterHash(hash string) {
 	}
 	hash = strings.ToLower(hash)
 	d.mu.Lock()
-	for k, src := range d.sources {
-		if src.hash == hash {
-			delete(d.sources, k)
-			delete(d.links, k)
+	if t := d.sources[hash]; t != nil {
+		for idx := range t.files {
+			delete(d.links, tsDebridKey(hash, idx))
 		}
+		delete(d.sources, hash)
 	}
 	d.mu.Unlock()
 }
@@ -301,17 +388,34 @@ func (d *tsDebrid) forgetUncached(hash string) {
 	}
 }
 
+// registered returns the registered source of hash:index whether or not TorBox is enabled
+// (its index is TorBox's list position, not TorrServer's file id).
+func (d *tsDebrid) registered(hash string, index int) (tsDebridSource, bool) {
+	if d == nil {
+		return tsDebridSource{}, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	t := d.sources[strings.ToLower(hash)]
+	if t == nil {
+		return tsDebridSource{}, false
+	}
+	t.used = time.Now()
+	src, ok := t.files[index]
+	return src, ok
+}
+
 // hashSource reports whether hash is a debrid source (any file) while TorBox is enabled.
 func (d *tsDebrid) hashSource(hash string) (tsDebridSource, bool) {
 	if d == nil {
 		return tsDebridSource{}, false
 	}
-	hash = strings.ToLower(hash)
 	d.mu.Lock()
 	var found tsDebridSource
 	ok := false
-	for _, src := range d.sources {
-		if src.hash == hash {
+	if t := d.sources[strings.ToLower(hash)]; t != nil {
+		t.used = time.Now()
+		for _, src := range t.files {
 			found, ok = src, true
 			break
 		}
@@ -327,10 +431,7 @@ func (d *tsDebrid) source(hash string, index int) (tsDebridSource, bool) {
 		return tsDebridSource{}, false
 	}
 	hash = strings.ToLower(hash)
-	d.mu.Lock()
-	src, ok := d.sources[tsDebridKey(hash, index)]
-	d.mu.Unlock()
-	if ok {
+	if src, ok := d.registered(hash, index); ok {
 		return src, d.enabled()
 	}
 	reg, ok := d.hashSource(hash)
@@ -348,7 +449,8 @@ func (d *tsDebrid) source(hash string, index int) (tsDebridSource, bool) {
 }
 
 // link returns a download link of a debrid source, cached until tsDebridLinkFresh; force
-// asks for a new one (the old one was refused). One request per file at a time.
+// asks for a new one (the old one was refused). One request per file at a time: it runs on
+// its own timeout and each caller waits on its own ctx, so a caller giving up pauses nothing.
 func (d *tsDebrid) link(ctx context.Context, hash string, index int, force bool) (*tsDebridLink, error) {
 	src, ok := d.source(hash, index)
 	if !ok {
@@ -360,37 +462,43 @@ func (d *tsDebrid) link(ctx context.Context, hash string, index int, force bool)
 		d.mu.Unlock()
 		return l, nil
 	}
-	if call := d.calls[k]; call != nil {
-		d.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.link, call.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	call := d.calls[k]
+	if call == nil {
+		if !time.Now().After(d.downUntil) {
+			why := d.downWhy
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w (%s): %w", errDebridUnavailable, why, errDebridPaused)
 		}
+		call = &tsDebridCall{done: make(chan struct{})}
+		d.calls[k] = call
+		go d.runLink(k, src, call)
 	}
-	if !time.Now().After(d.downUntil) {
-		why := d.downWhy
-		d.mu.Unlock()
-		return nil, fmt.Errorf("%w (%s): %w", errDebridUnavailable, why, errDebridPaused)
-	}
-	call := &tsDebridCall{done: make(chan struct{})}
-	d.calls[k] = call
 	d.mu.Unlock()
+	select {
+	case <-call.done:
+		if call.err != nil {
+			return nil, fmt.Errorf("%w: %w", errDebridUnavailable, call.err)
+		}
+		return call.link, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
-	call.link, call.err = d.fetchLink(ctx, src)
+// runLink is the shared link request of k; only its own failure pauses TorBox.
+func (d *tsDebrid) runLink(k string, src tsDebridSource, call *tsDebridCall) {
+	ctx, cancel := context.WithTimeout(context.Background(), tsDebridFetchTimeout)
+	defer cancel()
+	l, err := d.fetchLink(ctx, src)
 	d.mu.Lock()
+	call.link, call.err = l, err
 	delete(d.calls, k)
-	if call.err == nil {
-		d.links[k] = call.link
+	if err == nil {
+		d.links[k] = l
 	}
 	d.mu.Unlock()
 	close(call.done)
-	if call.err != nil {
-		d.fail(call.err)
-		return nil, fmt.Errorf("%w: %v", errDebridUnavailable, call.err)
-	}
-	return call.link, nil
+	d.fail(err)
 }
 
 func (d *tsDebrid) fetchLink(ctx context.Context, src tsDebridSource) (*tsDebridLink, error) {
@@ -414,7 +522,7 @@ func (d *tsDebrid) fetchLink(ctx context.Context, src tsDebridSource) (*tsDebrid
 		}
 		fileID, ok := tsDebridMatchFile(t.Files, src, d.cachedNames(src.hash))
 		if !ok {
-			return nil, fmt.Errorf("file %q (%d bytes) not in the TorBox torrent", path.Base(src.path), src.size)
+			return nil, fmt.Errorf("file %q (%d bytes) not in the TorBox torrent: %w", path.Base(src.path), src.size, errDebridTorrent)
 		}
 		u, err := cl.RequestDL(ctx, id, fileID)
 		if err != nil {
@@ -422,7 +530,7 @@ func (d *tsDebrid) fetchLink(ctx context.Context, src tsDebridSource) (*tsDebrid
 		}
 		return &tsDebridLink{url: u, torrentID: id, fileID: fileID, at: time.Now()}, nil
 	}
-	return nil, errors.New("torrent not found in the TorBox account")
+	return nil, fmt.Errorf("torrent not found in the TorBox account: %w", errDebridTorrent)
 }
 
 // cachedNames is the file list of hash from checkcached (index = position + 1).
@@ -439,24 +547,12 @@ func (d *tsDebrid) cachedNames(hash string) []torbox.CachedFile {
 // downloads nothing; without "add uncached" TorBox is told to refuse an uncached one).
 func (d *tsDebrid) torrentID(ctx context.Context, cl *torbox.Client, src tsDebridSource, fresh bool) (int64, error) {
 	d.mu.Lock()
-	id, ok := d.torrents[src.hash]
+	ref, ok := d.torrents[src.hash]
 	d.mu.Unlock()
 	if ok && !fresh {
-		return id, nil
+		return ref.id, nil
 	}
-	find := func(bypass bool) (int64, error) {
-		list, err := cl.MyList(ctx, bypass)
-		if err != nil {
-			return 0, err
-		}
-		for _, t := range list {
-			if t.Hash == src.hash {
-				return t.ID, nil
-			}
-		}
-		return 0, nil
-	}
-	id, err := find(fresh)
+	id, err := cl.FindTorrent(ctx, src.hash, fresh)
 	if err != nil {
 		return 0, err
 	}
@@ -469,15 +565,20 @@ func (d *tsDebrid) torrentID(ctx context.Context, cl *torbox.Client, src tsDebri
 		id, cerr = cl.CreateTorrent(ctx, magnet, !d.settings().AddUncached)
 		if cerr != nil {
 			// It may be there already (TorBox refuses duplicates): its list, fresh
-			if id, err = find(true); err != nil || id == 0 {
+			if id, err = cl.FindTorrent(ctx, src.hash, true); err != nil || id == 0 {
 				return 0, cerr
 			}
 		}
 	}
-	d.mu.Lock()
-	d.torrents[src.hash] = id
-	d.mu.Unlock()
+	d.rememberTorrent(src.hash, id)
 	return id, nil
+}
+
+// rememberTorrent keeps hash -> TorBox torrent id (found in the list or just created).
+func (d *tsDebrid) rememberTorrent(hash string, id int64) {
+	d.mu.Lock()
+	d.torrents[strings.ToLower(hash)] = tsDebridTorrentRef{id: id, at: time.Now()}
+	d.mu.Unlock()
 }
 
 // readyTorrent reads the torrent until its files are listed (a cached torrent just added
@@ -492,7 +593,7 @@ func (d *tsDebrid) readyTorrent(ctx context.Context, cl *torbox.Client, id int64
 			return t, nil
 		}
 		if try >= 4 {
-			return nil, fmt.Errorf("torrent %d not ready on TorBox (%s)", id, t.DownloadState)
+			return nil, fmt.Errorf("torrent %d not ready on TorBox (%s): %w", id, t.DownloadState, errDebridTorrent)
 		}
 		select {
 		case <-time.After(time.Second):
@@ -558,7 +659,11 @@ func (s *Service) debridURL(hash string, index int) (string, bool) {
 	d := s.debrid
 	src, ok := d.source(hash, index)
 	if !ok {
-		return "", false
+		// TorBox off: a registered source's index is still TorBox's list position
+		if src, ok = d.registered(hash, index); !ok {
+			return "", false
+		}
+		return fmt.Sprintf("%s/stream?link=%s&index=%d&play", s.torrServerURL(), src.hash, d.torrServerIndex(src)), true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tsDebridLinkTimeout)
 	defer cancel()
@@ -633,12 +738,13 @@ func (s *Service) debridStat(link string, out any) (bool, error) {
 	}
 	st := tsTorrentStat{Hash: src.hash, Name: src.title}
 	s.debrid.mu.Lock()
-	for _, f := range s.debrid.sources {
-		if f.hash == src.hash {
+	if t := s.debrid.sources[src.hash]; t != nil {
+		for _, f := range t.files {
 			st.FileStats = append(st.FileStats, tsFileStat{ID: f.index, Path: f.path, Length: f.size})
 		}
 	}
 	s.debrid.mu.Unlock()
+	sort.Slice(st.FileStats, func(i, j int) bool { return st.FileStats[i].ID < st.FileStats[j].ID })
 	b, err := json.Marshal(st)
 	if err != nil {
 		return true, err
@@ -684,7 +790,8 @@ func (s *Service) debridAddUncached(res tsResolveResult) {
 	hash := strings.ToLower(res.Hash)
 	now := time.Now()
 	d.mu.Lock()
-	if c, ok := d.checks[hash]; d.added[hash] || (ok && c.item != nil) {
+	_, added := d.added[hash]
+	if c, ok := d.checks[hash]; added || (ok && c.item != nil) {
 		d.mu.Unlock()
 		return
 	}
@@ -699,17 +806,19 @@ func (s *Service) debridAddUncached(res tsResolveResult) {
 		d.mu.Unlock()
 		return
 	}
-	d.added[hash] = true
+	d.added[hash] = now
 	d.addTimes = append(d.addTimes, now)
 	d.mu.Unlock()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		if _, err := d.client().CreateTorrent(ctx, res.Magnet, false); err != nil {
+		id, err := d.client().CreateTorrent(ctx, res.Magnet, false)
+		if err != nil {
 			d.fail(err)
 			log.Printf("torbox: adding %q: %v", res.TorrentTitle, err)
 			return
 		}
+		d.rememberTorrent(hash, id)
 		log.Printf("torbox: added %q (not cached yet)", res.TorrentTitle)
 	}()
 }

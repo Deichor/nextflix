@@ -174,7 +174,9 @@ func parseResolveQuery(c *gin.Context) (tsResolveQuery, bool) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "type must be movie or tv"})
 		return q, false
 	}
-	if len(tsNormalize(q.title)) == 0 || len(q.title) > 200 {
+	// A title in another script (Japanese, Chinese) normalizes to nothing; with a tmdb_id
+	// parseQuery checks it again after englishTitle
+	if q.title == "" || len(q.title) > 200 || (q.tmdbID == 0 && len(tsNormalize(q.title)) == 0) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
 		return q, false
 	}
@@ -191,10 +193,15 @@ func parseResolveQuery(c *gin.Context) (tsResolveQuery, bool) {
 // parseQuery is parseResolveQuery with the English title of the tmdb_id (see englishTitle).
 func (h handler) parseQuery(c *gin.Context) (tsResolveQuery, bool) {
 	q, ok := parseResolveQuery(c)
-	if ok {
-		h.s.englishTitle(&q)
+	if !ok {
+		return q, false
 	}
-	return q, ok
+	h.s.englishTitle(&q)
+	if len(tsNormalize(q.title)) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
+		return q, false
+	}
+	return q, true
 }
 
 // resolve finds the best playable torrent for a movie or episode.
@@ -251,13 +258,17 @@ func (h handler) resolve(c *gin.Context) {
 		s.forgetSource(key)
 	}
 
-	s.markIntent(s.holdWarm(key))
-	f, _ := s.startResolve(key, q)
-	f.waiters.Add(1)
-	defer f.waiters.Add(-1)
-	select {
-	case <-f.done:
-	case <-c.Request.Context().Done():
+	start := func() (*tsFlight, bool) {
+		s.markIntent(s.holdWarm(key))
+		return s.startResolve(key, q)
+	}
+	f, ok := tsJoinAvoiding(c.Request.Context(), start, q.avoid, func(hash string) {
+		log.Printf("resolve %q: the job joined picked the avoided %s, searching again", q.title, tsShortHash(hash))
+		if cached, ok := s.cachedSource(key); ok && tsHashIn(cached.Hash, q.avoid) {
+			s.forgetSource(key)
+		}
+	})
+	if !ok {
 		return // the viewer gave up; the job keeps running until the player releases the title
 	}
 	if f.err != nil {
@@ -277,6 +288,29 @@ func (h handler) resolve(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, f.res)
+}
+
+// tsJoinAvoiding starts (or joins) a job and waits for it. The job key leaves out ?avoid=,
+// so a joined job may have been started without it and pick an avoided torrent: then
+// avoided runs (it drops that cached pick) and one fresh job is waited for. ok is false
+// when ctx ended first.
+func tsJoinAvoiding(ctx context.Context, start func() (*tsFlight, bool), avoid []string, avoided func(hash string)) (*tsFlight, bool) {
+	for attempt := 0; ; attempt++ {
+		f, started := start()
+		f.waiters.Add(1)
+		select {
+		case <-f.done:
+			f.waiters.Add(-1)
+		case <-ctx.Done():
+			f.waiters.Add(-1)
+			return nil, false
+		}
+		// A job this call started knew the avoid list: its pick stands
+		if started || attempt > 0 || f.err != nil || f.res == nil || !tsHashIn(f.res.Hash, avoid) {
+			return f, true
+		}
+		avoided(f.res.Hash)
+	}
 }
 
 // prefetch starts a background resolve so a later Play starts instantly. Always answers 202.

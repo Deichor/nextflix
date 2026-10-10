@@ -88,7 +88,12 @@ func (h handler) file(c *gin.Context) {
 		c.Data(http.StatusOK, "text/vtt; charset=utf-8", vtt)
 		return
 	}
-	c.Header("Cache-Control", "private, max-age=86400")
+	if a.Sync == syncStateFailed {
+		// The timing is tried again later (syncRetryAfter): no long browser cache
+		c.Header("Cache-Control", "no-store")
+	} else {
+		c.Header("Cache-Control", "private, max-age=86400")
+	}
 	c.Data(http.StatusOK, "text/vtt; charset=utf-8", vtt)
 }
 

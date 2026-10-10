@@ -321,7 +321,8 @@ func tsMainTitle(title string) string {
 // named in English, and resolve, prefetch, upgrade and release must agree on the keys.
 // A movie also takes TMDB's release year: tsScore rejects a release named with another
 // year (a remake, a namesake), which only works with the right year, and clients send none
-// (resumes, upgrade polls) or a wrong one.
+// (resumes, upgrade polls) or a wrong one. A show takes its first-air year (q.firstAir) for
+// the same reason ("Doctor Who 2023" is not the 2005 show).
 // The client's title and year stay when TMDB is unavailable or slower than tsTitleNamesWait.
 func (s *Service) englishTitle(q *tsResolveQuery) {
 	if q.tmdbID <= 0 || s.cfg.TMDB == nil {
@@ -346,7 +347,7 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 				}
 			}
 		} else if d, err := s.cfg.TMDB.GetTVDetails(id); err == nil && d != nil {
-			t.title = d.Name
+			t.title, t.year = d.Name, tsDateYear(d.FirstAirDate)
 		}
 		t.title = strings.TrimSpace(t.title)
 		ch <- t
@@ -372,7 +373,7 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 // tsTMDBTitle is what englishTitle keeps per tmdb id (year 0: unknown, the client's stays).
 type tsTMDBTitle struct {
 	title     string
-	year      int
+	year      int        // movie: release year, TV: first-air year
 	directors [][]string // normalized names (movies)
 }
 
@@ -383,7 +384,10 @@ func tsApplyTMDBTitle(q *tsResolveQuery, t tsTMDBTitle) {
 			q.year = t.year
 		}
 		q.directors = t.directors
+		return
 	}
+	// TV keeps q.year (part of the cache key); the first-air year only filters names
+	q.firstAir = t.year
 }
 
 // tsDateYear is the year of a TMDB date ("1968-10-01"), 0 without one.

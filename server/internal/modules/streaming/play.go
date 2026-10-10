@@ -1,10 +1,12 @@
 package streaming
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -51,6 +53,20 @@ func (h handler) play(c *gin.Context) {
 	aplan := probe.audioPlan(audio, playAudioCodecs(c, track))
 	args := streamArgs(h.s.fileURL(hash, index), start, audio, plan, aplan, smallProbe, track)
 
+	// A video re-encode takes a transcode slot; when all stay busy the player gets 503
+	if track != tsTrackAudio && !plan.copy {
+		release, ok := tsTranscodeSlot(c.Request.Context(), tsTranscodeWait)
+		if !ok {
+			if c.Request.Context().Err() == nil {
+				log.Printf("torrent stream (%s:%d): all %d transcode slots busy", tsShortHash(hash), index, cap(tsTranscodes))
+				c.Header("Retry-After", "5")
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "too many streams are being converted right now"})
+			}
+			return
+		}
+		defer release()
+	}
+
 	// A movie stream outlives the server-wide write timeout
 	if err := http.NewResponseController(c.Writer).SetWriteDeadline(time.Time{}); err != nil {
 		log.Printf("torrent stream: could not clear write deadline: %v", err)
@@ -74,6 +90,35 @@ func (h handler) play(c *gin.Context) {
 	}
 }
 
+// tsTranscodes limits the video re-encodes (libx264) that run at once, server-wide.
+// STREAM_MAX_TRANSCODES overrides the default of 3.
+var tsTranscodes = make(chan struct{}, tsMaxTranscodes())
+
+// tsTranscodeWait: a stream waits this long for a slot (a seek restarts the stream while the
+// old one is still ending).
+var tsTranscodeWait = 3 * time.Second
+
+func tsMaxTranscodes() int {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("STREAM_MAX_TRANSCODES"))); err == nil && n > 0 {
+		return n
+	}
+	return 3
+}
+
+// tsTranscodeSlot takes a transcode slot, waiting up to wait; ok is false when none freed up.
+func tsTranscodeSlot(ctx context.Context, wait time.Duration) (release func(), ok bool) {
+	slots := tsTranscodes
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, true
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	return nil, false
+}
+
 // tsFirstWrite calls first once, on the first bytes written to w.
 type tsFirstWrite struct {
 	w     io.Writer
@@ -95,9 +140,10 @@ func playArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAu
 // streamArgs builds the ffmpeg command of a play stream: muxed (tsTrackBoth) or one elementary
 // track of a split pair (see split.go). The input side is the same for every track.
 func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool, track tsTrack) []string {
-	args := []string{"-hide_banner", "-loglevel", "error", "-fflags", "+genpts",
+	args := append([]string{"-hide_banner", "-loglevel", "error"}, tsInputGuard()...)
+	args = append(args, "-fflags", "+genpts",
 		// TorrServer may drop the connection while it waits for pieces
-		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5"}
+		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5")
 	if smallProbe {
 		// Streams are already known from the probe, so restarts after a seek can open faster
 		args = append(args, "-probesize", "2000000", "-analyzeduration", "2000000")
