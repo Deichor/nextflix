@@ -14,6 +14,8 @@ type Config struct {
 	JackettURL     string
 	JackettAPIKey  string
 	AllowedOrigins []string
+	// Extra Host names the server answers to (LAN names and IPs are always allowed)
+	AllowedHosts []string
 }
 
 func Load() Config {
@@ -26,6 +28,7 @@ func Load() Config {
 		JackettURL:     getEnv("JACKETT_URL", "http://localhost:9117"),
 		JackettAPIKey:  os.Getenv("JACKETT_API_KEY"),
 		AllowedOrigins: splitList(os.Getenv("ALLOWED_ORIGINS")),
+		AllowedHosts:   splitList(os.Getenv("ALLOWED_HOSTS")),
 	}
 }
 

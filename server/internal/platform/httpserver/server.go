@@ -15,11 +15,17 @@ import (
 
 const shutdownGrace = 10 * time.Second
 
-// New builds the gin engine with logging, recovery, request deadlines, CORS and /api/health.
+// New builds the gin engine with logging, recovery, Host / cross-site / body size guards,
+// request deadlines, CORS and /api/health.
 func New(cfg config.Config, db *gorm.DB) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(errorLogger(), recovery(), requestDeadline(), corsMiddleware(cfg.AllowedOrigins))
+	r.Use(errorLogger(), recovery(),
+		hostGuard(cfg.AllowedOrigins, cfg.AllowedHosts),
+		fetchSiteGuard(cfg.AllowedOrigins),
+		bodyLimit(maxBodyBytes),
+		requestDeadline(),
+		corsMiddleware(cfg.AllowedOrigins))
 	r.GET("/api/health", healthHandler(db))
 	return r
 }
