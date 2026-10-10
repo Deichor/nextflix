@@ -217,6 +217,13 @@ func (o *openSubtitles) quotaUntil() time.Time {
 	return time.Time{}
 }
 
+// clearQuota forgets a used-up download quota.
+func (o *openSubtitles) clearQuota() {
+	o.mu.Lock()
+	o.dlBlocked = time.Time{}
+	o.mu.Unlock()
+}
+
 // blockDownloads stops downloads until reset (RFC 3339; else osQuotaFallback from now).
 func (o *openSubtitles) blockDownloads(reset string) time.Time {
 	until := time.Now().Add(osQuotaFallback)

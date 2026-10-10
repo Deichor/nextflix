@@ -142,8 +142,11 @@ func run() error {
 		CacheDir:        envOr("SUBTITLE_CACHE_DIR", "/app/data/subtitles"),
 		FlareSolverrURL: envOr("FLARESOLVERR_URL", "http://flaresolverr:8191/v1"),
 		IMDb:            imdbLookup(tm),
+		Titles:          titleLookup(tm),
 		Debrid:          debridSource(streamingSvc),
+		LiveTiming:      true,
 	})
+	streamingSvc.SetSpeechTap(speechTap{subtitlesSvc})
 	if err := subtitlesSvc.EnsureSettings(); err != nil {
 		log.Printf("seed subtitle settings: %v", err)
 	}
@@ -306,6 +309,35 @@ func imdbLookup(tm *tmdb.Client) subtitles.IMDbLookup {
 	}
 }
 
+// titleLookup gives the subtitles module the English and original names and the year of a title
+// (subf2m finds title pages by name).
+func titleLookup(tm *tmdb.Client) subtitles.TitleLookup {
+	return func(mediaType string, tmdbID int) (subtitles.TitleInfo, error) {
+		var name, original, date string
+		if mediaType == "tv" {
+			d, err := tm.GetTVDetails(tmdbID)
+			if err != nil {
+				return subtitles.TitleInfo{}, err
+			}
+			name, original, date = d.Name, d.OriginalName, d.FirstAirDate
+		} else {
+			d, err := tm.GetMovieDetails(tmdbID)
+			if err != nil {
+				return subtitles.TitleInfo{}, err
+			}
+			name, original, date = d.Title, d.OriginalTitle, d.ReleaseDate
+		}
+		info := subtitles.TitleInfo{Names: []string{name}}
+		if original != "" && original != name {
+			info.Names = append(info.Names, original)
+		}
+		if len(date) >= 4 {
+			fmt.Sscanf(date[:4], "%d", &info.Year)
+		}
+		return info, nil
+	}
+}
+
 // catalogAvailability gives streaming the release status of a title from the catalog module.
 type catalogAvailability struct{ c *catalog.Service }
 
@@ -385,6 +417,16 @@ func fileChapters(s *streaming.Service) segments.ChapterSource {
 		}
 		return out, duration, nil
 	}
+}
+
+// speechTap feeds the dialogue audio of play streams into the subtitle timing.
+type speechTap struct{ s *subtitles.Service }
+
+func (t speechTap) Open(hash string, index int, start float64) streaming.SpeechSink {
+	if sink := t.s.OpenSpeech(hash, index, start); sink != nil {
+		return sink
+	}
+	return nil // not a typed nil
 }
 
 // debridSource lets the subtitle reads follow files that play from TorBox.

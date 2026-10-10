@@ -79,6 +79,8 @@ export interface SubtitleSettings {
   subdl: { api_key_set: boolean };
   subsource: { api_key_set: boolean };
   turkcealtyazi: { enabled: boolean };
+  subf2m: { enabled: boolean };
+  yifysubtitles: { enabled: boolean };
   default_langs: string[];
 }
 
@@ -88,6 +90,8 @@ export interface SubtitleSettingsInput {
   subdl?: { api_key?: string | null };
   subsource?: { api_key?: string | null };
   turkcealtyazi?: { enabled?: boolean };
+  subf2m?: { enabled?: boolean };
+  yifysubtitles?: { enabled?: boolean };
   default_langs?: string[];
 }
 

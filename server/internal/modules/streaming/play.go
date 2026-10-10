@@ -8,7 +8,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -86,12 +85,22 @@ func (h handler) play(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Status(http.StatusOK)
 
+	// The dialogue of the played audio also goes to the subtitle timing (speechtap.go)
+	var sink SpeechSink
+	var tapArgs []string
+	if track != tsTrackVideo && h.s.speech != nil {
+		if a := probe.audioStream(audio); a != nil {
+			if sink = h.s.speech.Open(hash, index, start); sink != nil {
+				tapArgs = speechTapArgs(audio, a)
+			}
+		}
+	}
+
 	// The request context is cancelled when the viewer closes or seeks, which stops ffmpeg
-	cmd := exec.CommandContext(c.Request.Context(), "ffmpeg", args...)
-	cmd.Stdout = &tsFirstWrite{w: c.Writer, first: func() { h.s.playFlows(hash) }}
+	out := &tsFirstWrite{w: c.Writer, first: func() { h.s.playFlows(hash) }}
 	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil && c.Request.Context().Err() == nil {
+	label := fmt.Sprintf("%s:%d", tsShortHash(hash), index)
+	if err := tsRunPlay(c.Request.Context(), args, tapArgs, sink, out, &stderr, label); err != nil && c.Request.Context().Err() == nil {
 		log.Printf("torrent stream ffmpeg error (%s:%d): %v %s", hash, index, err, strings.TrimSpace(stderr.String()))
 	}
 }
@@ -129,12 +138,15 @@ func tsTranscodeSlot(ctx context.Context, wait time.Duration) (release func(), o
 type tsFirstWrite struct {
 	w     io.Writer
 	first func()
+	wrote bool
 }
 
 func (f *tsFirstWrite) Write(b []byte) (int, error) {
-	if f.first != nil && len(b) > 0 {
-		f.first()
-		f.first = nil
+	if len(b) > 0 && !f.wrote {
+		f.wrote = true
+		if f.first != nil {
+			f.first()
+		}
 	}
 	return f.w.Write(b)
 }

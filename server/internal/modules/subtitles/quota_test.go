@@ -209,6 +209,29 @@ func TestOpenSubtitlesLastDownloadBlocksTheNext(t *testing.T) {
 	}
 }
 
+// Logging in with an account after the bare key's quota ran out lets downloads through again;
+// a change elsewhere keeps the block.
+func TestNewOpenSubtitlesLoginClearsTheQuota(t *testing.T) {
+	f := newQuotaFixture(t)
+	f.svc.os.blockDownloads(f.reset)
+	if _, err := f.svc.UpdateSettings(SettingsInput{DefaultLangs: &[]string{"tr", "en"}}); err != nil {
+		t.Fatal(err)
+	}
+	if f.svc.OpenSubtitlesQuotaUntil().IsZero() {
+		t.Fatal("a languages change cleared the quota")
+	}
+	var in SettingsInput
+	if err := json.Unmarshal([]byte(`{"opensubtitles":{"username":"me","password":"pw"}}`), &in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.UpdateSettings(in); err != nil {
+		t.Fatal(err)
+	}
+	if until := f.svc.OpenSubtitlesQuotaUntil(); !until.IsZero() {
+		t.Fatalf("still blocked until %v after a login change", until)
+	}
+}
+
 func TestOpenSubtitles429QuotaBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

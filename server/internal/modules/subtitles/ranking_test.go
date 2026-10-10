@@ -69,6 +69,31 @@ func TestRankingOrder(t *testing.T) {
 	}
 }
 
+// The Mentalist S02E10 on an AMZN WEB-DL: subf2m's "WEBRip.Amazon" season pack is made for that
+// release and goes ahead of an HDTV pack already timed to the file; one that does not fit stays behind.
+func TestSameReleaseAheadOfTimed(t *testing.T) {
+	if ri := parseRelease("The.Mentalist.S02.WEBRip.Amazon.tr"); ri.service != "amzn" || ri.family != "web" {
+		t.Fatalf("service=%s family=%s", ri.service, ri.family)
+	}
+	q := Query{Langs: []string{"tr"}, Title: "The Mentalist S02E10 1080p AMZN WEB-DL DDP5 1 H 264-ViSUM"}
+	mk := func(id, release string, autoSync int) candidate {
+		return candidate{Sub: Sub{ID: id, Source: SourceTurkceAltyazi, Language: "tr", Release: release},
+			Releases: []string{release}, AutoSync: autoSync}
+	}
+	got := rankCandidates([]candidate{
+		mk("hdtv-timed", "S02 (pack) HDTV", 1),
+		mk("amazon", "The.Mentalist.S02.WEBRip.Amazon.tr", 0),
+		mk("720p", "S02 (pack) HD 720p", 0),
+	}, q)
+	if got[0].ID != "amazon" || got[1].ID != "hdtv-timed" {
+		t.Fatalf("order %s, %s, %s", got[0].ID, got[1].ID, got[2].ID)
+	}
+	got = rankCandidates([]candidate{mk("hdtv-timed", "S02 (pack) HDTV", 1), mk("amazon", "The.Mentalist.S02.WEBRip.Amazon.tr", -1)}, q)
+	if got[0].ID != "hdtv-timed" {
+		t.Fatalf("a same-release subtitle that does not fit went first")
+	}
+}
+
 func TestHIOnlyNotPenalised(t *testing.T) {
 	q := Query{Langs: []string{"tr"}}
 	a := rankCandidates([]candidate{{Sub: Sub{ID: "a", Language: "tr", HI: true}}}, q)

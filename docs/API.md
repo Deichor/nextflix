@@ -572,7 +572,7 @@ without it loses the name's hint. These parts stay below a resolution step and n
 
 ## Subtitles (`modules/subtitles`)
 
-Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|subsource|turkcealtyazi", "language": "tr",
+Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|subsource|turkcealtyazi|subf2m|yifysubtitles", "language": "tr",
 "label": "Türkçe", "release": "BDRip HDRINVASION", "hi": false, "forced": false, "synced": false, "score": 0.3,
 "author": "WoraZ", "fps": 23.976, "downloads": 6527, "live": true, "quota": true }` (`author`, `fps`, `downloads` only when known; `live`: an
 embedded track of a big file, read while it plays, see below; `quota`: an OpenSubtitles item while its download quota is
@@ -580,16 +580,33 @@ used up, listed after the other items of its language)
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/subtitles` | `tmdb_id`, `media_type=movie\|tv`, `season`, `episode` (required for tv), `hash` + `index` (playing TorrServer file), `langs=tr,en` (default: the settings order), `title` (playing torrent name, ranking hint), `year`, `refresh=1` (late uploads: ask the providers again, skipping the 30 min list cache and turkcealtyazi's 24 h page cache (pages older than 10 min); at most every 5 min per title, otherwise the cache answers) → 200 `{items: [Sub], opensubtitles_quota_until?: "<RFC 3339>"}` (the field only while the OpenSubtitles download quota is used up); 400 without `tmdb_id` and `hash` |
-| GET | `/api/subtitles/file?id=[&t=<sec>]` | 200 `text/vtt; charset=utf-8`; a subtitle listed for a playing file (not made for it) is timed to that file (see [ARCHITECTURE.md](ARCHITECTURE.md#automatic-subtitle-timing-modulessubtitlessyncgo)): while that runs the answer is the subtitle as it is, marked partial like a live track (ask again), then the timed one; `X-Subtitle-Sync: pending\|synced\|unchanged\|replaced\|poor\|failed` tells the state; for a `live` embedded track the cues read so far from about `t` (the player's position) on, marked by a `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` (`no-store`) while more follow (ask again; the whole track is cached once every part of the file was read); 400 unknown id, 429 provider quota or rate limit (OpenSubtitles quota: `{error, quota: true, reset_at: "<RFC 3339>"}`, answered without asking OpenSubtitles until then), 502 provider failure |
-| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, subsource: {api_key_set}, turkcealtyazi: {enabled}, default_langs: ["tr","en"]}`; secrets are never returned |
-| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, subsource: {api_key}, turkcealtyazi: {enabled}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
+| GET | `/api/subtitles` | `tmdb_id`, `media_type=movie\|tv`, `season`, `episode` (required for tv), `hash` + `index` (playing TorrServer file), `langs=tr,en` (default: the settings order), `title` (playing torrent name, ranking hint), `year`, `refresh=1` (late uploads: ask the providers again, skipping the 30 min list cache and the 24 h page cache of the scraped sites (pages older than 10 min); at most every 5 min per title, otherwise the cache answers) → 200 `{items: [Sub], opensubtitles_quota_until?: "<RFC 3339>"}` (the field only while the OpenSubtitles download quota is used up); 400 without `tmdb_id` and `hash` |
+| GET | `/api/subtitles/file?id=[&t=<sec>]` | 200 `text/vtt; charset=utf-8`; a subtitle listed for a playing file (not made for it) is timed to that file (see [ARCHITECTURE.md](ARCHITECTURE.md#automatic-subtitle-timing-modulessubtitlessyncgo)): while that runs the answer is the subtitle as it is, marked partial like a live track (ask again), then the timed one; while the file plays, timing from the played audio keeps improving it, and such answers stay partial too (players keep asking every 15 s and replace the cues). Every 200 answer carries `X-Subtitle-Sync` (exposed to CORS, values below); for a `live` embedded track the cues read so far from about `t` (the player's position) on, marked by a `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` (`no-store`) while more follow (ask again; the whole track is cached once every part of the file was read); 400 unknown id, 429 provider quota or rate limit (OpenSubtitles quota: `{error, quota: true, reset_at: "<RFC 3339>"}`, answered without asking OpenSubtitles until then), 502 provider failure |
+| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, subsource: {api_key_set}, turkcealtyazi: {enabled}, subf2m: {enabled}, yifysubtitles: {enabled}, default_langs: ["tr","en"]}`; secrets are never returned |
+| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, subsource: {api_key}, turkcealtyazi: {enabled}, subf2m: {enabled}, yifysubtitles: {enabled}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
+
+`X-Subtitle-Sync` on `/api/subtitles/file` (one token, `[a-z]`):
+
+| Value | Meaning | Partial? |
+|---|---|---|
+| `original` | not timed: made for the file (torrent file, embedded track, OpenSubtitles hash match) or no file named in the id | as the track (live embedded tracks are) |
+| `pending` | not timed yet (no reference yet, or nothing fits so far): served as it is | yes while the timing runs or the file plays |
+| `live` | timed (or replaced by a fitting subtitle) from what was read and played so far; changes as more plays | yes while the file plays, then `no-store` without the marker |
+| `synced` | timed to fit the file, final | no |
+| `unchanged` | already fitted, served as it is, final | no |
+| `replaced` | did not fit: the best fitting other subtitle of its language is served, final | no |
+| `poor` | did not fit, nothing better: served as it is, final | no |
+| `failed` | no reference (file unreadable, or too dear to read and not playing): served as it is, tried again later (`no-store`) | no |
+
+`pending`, `live` and `failed` answers are `no-store`; the final ones may be cached (`max-age=86400`). A partial
+answer has the `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1`; ask again every 15 s and take the new cues.
 
 Sources: subtitle files inside the torrent and embedded text tracks (whole when the file is small or mostly cached, else
 live: read from the playing position on while it streams, see ARCHITECTURE.md), OpenSubtitles.com
 (API key; username/password log in for a JWT cached 23 h, which raises the download quota), SubDL (API key), SubSource
-(API key) and
-turkcealtyazi.org (scraped, on by default). `/api/subtitles` answers within 6 s with what is ready; slower providers keep
+(API key),
+turkcealtyazi.org, subf2m.co and yifysubtitles.ch (scraped, no key, on by default; columns `turkcealtyazi_enabled`,
+`subf2m_enabled`, `yify_enabled`). `/api/subtitles` answers within 6 s with what is ready; slower providers keep
 running and fill the 30 min in-memory list cache for the next call (failures are cached 3 min, except network
 failures and 5xx, which the next call retries). Provider requests go through `platform/upstream`: resets, stalls and
 cut answers are retried on a new connection (also the OpenSubtitles login/download and turkcealtyazi form POSTs). So the players (web and
@@ -617,12 +634,25 @@ is in another language), the players ask `subalt` for a release that carries it 
   POST form (`/ind`) returning a zip. At most one request every 2 s server-wide, pages cached 24 h on disk, a clear
   User-Agent; on a Cloudflare challenge the page is loaded through FlareSolverr and its cookies are reused. RAR archives
   are not supported (none seen so far).
+- subf2m.co (the Subscene archive; most Turkish subtitles of older films and series): its search is disallowed in
+  robots.txt, so the title page is guessed from the TMDB English (then original) title in Subscene's path style
+  (`/subtitles/the-mentalist-second-season`, `.../the-mentalist-season-2`; movies `inception-2010`, then `inception`; at
+  most 4 tries, 404s are skipped) and accepted only when the IMDb id it links matches (movies without one: the year ±1).
+  The found path is kept 24 h (a miss 6 h). One page per language (`/subtitles/<path>/turkish`, at most 3 languages);
+  for an episode, rows naming other episodes are dropped and rows naming none are season packs (episode picked from
+  the zip). Rows rated good / bad move up / down; `.HI` / SDH names are HI, an uploader comment calling it forced
+  ("forced BluRay altyazı", not "forced dahil") marks it forced. The file is `<row>/download` (a redirect to
+  `isubcdn.com`, a zip).
+- yifysubtitles.ch: movies only, one page per IMDb id (`/movie-imdb/tt<id>`, all languages), files at
+  `/subtitle/<name>.zip`; its up/down votes rank like subf2m's rating.
+- Both scraped sites: one request per site every second server-wide, no hedging, pages cached 24 h on disk
+  (`subf2m-pages`, `yify-pages`), redirects only on the site (and subf2m's CDN). A 404 title is an empty answer.
 
 Ranking, per language in the requested order: synced (same torrent, embedded, OpenSubtitles hash match) first, then
 ones already timed to the playing file that fit (shown `synced: true`), then release similarity with `title`
 (release group, source family BluRay/WEB/HDTV/DVD, streaming service, resolution, edition, FPS mismatch penalty
 against the release name or the file's probed frame rate) and provider quality (downloads, rating, trusted uploader,
-turkcealtyazi quality tier); ones that did not fit even when timed move down. HI is penalised only when the language
+turkcealtyazi quality tier, subf2m / YIFY rating); ones that did not fit even when timed move down. HI is penalised only when the language
 has a regular subtitle; multi-CD subtitles are penalised; forced-only and machine/AI-translated subtitles always come
 last. For an episode, subtitles whose release names (or torrent paths) name only other episodes (`S02E06`, `2x06`)
 are left out; season packs are kept.
@@ -637,6 +667,30 @@ provider and file id, so a cached file never counts against a provider quota aga
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/api/playback-log` | Playback diagnostics from the TV player, written to the server log and to daily files under `PLAYBACK_LOG_DIR` (UTC, kept 14 days, at most 50 MB a day). JSON body (any content type; the TV sends `text/plain` to skip the CORS preflight), at most 32 KB: `{sid, seq, client, ctx: {type, tmdb, s, e, title, src: "<hash8>:<index>", mode: muxed\|split\|src, debrid, q, dur}, dropped, events: [{t: <epoch ms>, k: <kind>, p: <file position s>, x: {<field>: number\|string\|bool}}]}`, at most 200 events. One `playback: <sid> <client> #<seq> ...` header line plus one line per event; invalid events are skipped, strings are reduced to safe tokens. 204; 400 bad shape, 413 too big, 429 more than a burst of 8 batches, then one per 4 s, per client IP |
+| POST | `/api/playback-log` | Playback diagnostics from the players (clients `tv`, `web` for the web player's subtitle events, `web-a4k` for its upscaler), written to the server log and to daily files under `PLAYBACK_LOG_DIR` (UTC, kept 14 days, at most 50 MB a day). JSON body (any content type; the TV sends `text/plain` to skip the CORS preflight), at most 32 KB: `{sid, seq, client, ctx: {type, tmdb, s, e, title, src: "<hash8>:<index>", mode: muxed\|split\|src, debrid, q, dur}, dropped, events: [{t: <epoch ms>, k: <kind>, p: <file position s>, x: {<field>: number\|string\|bool}}]}`, at most 200 events. One `playback: <sid> <client> #<seq> ...` header line plus one line per event; invalid events are skipped, strings are reduced to safe tokens. 204; 400 bad shape, 413 too big, 429 more than a burst of 8 batches, then one per 4 s, per client IP |
 
-Event kinds (`tv/webos/src/player/playbackLog.ts`, engine): `wait` (a `waiting` until it played again: `d` ms, `end`, buffered `ahead`, `rs` readyState, `ns` networkState, `seeking`, `start`), `freeze` (media time fell behind the wall clock by `ms` without a `waiting`), `jump` (position moved by `by` s without a seek), `drops` (over 5 frames dropped in ~2 s), `late` (the 250 ms timer fired `ms` late: a long main-thread task), `stalled`, `seek` (`why`: `user`, `skip-intro`, `gap`, `align-start`, `align-split`, `splice-stuck` or `unmarked`), `restart` / `open` (`why`), `seekpoint` (`fix`), `buffering`, `hold` / `hold-end`, `health`, `splice` / `splice-end` / `splice-drop`, `subs` / `subs-swap`, `stream-fail`, `error`, `early-end`, `ended`, `next`, `exit`, `quota` (a SourceBuffer was full), `ranges` (each SourceBuffer's ranges near the playhead at a `waiting`), and a `summary` every 60 s (`ahead_min`, `ahead_avg`, `dropped`, `decoded`, `waits`, `freezes`, `jumps`, `late`, `late_max`). Batches go every 30 s and on pause, end, next episode and exit (`keepalive`). Off: `PLAYBACK_LOG = false` in `playbackLog.ts`, or localStorage `nfx-tv:playback-log` = `off` on the TV. Read with `scripts/playback-log.sh [days] [filter]` (e.g. `2 S02E09`).
+Event kinds (`tv/webos/src/player/playbackLog.ts`, engine): `wait` (a `waiting` until it played again: `d` ms, `end`, buffered `ahead`, `rs` readyState, `ns` networkState, `seeking`, `start`), `freeze` (media time fell behind the wall clock by `ms` without a `waiting`), `jump` (position moved by `by` s without a seek), `drops` (over 5 frames dropped in ~2 s), `late` (the 250 ms timer fired `ms` late: a long main-thread task), `stalled`, `seek` (`why`: `user`, `skip-intro`, `gap`, `align-start`, `align-split`, `splice-stuck` or `unmarked`), `restart` / `open` (`why`), `seekpoint` (`fix`), `buffering`, `hold` / `hold-end`, `health`, `splice` / `splice-end` / `splice-drop`, `subs` / `subs-none` / `subdelay` (below), `stream-fail`, `error`, `early-end`, `ended`, `next`, `exit` (`subdelay` while a subtitle is shown), `quota` (a SourceBuffer was full), `ranges` (each SourceBuffer's ranges near the playhead at a `waiting`), and a `summary` every 60 s (`ahead_min`, `ahead_avg`, `dropped`, `decoded`, `waits`, `freezes`, `jumps`, `late`, `late_max`, `subdelay` while a subtitle is shown). Batches go every 30 s and on pause, end, next episode and exit (`keepalive`). Off: `PLAYBACK_LOG = false` in `playbackLog.ts`, or localStorage `nfx-tv:playback-log` = `off` on the TV. Read with `scripts/playback-log.sh [days] [filter]` (e.g. `2 S02E09`).
+
+Subtitle events (both players, fields from `subsLog.ts` in `tv/webos/src/player/` and `web/src/features/watch/`; the web
+player sends only these and `exit`, as client `web`). String values are made log-safe tokens (Turkish letters folded to
+ASCII, other characters `_`, at most 40 chars); fields are printed sorted:
+
+- `subs`: a subtitle was loaded, or a later answer changed it. `id` (first 24 chars), `cues`, `partial`, `lang`,
+  `provider` (`source` of the list item: `opensubtitles`, `subdl`, `subsource`, `turkcealtyazi`, `torrent`, `embedded` ...),
+  `name` (its release name), `sync` (raw `X-Subtitle-Sync`; `-` none, `hidden` when the browser cannot read it on a
+  cross-origin answer), `why` (`open` the file's first default pick, `auto` a later pick by the player (fuller list,
+  late upload), `user`, `fallback` (the one before gave no cues), `poll` (a partial subtitle asked again)), `first` /
+  `last` (start of the first / last cue, 0.1 s), `subdelay` (s, + shows them later). A `poll` is logged only when the
+  cues were replaced, `partial` / `sync` changed, or the cues moved (`shift`: median start change of the cues matched by
+  text, `moved`: how many moved by 0.1 s or more; moves alone at most once a minute, counted from the last `subs`
+  event); a live track that only grew is not logged.
+  `... pos=312.4 subs cues=643 first=1.2 id=b3M6MTIzNDU2Nzg5MDpoYXNo lang=tr last=2580.4 name=Show.S02E10.HDTV.x264-LOL partial=true provider=turkcealtyazi subdelay=0 sync=pending why=open`
+  `... pos=342.9 subs cues=643 first=3.6 id=b3M6MTIzNDU2Nzg5MDpoYXNo lang=tr last=2582.8 moved=641 name=Show.S02E10.HDTV.x264-LOL partial=false provider=turkcealtyazi shift=2.4 subdelay=0 sync=synced why=poll`
+- `subs-none`: no subtitle shows. `why`: `off` (the viewer turned them off), `open` (the default pick chose none; `pref=off`
+  when the viewer's last choice was off), `failed` (the shown one gave no cues and no other of its language is left),
+  `missing` (after the list retries the profile's language is not listed); `lang` (profile language), `n` (subtitles
+  listed), `have` (their languages, `+` separated), `audio` (audio track language).
+  `... pos=0 subs-none audio=en have=en+es lang=tr n=14 why=missing`
+- `subdelay`: the viewer changed the subtitle delay; logged 3 s after the last change with the settled value, `from`
+  (the value logged before), `id`, `provider`; a pending change is logged at once on exit or when another file starts.
+  `... pos=95.1 subdelay from=0 id=b3M6MTIzNDU2Nzg5MDpoYXNo provider=turkcealtyazi subdelay=1.5`

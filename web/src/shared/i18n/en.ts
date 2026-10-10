@@ -273,6 +273,8 @@ export const en = {
   'settings.subtitles.subdlHint': 'Get a free API key in your SubDL account panel.',
   'settings.subtitles.subsourceHint': 'Get a free API key under My Profile on subsource.net. Has many anime subtitles in Turkish.',
   'settings.subtitles.turkcealtyaziHint': 'Turkish subtitles from turkcealtyazi.org. Looked up only when you open a title, at most one request every 2 seconds.',
+  'settings.subtitles.subf2mHint': 'The Subscene archive (subf2m.co): many Turkish subtitles for older films and series. No key needed.',
+  'settings.subtitles.yifyHint': 'Movie subtitles from yifysubtitles.ch, found by IMDb id. No key needed.',
   'settings.subtitles.enabled': 'Use turkcealtyazi.org',
   'settings.subtitles.apiKey': 'API key',
   'settings.subtitles.username': 'Username',

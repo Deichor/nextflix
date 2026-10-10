@@ -41,6 +41,7 @@ type Service struct {
 	debrid       *tsDebrid  // TorBox (debrid.go)
 	instant      *tsInstant // instant-play hints (instant.go)
 	home         *tsHome    // home releases of films in cinemas (homerelease.go)
+	speech       SpeechTap  // subtitle timing listens to the play streams (nil = off)
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe

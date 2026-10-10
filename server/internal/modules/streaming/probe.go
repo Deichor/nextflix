@@ -19,6 +19,7 @@ type tsProbeStream struct {
 	Height        int               `json:"height"`
 	ColorTransfer string            `json:"color_transfer"`
 	Channels      int               `json:"channels"`
+	ChannelLayout string            `json:"channel_layout"`
 	Tags          map[string]string `json:"tags"`
 	Disposition   map[string]int    `json:"disposition"` // default, forced, ... (0 or 1)
 	SideData      []struct {

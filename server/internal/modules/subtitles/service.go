@@ -44,9 +44,15 @@ type Config struct {
 	SubDLDownloadURL string
 	SubSourceAPIURL  string
 	TurkceAltyaziURL string
+	Subf2mURL        string
+	YIFYURL          string
+	Titles           TitleLookup // names and year for subf2m (nil = subf2m off)
 	HTTPClient       *http.Client
 	// Debrid maps files that play from TorBox (nil = TorrServer only)
 	Debrid *DebridSource
+	// LiveTiming: the play streams feed their audio (OpenSpeech), so timing results stay
+	// provisional and improve while a file plays (sync_live.go)
+	LiveTiming bool
 }
 
 // Service lists subtitles from the torrent itself and online providers and serves them as WebVTT.
@@ -63,6 +69,8 @@ type Service struct {
 	sdl *subDL
 	ss  *subSource
 	ta  *turkceAltyazi
+	sf  *subf2m
+	yts *yifySubs
 
 	hashMu sync.Mutex
 	hashes map[string]string // "<hash>|<index>" -> moviehash
@@ -100,6 +108,8 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		sdl:       newSubDL(cfg.SubDLAPIURL, cfg.SubDLDownloadURL, api),
 		ss:        newSubSource(cfg.SubSourceAPIURL, api),
 		ta:        newTurkceAltyazi(cfg.TurkceAltyaziURL, cfg.FlareSolverrURL, files),
+		sf:        newSubf2m(cfg.Subf2mURL, files),
+		yts:       newYIFY(cfg.YIFYURL, files),
 		hashes:    map[string]string{},
 		refreshed: map[string]time.Time{},
 		extract:   ExtractEmbeddedSub,
@@ -174,6 +184,11 @@ func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
 		before.SubSourceAPIKey != st.SubSourceAPIKey || before.TurkceAltyaziEnabled != st.TurkceAltyaziEnabled || before.OpenSubtitlesUsername != st.OpenSubtitlesUsername {
 		s.lists.clear()
 	}
+	// The download quota belongs to the account (or the bare key): new credentials may have downloads left.
+	if before.OpenSubtitlesAPIKey != st.OpenSubtitlesAPIKey || before.OpenSubtitlesUsername != st.OpenSubtitlesUsername ||
+		before.OpenSubtitlesPassword != st.OpenSubtitlesPassword {
+		s.os.clearQuota()
+	}
 	return st.view(), nil
 }
 
@@ -247,6 +262,26 @@ func (s *Service) List(ctx context.Context, q Query) []Sub {
 					ctx = withFreshPages(ctx)
 				}
 				return s.ta.search(ctx, q, imdb)
+			}})
+		}
+		if st.Subf2mEnabled && s.cfg.Titles != nil {
+			jobs = append(jobs, job{SourceSubf2m, "subf2m|" + base, func(ctx context.Context) ([]candidate, error) {
+				if fresh {
+					ctx = withFreshPages(ctx)
+				}
+				return s.subf2mSearch(ctx, q)
+			}})
+		}
+		if st.YIFYEnabled && !q.isTV() && s.cfg.IMDb != nil {
+			jobs = append(jobs, job{SourceYIFY, "yify|" + base, func(ctx context.Context) ([]candidate, error) {
+				imdb, err := s.cfg.IMDb(q.MediaType, q.TmdbID)
+				if err != nil {
+					return nil, fmt.Errorf("yifysubtitles: IMDb id lookup: %w", err)
+				}
+				if fresh {
+					ctx = withFreshPages(ctx)
+				}
+				return s.yts.search(ctx, q, imdb)
 			}})
 		}
 	}
@@ -594,6 +629,16 @@ func (s *Service) download(ctx context.Context, source, lang, ref string) ([]byt
 			return nil, errors.New("turkcealtyazi.org is disabled in settings")
 		}
 		raw, name, err = s.ta.fetch(ctx, ref, lang)
+	case SourceSubf2m:
+		if !st.Subf2mEnabled {
+			return nil, errors.New("subf2m is disabled in settings")
+		}
+		raw, name, err = s.sf.fetch(ctx, ref, lang)
+	case SourceYIFY:
+		if !st.YIFYEnabled {
+			return nil, errors.New("YIFY Subtitles is disabled in settings")
+		}
+		raw, name, err = s.yts.fetch(ctx, ref, lang)
 	default:
 		return nil, ErrBadID
 	}
@@ -621,7 +666,8 @@ func decodeID(id string) (source, lang, ref string, err error) {
 		return "", "", "", ErrBadID
 	}
 	switch parts[0] {
-	case SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceSubSource, SourceTurkceAltyazi:
+	case SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceSubSource, SourceTurkceAltyazi,
+		SourceSubf2m, SourceYIFY:
 	default:
 		return "", "", "", ErrBadID
 	}

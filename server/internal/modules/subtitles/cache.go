@@ -99,6 +99,13 @@ func (g *flightGroup) start(key string, fn func() (any, error)) *flightCall {
 	return c
 }
 
+func (g *flightGroup) running(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.calls[key]
+	return ok
+}
+
 // diskCache stores converted subtitles and scraped pages under dir.
 type diskCache struct{ dir string }
 
@@ -110,7 +117,7 @@ const (
 
 // cacheKinds are the folders under the cache dir (diskCache kinds).
 var cacheKinds = []string{SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceSubSource,
-	SourceTurkceAltyazi, "turkcealtyazi-pages", "synced", "syncref"}
+	SourceTurkceAltyazi, "turkcealtyazi-pages", "synced", "syncref", "synclive", SourceSubf2m, "subf2m-pages", SourceYIFY, "yify-pages"}
 
 // sweep removes files not used for maxAge (leftover temp files after an hour), then the least
 // recently used ones while the cache holds more than maxBytes. Only regular files count.

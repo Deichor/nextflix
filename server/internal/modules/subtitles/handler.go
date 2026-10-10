@@ -61,9 +61,6 @@ func (h handler) file(c *gin.Context) {
 	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks)
 	a, err := h.s.FileFor(c.Request.Context(), c.Query("id"), t)
 	vtt, partial := a.VTT, a.Partial
-	if a.Sync != "" {
-		c.Header("X-Subtitle-Sync", a.Sync)
-	}
 	var qe QuotaError
 	switch {
 	case errors.As(err, &qe):
@@ -81,6 +78,12 @@ func (h handler) file(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
+	// Every answer names its timing state; original: not timed (made for the file, or no file named)
+	state := a.Sync
+	if state == "" {
+		state = syncStateOriginal
+	}
+	c.Header("X-Subtitle-Sync", state)
 	if partial {
 		// More cues follow while the file plays; the body also carries PartialNote
 		c.Header("Cache-Control", "no-store")
@@ -88,8 +91,8 @@ func (h handler) file(c *gin.Context) {
 		c.Data(http.StatusOK, "text/vtt; charset=utf-8", vtt)
 		return
 	}
-	if a.Sync == syncStateFailed {
-		// The timing is tried again later (syncRetryAfter): no long browser cache
+	if a.Sync == syncStateFailed || a.Sync == syncStateLive || a.Sync == syncStatePending {
+		// The timing is tried again or improves later: no long browser cache
 		c.Header("Cache-Control", "no-store")
 	} else {
 		c.Header("Cache-Control", "private, max-age=86400")

@@ -35,9 +35,41 @@ function orderLangs(langs: string[]): string[] {
 function providerState(s: SubtitleSettings | null, loadError: string | null): ConnectionState {
   if (loadError !== null) return 'error';
   if (!s) return 'checking';
-  return s.opensubtitles.api_key_set || s.subdl.api_key_set || s.subsource.api_key_set || s.turkcealtyazi.enabled
+  return s.opensubtitles.api_key_set ||
+    s.subdl.api_key_set ||
+    s.subsource.api_key_set ||
+    s.turkcealtyazi.enabled ||
+    s.subf2m.enabled ||
+    s.yifysubtitles.enabled
     ? 'connected'
     : 'notSet';
+}
+
+// A keyless provider that is only turned on or off
+function ProviderToggle(props: {
+  title: string;
+  hint: string;
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="border-t border-white/10 pt-6">
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-semibold">{props.title}</legend>
+        <p className="text-xs text-[#8c8c8c]">{props.hint}</p>
+        <label className="flex cursor-pointer items-center gap-3 text-sm">
+          <input
+            type="checkbox"
+            checked={props.checked}
+            onChange={(e) => props.onChange(e.target.checked)}
+            className="h-4 w-4 accent-[#E50914]"
+          />
+          {props.label}
+        </label>
+      </fieldset>
+    </div>
+  );
 }
 
 export default function SubtitlesSection() {
@@ -51,6 +83,8 @@ export default function SubtitlesSection() {
   const [ssKey, setSsKey] = useState('');
   const [cleared, setCleared] = useState({ osKey: false, osPass: false, sdlKey: false, ssKey: false });
   const [taEnabled, setTaEnabled] = useState(true);
+  const [sfEnabled, setSfEnabled] = useState(true);
+  const [ytsEnabled, setYtsEnabled] = useState(true);
   const [langs, setLangs] = useState<string[]>(KNOWN_LANGS);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<Status>(null);
@@ -64,6 +98,8 @@ export default function SubtitlesSection() {
     setOsUser(s.opensubtitles.username || '');
     setCleared({ osKey: false, osPass: false, sdlKey: false, ssKey: false });
     setTaEnabled(s.turkcealtyazi.enabled);
+    setSfEnabled(s.subf2m.enabled);
+    setYtsEnabled(s.yifysubtitles.enabled);
     setLangs(orderLangs(s.default_langs || []));
   };
 
@@ -90,6 +126,8 @@ export default function SubtitlesSection() {
       cleared.ssKey ||
       osUser.trim() !== (settings.opensubtitles.username || '') ||
       taEnabled !== settings.turkcealtyazi.enabled ||
+      sfEnabled !== settings.subf2m.enabled ||
+      ytsEnabled !== settings.yifysubtitles.enabled ||
       langs.join(',') !== savedLangs.join(','));
 
   const move = (i: number, dir: -1 | 1) => {
@@ -113,6 +151,8 @@ export default function SubtitlesSection() {
       subdl: { api_key: cleared.sdlKey ? null : sdlKey.trim() },
       subsource: { api_key: cleared.ssKey ? null : ssKey.trim() },
       turkcealtyazi: { enabled: taEnabled },
+      subf2m: { enabled: sfEnabled },
+      yifysubtitles: { enabled: ytsEnabled },
       default_langs: langs,
     };
     setSaving(true);
@@ -237,21 +277,27 @@ export default function SubtitlesSection() {
             </fieldset>
           </div>
 
-          <div className="border-t border-white/10 pt-6">
-            <fieldset className="space-y-2">
-              <legend className="text-sm font-semibold">turkcealtyazi.org</legend>
-              <p className="text-xs text-[#8c8c8c]">{t('settings.subtitles.turkcealtyaziHint')}</p>
-              <label className="flex cursor-pointer items-center gap-3 text-sm">
-                <input
-                  type="checkbox"
-                  checked={taEnabled}
-                  onChange={(e) => setTaEnabled(e.target.checked)}
-                  className="h-4 w-4 accent-[#E50914]"
-                />
-                {t('settings.subtitles.enabled')}
-              </label>
-            </fieldset>
-          </div>
+          <ProviderToggle
+            title="turkcealtyazi.org"
+            hint={t('settings.subtitles.turkcealtyaziHint')}
+            label={t('settings.subtitles.enabled')}
+            checked={taEnabled}
+            onChange={setTaEnabled}
+          />
+          <ProviderToggle
+            title="subf2m"
+            hint={t('settings.subtitles.subf2mHint')}
+            label={t('settings.subtitles.enabled')}
+            checked={sfEnabled}
+            onChange={setSfEnabled}
+          />
+          <ProviderToggle
+            title="YIFY Subtitles"
+            hint={t('settings.subtitles.yifyHint')}
+            label={t('settings.subtitles.enabled')}
+            checked={ytsEnabled}
+            onChange={setYtsEnabled}
+          />
 
           <div className="space-y-4 border-t border-white/10 pt-6">
             <button type="submit" disabled={saving || !dirty} className={primaryButton}>

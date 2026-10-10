@@ -260,6 +260,8 @@ export const tr: Messages = {
   'settings.subtitles.subdlHint': 'Ücretsiz API anahtarını SubDL hesap panelinizden alabilirsiniz.',
   'settings.subtitles.subsourceHint': 'Ücretsiz API anahtarını subsource.net hesabınızda Profilim bölümünden alabilirsiniz. Türkçe anime altyazısı çoktur.',
   'settings.subtitles.turkcealtyaziHint': "turkcealtyazi.org'dan Türkçe altyazılar. Yalnızca bir içerik açıldığında, en fazla 2 saniyede bir istekle aranır.",
+  'settings.subtitles.subf2mHint': 'Subscene arşivi (subf2m.co): eski film ve diziler için çok sayıda Türkçe altyazı. Anahtar gerekmez.',
+  'settings.subtitles.yifyHint': "yifysubtitles.ch'den film altyazıları, IMDb kimliğiyle bulunur. Anahtar gerekmez.",
   'settings.subtitles.enabled': 'turkcealtyazi.org kullan',
   'settings.subtitles.apiKey': 'API anahtarı',
   'settings.subtitles.username': 'Kullanıcı adı',

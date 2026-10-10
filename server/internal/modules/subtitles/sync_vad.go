@@ -15,18 +15,31 @@ func speechFrames(pcm []int16, sampleRate int) []byte {
 	if frame <= 0 || len(pcm) < frame {
 		return nil
 	}
-	n := len(pcm) / frame
-	db := make([]float64, n)
+	db := make([]float64, len(pcm)/frame)
 	prev := 0.0
-	for f := 0; f < n; f++ {
-		sum := 0.0
-		for _, s := range pcm[f*frame : (f+1)*frame] {
-			x := float64(s)
-			y := x - 0.97*prev
-			prev = x
-			sum += y * y
-		}
-		db[f] = 10 * math.Log10(sum/float64(frame)+1)
+	for f := range db {
+		db[f], prev = frameEnergy(pcm[f*frame:(f+1)*frame], prev)
+	}
+	return speechOf(db)
+}
+
+// frameEnergy is the pre-emphasised energy of one frame in dB; prev is the sample before it.
+func frameEnergy(pcm []int16, prev float64) (db, last float64) {
+	sum := 0.0
+	for _, s := range pcm {
+		x := float64(s)
+		y := x - 0.97*prev
+		prev = x
+		sum += y * y
+	}
+	return 10 * math.Log10(sum/float64(len(pcm))+1), prev
+}
+
+// speechOf marks the speech frames of a window's frame energies (dB).
+func speechOf(db []float64) []byte {
+	n := len(db)
+	if n == 0 {
+		return nil
 	}
 	sorted := append([]float64(nil), db...)
 	sort.Float64s(sorted)

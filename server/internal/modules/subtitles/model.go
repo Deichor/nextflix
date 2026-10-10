@@ -14,6 +14,8 @@ const (
 	SourceSubDL         = "subdl"
 	SourceTurkceAltyazi = "turkcealtyazi"
 	SourceSubSource     = "subsource"
+	SourceSubf2m        = "subf2m"
+	SourceYIFY          = "yifysubtitles"
 )
 
 // Settings is the single row of subtitle provider settings (id 1). Secrets never leave the server.
@@ -25,6 +27,8 @@ type Settings struct {
 	SubDLAPIKey           string `gorm:"column:subdl_api_key"`
 	SubSourceAPIKey       string `gorm:"column:subsource_api_key"`
 	TurkceAltyaziEnabled  bool   `gorm:"column:turkcealtyazi_enabled"`
+	Subf2mEnabled         bool   `gorm:"column:subf2m_enabled;default:true"`
+	YIFYEnabled           bool   `gorm:"column:yify_enabled;default:true"`
 	DefaultLangs          string `gorm:"column:default_langs"`
 	UpdatedAt             time.Time
 }
@@ -57,6 +61,12 @@ type SettingsView struct {
 	TurkceAltyazi struct {
 		Enabled bool `json:"enabled"`
 	} `json:"turkcealtyazi"`
+	Subf2m struct {
+		Enabled bool `json:"enabled"`
+	} `json:"subf2m"`
+	YIFY struct {
+		Enabled bool `json:"enabled"`
+	} `json:"yifysubtitles"`
 	DefaultLangs []string `json:"default_langs"`
 }
 
@@ -92,6 +102,12 @@ type SettingsInput struct {
 	TurkceAltyazi *struct {
 		Enabled *bool `json:"enabled"`
 	} `json:"turkcealtyazi"`
+	Subf2m *struct {
+		Enabled *bool `json:"enabled"`
+	} `json:"subf2m"`
+	YIFY *struct {
+		Enabled *bool `json:"enabled"`
+	} `json:"yifysubtitles"`
 	DefaultLangs *[]string `json:"default_langs"`
 }
 

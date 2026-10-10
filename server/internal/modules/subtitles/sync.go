@@ -23,12 +23,13 @@ import (
 // to it and the corrected WebVTT is cached per (subtitle, file). Until then the answer is
 // marked partial, so the players ask again (every 15 s) and take the corrected cues by
 // themselves. A subtitle that does not fit even then is served as the best fitting other
-// subtitle of its language, when one fits.
+// subtitle of its language, when one fits. The audio of the play streams adds windows of every
+// stretch played (sync_live.go), so results improve while the file plays.
 
 const (
 	syncWindowLen     = 60.0      // seconds per reference window
 	syncMaxWindows    = 12        // reference windows per file, at most
-	syncMinWindows    = 8         // fewer are not reliable (checked on real episodes): no timing then
+	syncMinWindows    = 8         // fewer are not reliable (checked on real episodes): no read then, the played audio times it
 	syncByteBudget    = 800 << 20 // bytes the windows of one file may read
 	syncWindowExtra   = 28 << 20  // read around a window (TorBox proxy: first chunk, read-ahead)
 	syncWindowTimeout = 75 * time.Second
@@ -51,15 +52,21 @@ const (
 	syncStateReplaced  = "replaced"  // did not fit; another subtitle of the language is served
 	syncStatePoor      = "poor"      // did not fit, nothing better: served as it is
 	syncStatePending   = "pending"
-	syncStateFailed    = "failed" // no reference (file unreadable): served as it is
+	syncStateFailed    = "failed"   // no reference (file unreadable): served as it is
+	syncStateLive      = "live"     // timed (or replaced) from what was read and played so far; may still change
+	syncStateOriginal  = "original" // not timed: made for the file, or no file named (header only)
 )
 
 type syncMeta struct {
 	State      string  `json:"state"`
 	Fit        syncFit `json:"fit"`
 	ReplacedBy string  `json:"replaced_by,omitempty"` // inner id whose cues are served
-	Ref        string  `json:"ref"`                   // reference: full | subs | audio
+	Ref        string  `json:"ref"`                   // reference: full, or the window kinds (subs+audio+live)
 	Windows    int     `json:"windows"`
+	// Live: provisional, the file is not covered yet; live windows and seconds of it used
+	Live        bool    `json:"live,omitempty"`
+	LiveWindows int     `json:"live_windows,omitempty"`
+	LiveSeconds float64 `json:"live_seconds,omitempty"`
 }
 
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }
@@ -71,6 +78,8 @@ type syncRef struct {
 	Full    bool        `json:"full"` // made of a whole subtitle shipped for the file
 	// windows the byte budget allows for this file
 	MaxWindows int `json:"max_windows"`
+	// Skipped: no windows are read (too few fit the byte budget); only the played audio times it
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 func (r syncRef) kind() string {
@@ -107,12 +116,25 @@ type syncer struct {
 	failed map[string]time.Time
 	lists  map[string][]Sub // file key -> last ranked list (alternatives, full references)
 	probes map[string]mediaProbe
+
+	// Live timing (sync_live.go)
+	lives   map[string]*liveFile  // file key -> live reference
+	served  map[string]*servedSub // result key -> subtitle served for a file
+	noLive  map[string]bool       // file keys timed from a whole subtitle (no tap needed)
+	liveSem chan struct{}         // re-fits at a time (CPU)
+	onGrow  func(f *liveFile)     // more live audio: re-fit soon (tests replace it)
+
+	refitDelay, refitGap time.Duration
 }
 
 func newSyncer(svc *Service) *syncer {
-	return &syncer{svc: svc, read: ffmpegSyncWindow, probe: probeMedia, sem: make(chan struct{}, syncReads),
+	y := &syncer{svc: svc, read: ffmpegSyncWindow, probe: probeMedia, sem: make(chan struct{}, syncReads),
 		refs: map[string]*syncRefState{}, metas: map[string]*syncMeta{}, failed: map[string]time.Time{},
-		lists: map[string][]Sub{}, probes: map[string]mediaProbe{}}
+		lists: map[string][]Sub{}, probes: map[string]mediaProbe{},
+		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{},
+		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap}
+	y.onGrow = y.scheduleRefit
+	return y
 }
 
 func syncFileKey(hash string, index int) string {
@@ -176,10 +198,21 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 	if err != nil {
 		return FileAnswer{}, err
 	}
-	if a, ok := y.result(key, base); ok {
+	fk := syncFileKey(hash, index)
+	fresh := y.noteServed(key, inner, hash, index)
+	// Live audio may still come: keep the players asking
+	listening := func() bool { return y.svc.cfg.LiveTiming && (fresh || y.livePlaying(fk)) }
+	pending := func() FileAnswer {
+		return FileAnswer{VTT: renderVTT(vttCues(base), true), Partial: true, Sync: syncStatePending}
+	}
+	if a, ok := y.answer(key, base, listening); ok {
 		return a, nil
 	}
 	if y.recentlyFailed(key) {
+		if listening() {
+			y.kickLive(hash, index)
+			return pending(), nil
+		}
 		return FileAnswer{VTT: base, Sync: syncStateFailed}, nil
 	}
 	call := y.svc.flights.start("sync|"+key, func() (any, error) {
@@ -205,13 +238,32 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 	case <-timer.C:
 	case <-ctx.Done():
 	}
-	if a, ok := y.result(key, base); ok {
+	if a, ok := y.answer(key, base, listening); ok {
 		return a, nil
 	}
-	if finished {
+	if finished && !listening() {
 		return FileAnswer{VTT: base, Sync: syncStateFailed}, nil
 	}
-	return FileAnswer{VTT: renderVTT(vttCues(base), true), Partial: true, Sync: syncStatePending}, nil
+	return pending(), nil
+}
+
+// answer is the stored answer of key; a provisional one is marked live (pending while nothing
+// fits yet) and partial while more audio may come.
+func (y *syncer) answer(key string, base []byte, listening func() bool) (FileAnswer, bool) {
+	a, ok := y.result(key, base)
+	if !ok {
+		return a, false
+	}
+	if m := y.meta(key); m != nil && m.Live {
+		a.Sync = syncStatePending
+		if m.fits() || m.State == syncStateReplaced {
+			a.Sync = syncStateLive
+		}
+		if listening() {
+			a.VTT, a.Partial = renderVTT(vttCues(a.VTT), true), true
+		}
+	}
+	return a, true
 }
 
 // result returns the stored answer of key.
@@ -281,16 +333,49 @@ func (y *syncer) recentlyFailed(key string) bool {
 
 // run times one subtitle for the file and stores the result.
 func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []byte) error {
-	start := time.Now()
-	key, err := syncKey(inner, hash, index)
-	if err != nil {
-		return err
-	}
 	ref, err := y.reference(ctx, hash, index)
 	if err != nil {
 		return err
 	}
-	m, vtt, ref := y.fitOne(ctx, hash, index, ref, base)
+	y.decide(ctx, inner, hash, index, base, ref, true)
+	return nil
+}
+
+// decide fits a subtitle (else the best fitting alternative) to the file's read and live
+// windows and stores the result; false when there is too little reference yet. read allows
+// reading more windows where the offset changes.
+func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base []byte, ref syncRef, read bool) bool {
+	start := time.Now()
+	key, err := syncKey(inner, hash, index)
+	if err != nil {
+		return false
+	}
+	var live []refWindow
+	var liveSecs float64
+	complete := false
+	if ref.Full {
+		y.mu.Lock()
+		y.noLive[syncFileKey(hash, index)] = true
+		y.mu.Unlock()
+	} else if y.svc.cfg.LiveTiming {
+		f := y.liveFile(hash, index)
+		f.setDuration(ref.Probe.Duration)
+		y.saveLive(f) // the file has a timed subtitle: keep its live windows
+		live, liveSecs = f.windows()
+		f.mu.Lock()
+		complete = f.complete
+		f.mu.Unlock()
+	}
+	if merged := mergeWindows(ref.Windows, live); !ref.Full &&
+		(windowSeconds(merged) < liveMinCover || len(live) > 0 && refLines(prepare(merged)) < liveMinLines) {
+		return false // too little to tell yet
+	}
+	prev := y.meta(key)
+	m, vtt, ref := y.fitOne(ctx, hash, index, ref, live, base, read, prev)
+	if y.keepAccepted(key, base, prev, m, complete) {
+		logKept(inner, hash, index, m, len(live), liveSecs)
+		return true
+	}
 	if !m.fits() {
 		// Did not fit: the best fitting other subtitle of the language, when one fits
 		for _, alt := range y.alternatives(hash, index, inner) {
@@ -303,7 +388,11 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 				continue
 			}
 			am := y.meta(altKey)
+			altPrev := am
 			var altVTT []byte
+			if am != nil && am.Live {
+				am = nil // provisional: time it with the windows there are now
+			}
 			if am != nil {
 				if a, ok := y.result(altKey, altBase); ok {
 					altVTT = a.VTT
@@ -313,10 +402,20 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 			}
 			if am == nil {
 				var a syncMeta
-				a, altVTT, ref = y.fitOne(ctx, hash, index, ref, altBase)
-				y.store(altKey, a, altVTT)
-				am = &a
-				logSync(alt, hash, index, a, time.Since(start))
+				a, altVTT, ref = y.fitOne(ctx, hash, index, ref, live, altBase, read, altPrev)
+				if y.keepAccepted(altKey, altBase, altPrev, a, complete) {
+					logKept(alt, hash, index, a, len(live), liveSecs)
+					am = altPrev
+					r, _ := y.result(altKey, altBase)
+					altVTT = r.VTT
+				} else {
+					a.Live, a.LiveWindows, a.LiveSeconds = !ref.Full && y.svc.cfg.LiveTiming && !complete, len(live), liveSecs
+					y.store(altKey, a, altVTT)
+					am = &a
+					if read || fitChanged(altPrev, a) {
+						logSync(alt, hash, index, a, time.Since(start))
+					}
+				}
 			}
 			if am.fits() {
 				if altVTT == nil {
@@ -328,9 +427,44 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 			}
 		}
 	}
+	m.Live, m.LiveWindows, m.LiveSeconds = !ref.Full && y.svc.cfg.LiveTiming && !complete, len(live), liveSecs
 	y.store(key, m, vtt)
-	logSync(inner, hash, index, m, time.Since(start))
-	return nil
+	if read || fitChanged(prev, m) {
+		logSync(inner, hash, index, m, time.Since(start))
+	}
+	return true
+}
+
+// keepAccepted reports whether a provisional fit that was accepted stays served although the
+// new one does not fit: a few more windows can tip a good timing below the bars (seen on The
+// Mentalist S02E10: accepted from 3 windows, poor at 6, two offsets fitting again at 8), and
+// serving the subtitle untimed meanwhile is worse. Once the file is covered the new result counts.
+func (y *syncer) keepAccepted(key string, base []byte, prev *syncMeta, m syncMeta, complete bool) bool {
+	if m.fits() || complete || prev == nil || !prev.Live || !prev.fits() {
+		return false
+	}
+	_, ok := y.result(key, base)
+	return ok
+}
+
+func logKept(inner, hash string, index int, m syncMeta, liveWindows int, liveSecs float64) {
+	log.Printf("subtitles: timing of %s on %s:%d: kept the last accepted fit (new fit %s: score %.2f over %.2f, peak %.2f; %d windows (%d live, %.0f s played))",
+		shortSubID(inner), hash[:8], index, m.State, m.Fit.Score, m.Fit.Base, m.Fit.Peak, m.Windows, liveWindows, liveSecs)
+}
+
+// fitChanged reports whether a new result differs from the stored one in what is served.
+func fitChanged(prev *syncMeta, m syncMeta) bool {
+	if prev == nil || prev.State != m.State || prev.ReplacedBy != m.ReplacedBy || prev.Live != m.Live ||
+		prev.Fit.Scale != m.Fit.Scale || len(prev.Fit.Segments) != len(m.Fit.Segments) {
+		return true
+	}
+	for i, s := range m.Fit.Segments {
+		p := prev.Fit.Segments[i]
+		if math.Abs(p.Offset-s.Offset) > 0.05 || (i > 0 && math.Abs(p.From-s.From) > 1) {
+			return true
+		}
+	}
+	return false
 }
 
 func logSync(inner, hash string, index int, m syncMeta, took time.Duration) {
@@ -346,9 +480,16 @@ func logSync(inner, hash string, index int, m syncMeta, took time.Duration) {
 	if m.ReplacedBy != "" {
 		extra = " by " + shortSubID(m.ReplacedBy)
 	}
-	log.Printf("subtitles: timing of %s on %s:%d: %s%s (scale %.4f, offsets %s, score %.2f over %.2f, peak %.1f; %s reference, %d windows, %s)",
+	if m.Live {
+		extra += " (provisional)"
+	}
+	live := ""
+	if m.LiveWindows > 0 {
+		live = fmt.Sprintf(" (%d live, %.0f s played)", m.LiveWindows, m.LiveSeconds)
+	}
+	log.Printf("subtitles: timing of %s on %s:%d: %s%s (scale %.4f, offsets %s, score %.2f over %.2f, peak %.1f; %s reference, %d windows%s, %s)",
 		shortSubID(inner), hash[:8], index, m.State, extra, f.Scale, strings.Join(offs, " "), f.Score, f.Base, f.Peak,
-		m.Ref, m.Windows, took.Round(100*time.Millisecond))
+		m.Ref, m.Windows, live, took.Round(100*time.Millisecond))
 }
 
 // shortSubID names a subtitle in logs: source and provider reference.
@@ -360,18 +501,31 @@ func shortSubID(id string) string {
 	return truncateString(source+"/"+lang+"/"+ref, 60)
 }
 
-// fitOne aligns one subtitle to the file's reference (reading more windows where the offset
-// changes) and returns its result and the WebVTT to serve (nil: serve it as it is).
-func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef, vtt []byte) (syncMeta, []byte, syncRef) {
+// fitOne aligns one subtitle to the file's reference and live windows (with read, reading more
+// windows where the offset changes) and returns its result and the WebVTT to serve (nil: serve
+// it as it is). A provisional fit that fitted before keeps its scale (fewer FFTs per re-fit).
+func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef, live []refWindow, vtt []byte, read bool, prev *syncMeta) (syncMeta, []byte, syncRef) {
 	cues := vttCues(vtt)
 	spans := make([]span, len(cues))
 	for i, c := range cues {
 		spans[i] = span{c.start, c.end}
 	}
+	scales := syncScales
+	if prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 {
+		scales = []float64{prev.Fit.Scale}
+	}
 	// lengthFits still sees every cue (a longer cut runs past the end)
 	timed := clampSpans(spans, ref.Probe.Duration)
-	fit, ok := align(timed, ref.Windows)
-	for round := 0; ok && !ref.Full && round < 2; round++ {
+	var windows []refWindow
+	fitTo := func() (syncFit, bool) {
+		windows = mergeWindows(ref.Windows, live)
+		if len(live) > 0 {
+			return alignLive(timed, windows, scales)
+		}
+		return alignWith(timed, prepare(windows), scales, syncSplitPenalty, -1)
+	}
+	fit, ok := fitTo()
+	for round := 0; read && ok && !ref.Full && !ref.Skipped && round < 2; round++ {
 		extra := fit.extraWindows(syncWindowLen, ref.windowCap()-len(ref.Windows))
 		if len(extra) == 0 {
 			break
@@ -381,9 +535,9 @@ func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef
 			break
 		}
 		ref = more
-		fit, ok = align(timed, ref.Windows)
+		fit, ok = fitTo()
 	}
-	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: ref.kind(), Windows: len(ref.Windows)}
+	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: refKind(ref, windows), Windows: len(windows)}
 	if !ok || !fit.good() || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, ref
 	}
@@ -495,7 +649,7 @@ func (y *syncer) loadRef(fk string, st *syncRefState) bool {
 		return false
 	}
 	var r syncRef
-	if json.Unmarshal(b, &r) != nil || len(r.Windows) == 0 {
+	if json.Unmarshal(b, &r) != nil || (len(r.Windows) == 0 && !r.Skipped) {
 		return false
 	}
 	st.ref = &r
@@ -530,8 +684,12 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 		}
 		r = syncRef{Probe: probe, MaxWindows: probe.maxWindows()}
 		if r.MaxWindows < syncMinWindows {
-			return syncRef{}, fmt.Errorf("%.1f MB/s: %d windows would read more than %d MB", probe.Bitrate/(1<<20),
-				syncMinWindows, syncByteBudget>>20)
+			// Too dear to read: the played audio times it (sync_live.go)
+			r.Skipped = true
+			log.Printf("subtitles: timing reference of %s:%d: %.1f MB/s, %d windows would read more than %d MB: no read, timed from the played audio",
+				hash[:8], index, probe.Bitrate/(1<<20), syncMinWindows, syncByteBudget>>20)
+			y.saveRef(fk, st, r)
+			return r, nil
 		}
 		select {
 		case <-time.After(syncReadDelay):
@@ -806,6 +964,8 @@ func (y *syncer) fitOf(id, hash string, index int) int {
 		return 0
 	case m.fits():
 		return 1
+	case m.Live:
+		return 0 // may still fit once more of the file was played
 	case m.State == syncStateReplaced || m.State == syncStatePoor:
 		return -1
 	}
@@ -814,6 +974,9 @@ func (y *syncer) fitOf(id, hash string, index int) int {
 
 // windowCap is how many reference windows the file may have.
 func (r syncRef) windowCap() int {
+	if r.Skipped {
+		return 0
+	}
 	if r.MaxWindows > 0 {
 		return r.MaxWindows
 	}

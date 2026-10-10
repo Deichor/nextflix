@@ -33,6 +33,10 @@ var relServices = map[string]bool{"nf": true, "amzn": true, "dsnp": true, "hmax"
 	"hulu": true, "pcok": true, "pmtp": true, "stan": true, "cr": true, "itunes": true, "it": true, "blutv": true,
 	"exxen": true, "gain": true, "tabii": true, "dsny": true, "sho": true, "hbo": true}
 
+// relServiceAlias: spelled-out service names subtitle uploaders use ("WEBRip.Amazon").
+var relServiceAlias = map[string]string{"dsny": "dsnp", "amazon": "amzn", "netflix": "nf", "disney": "dsnp",
+	"hbomax": "hmax", "appletv": "atvp", "peacock": "pcok", "paramount": "pmtp"}
+
 var relEditions = map[string]bool{"extended": true, "unrated": true, "directors": true, "imax": true,
 	"remastered": true, "theatrical": true, "criterion": true, "uncut": true, "despecialized": true}
 
@@ -113,9 +117,9 @@ func parseRelease(name string) releaseInfo {
 		}
 		if relServices[t] {
 			ri.service = t
-			if t == "dsny" {
-				ri.service = "dsnp"
-			}
+		}
+		if s, ok := relServiceAlias[t]; ok {
+			ri.service = s
 		}
 		if relEditions[t] {
 			ri.edition[t] = true
@@ -193,6 +197,15 @@ func releaseSimilarity(hint, sub releaseInfo) float64 {
 	}
 	s += 0.15 * jaccard(hint.tokens, sub.tokens)
 	return clamp01(s)
+}
+
+// sameRelease: made for the playing release (its group, or its streaming service and source
+// family), so it is timed like one made for the file.
+func sameRelease(hint, sub releaseInfo) bool {
+	if hint.group != "" && hint.group == sub.group {
+		return true
+	}
+	return hint.service != "" && hint.service == sub.service && hint.family != "" && hint.family == sub.family
 }
 
 func jaccard(a, b map[string]bool) float64 {
@@ -317,12 +330,14 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 		seen[c.ID] = true
 
 		sim := 0.0
+		same := false
 		for _, r := range c.Releases {
 			ri := parseRelease(r)
 			if ri.fps == 0 {
 				ri.fps = c.FPS
 			}
 			sim = math.Max(sim, releaseSimilarity(hint, ri))
+			same = same || sameRelease(hint, ri)
 		}
 		if len(c.Releases) == 0 {
 			sim = releaseSimilarity(hint, releaseInfo{fps: c.FPS})
@@ -334,6 +349,10 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 		switch {
 		case c.Synced:
 			score = 0.8 + 0.12*sim + 0.08*qual
+			tier = 0
+		case same && c.AutoSync >= 0:
+			// Made for the playing release: ahead of others timed to the file
+			score = 0.66 + 0.1*sim + 0.08*qual
 			tier = 0
 		case c.AutoSync > 0:
 			// Timed to the playing file and fitting: after the ones made for it
