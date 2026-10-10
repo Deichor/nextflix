@@ -3,6 +3,7 @@ package subtitles
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +165,33 @@ func TestServeReplacesASubtitleThatDoesNotFit(t *testing.T) {
 	}
 }
 
+func TestServeRetimesAFallbackWhoseCuesAreGone(t *testing.T) {
+	file := dialogue(23, episode)
+	svc, _ := newSyncTest(t, file)
+	bad := cacheProviderSub(t, svc, "1|bad|2|7|1", dialogue(98, episode))
+	good := cacheProviderSub(t, svc, "2|good|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2.5 }))
+	svc.sync.listed([]Sub{
+		{ID: bad, Source: SourceTurkceAltyazi, Language: "tr"},
+		{ID: good, Source: SourceTurkceAltyazi, Language: "tr"},
+	}, map[string]bool{}, syncHash, 1)
+	if a, err := svc.FileFor(context.Background(), wrapSyncID(good, syncHash, 1), 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("good: sync %q err %v", a.Sync, err)
+	}
+	// The cache sweep removed the timed cues; the result entry is still known
+	goodKey, _ := syncKey(good, syncHash, 1)
+	if err := os.Remove(svc.files.path("synced", goodKey, ".vtt")); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := svc.FileFor(context.Background(), wrapSyncID(bad, syncHash, 1), 0)
+	if err != nil || a.Sync != syncStateReplaced {
+		t.Fatalf("sync %q err %v", a.Sync, err)
+	}
+	if got := vttCues(a.VTT); len(got) != len(file) || math.Abs(got[10].start-file[10].start) > 0.05 {
+		t.Fatal("served the fallback untimed")
+	}
+}
+
 func TestServePendingIsPartial(t *testing.T) {
 	file := dialogue(31, episode)
 	svc, _ := newSyncTest(t, file)
@@ -186,6 +215,105 @@ func TestServePendingIsPartial(t *testing.T) {
 	syncFirstWait = saved
 	if b, _ := svc.FileFor(context.Background(), wrapSyncID(inner, syncHash, 1), 0); b.Partial || b.Sync != syncStateSynced {
 		t.Fatalf("after: partial=%v sync=%q", b.Partial, b.Sync)
+	}
+}
+
+func TestTorrentSubForFile(t *testing.T) {
+	const gb = 2 << 30
+	cases := []struct {
+		name       string
+		files      []torrFile
+		sub, video int
+		want       bool
+	}{
+		{"named after the file", []torrFile{{1, "Movie.One.mkv", gb}, {2, "Movie.One.en.srt", 1}, {3, "Movie.Two.mkv", gb}}, 2, 1, true},
+		{"named after another file", []torrFile{{1, "Movie.One.mkv", gb}, {2, "Movie.Two.srt", 1}, {3, "Movie.Two.mkv", gb}}, 2, 1, false},
+		{"sequel name", []torrFile{{1, "Toy Story.mkv", gb}, {2, "Toy Story 2.srt", 1}, {3, "Toy Story 2.mkv", gb}}, 2, 1, false},
+		{"own folder", []torrFile{{1, "C/One/One.mkv", gb}, {2, "C/One/Subs/English.srt", 1}, {3, "C/Two/Two.mkv", gb}}, 2, 1, true},
+		{"other folder", []torrFile{{1, "C/One/One.mkv", gb}, {2, "C/Two/Subs/English.srt", 1}, {3, "C/Two/Two.mkv", gb}}, 2, 1, false},
+		{"sample is not another file", []torrFile{{1, "M/M.mkv", gb}, {2, "M/Subs/English.srt", 1}, {3, "M/Sample/s.mkv", 50 << 20}}, 2, 1, true},
+		{"episode folder", []torrFile{{1, "S/Show.S01E01.mkv", gb}, {2, "S/Subs/Show.S01E02/2_English.srt", 1}, {3, "S/Show.S01E02.mkv", gb}}, 2, 3, true},
+		{"other episode folder", []torrFile{{1, "S/Show.S01E01.mkv", gb}, {2, "S/Subs/Show.S01E02/2_English.srt", 1}, {3, "S/Show.S01E02.mkv", gb}}, 2, 1, false},
+		{"pack subtitle naming no episode", []torrFile{{1, "S/E01.mkv", gb}, {2, "S/Subs/English.srt", 1}, {3, "S/E02.mkv", gb}}, 2, 1, false},
+		{"unknown file", []torrFile{{1, "M.mkv", gb}}, 2, 1, false},
+	}
+	for _, c := range cases {
+		if got := torrentSubForFile(c.files, c.sub, c.video); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestFullReferenceOnlyFromTheFilesSubtitle(t *testing.T) {
+	files := []torrFile{
+		{1, "Collection/Movie.One.2001/Movie.One.2001.mkv", 2 << 30},
+		{2, "Collection/Movie.One.2001/Subs/English.vtt", 80_000},
+		{3, "Collection/Movie.Two.2003/Movie.Two.2003.mkv", 2 << 30},
+	}
+	srv := fakeTorrServer(t, files, map[int][]byte{2: vttOf(dialogue(41, episode))})
+	defer srv.Close()
+	svc := NewService(nil, Config{CacheDir: t.TempDir(), TorrServerURL: srv.URL})
+	sub := Sub{ID: encodeID(SourceTorrent, "en", testHash+"|2|vtt"), Source: SourceTorrent, Language: "en", Synced: true}
+	ctx := context.Background()
+
+	svc.sync.listed([]Sub{sub}, map[string]bool{}, testHash, 3)
+	if got := svc.sync.fullReference(ctx, testHash, 3); got != nil {
+		t.Fatalf("another movie's subtitle used as the reference (%d cues)", len(got))
+	}
+	svc.sync.listed([]Sub{sub}, map[string]bool{}, testHash, 1)
+	if got := svc.sync.fullReference(ctx, testHash, 1); len(got) == 0 {
+		t.Fatal("the file's own subtitle not used")
+	}
+}
+
+func TestWeakReferenceIsNotKept(t *testing.T) {
+	file := dialogue(51, episode)
+	svc, _ := newSyncTest(t, file)
+	n := 0
+	svc.sync.read = func(_ context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
+		if n++; n > 2 {
+			return refWindow{}, errors.New("timed out")
+		}
+		return truthWindows(file, []float64{start}, 0.1, 0, int64(start))[0], nil
+	}
+	if r, err := svc.sync.reference(context.Background(), syncHash, 1); err == nil {
+		t.Fatalf("a reference of %d windows accepted", len(r.Windows))
+	}
+	if svc.files.has("syncref", syncFileKey(syncHash, 1), ".json") {
+		t.Fatal("weak reference saved")
+	}
+}
+
+func TestRefStateEvictionKeepsUsedStates(t *testing.T) {
+	y := NewService(nil, Config{CacheDir: t.TempDir()}).sync
+	held, release := y.refState("held")
+	for i := range 40 {
+		_, r := y.refState(strconv.Itoa(i))
+		r()
+	}
+	st, r := y.refState("held")
+	r()
+	release()
+	if st != held {
+		t.Fatal("a state in use was evicted")
+	}
+}
+
+func TestAddWindowsAfterEviction(t *testing.T) {
+	file := dialogue(61, episode)
+	svc, _ := newSyncTest(t, file)
+	ctx := context.Background()
+	ref, err := svc.sync.reference(ctx, syncHash, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 40 {
+		_, r := svc.sync.refState(strconv.Itoa(i))
+		r()
+	}
+	more, err := svc.sync.addWindows(ctx, syncHash, 1, []float64{1000})
+	if err != nil || len(more.Windows) != len(ref.Windows)+1 {
+		t.Fatalf("%d -> %d windows: %v", len(ref.Windows), len(more.Windows), err)
 	}
 }
 

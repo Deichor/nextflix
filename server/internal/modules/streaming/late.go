@@ -59,8 +59,9 @@ func (s *Service) mergeLate(key string, q tsResolveQuery, pick *tsResolveResult,
 				open = false
 				break
 			}
-			raw = append(raw, batch...)
-			got += len(batch)
+			n := len(raw)
+			raw = s.addLate(q, raw, batch)
+			got += len(raw) - n
 		case <-ctx.Done():
 			return
 		}

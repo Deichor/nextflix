@@ -1,7 +1,7 @@
 *.db
 *.db-shm
 *.db-wal
-.env
+**/.env*
 **/__pycache__/
 /nextflix
 /main

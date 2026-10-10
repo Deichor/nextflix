@@ -28,6 +28,7 @@ type Service struct {
 	index    *TitleIndex // typo index (empty until loaded)
 	taste    tasteCache
 	local    localCache // watch and rating signals of every profile (browse ranking)
+	browse   browseOrders
 
 	homeRelease HomeReleaseFinder // nil = TMDB dates only
 

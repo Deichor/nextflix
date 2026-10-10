@@ -44,12 +44,12 @@ func (s *Service) changed(profileID uint) {
 
 // DeleteByProfile removes all rows of a profile inside tx (used by profile deletion).
 func (s *Service) DeleteByProfile(tx *gorm.DB, id uint) error {
-	if err := tx.Where("profile_id = ?", id).Delete(&TitleRating{}).Error; err != nil {
-		return err
-	}
-	s.changed(id)
-	return nil
+	return tx.Where("profile_id = ?", id).Delete(&TitleRating{}).Error
 }
+
+// ProfileDeleted runs the change hooks once the profile deletion committed, so no cache
+// is rebuilt from the old rows.
+func (s *Service) ProfileDeleted(id uint) { s.changed(id) }
 
 func (s *Service) List(profileID uint, f Filter) ([]TitleRating, error) {
 	return listByProfile(s.db, profileID, f)

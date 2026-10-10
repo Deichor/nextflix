@@ -59,9 +59,14 @@ func (s *Service) debridCandidates(ctx context.Context, q tsResolveQuery, raw []
 	cached := func(c tsCandidate) bool { return items[strings.ToLower(c.hash)] != nil && !tsAvoided(c, q) }
 	// Without "prefer" the order stays; the cached ones among the checked still play from TorBox
 	if !d.settings().PreferDisabled {
-		tsDebridBoost(all, cached)
-		tsSortCandidates(all, q)
-		cands = tsTopCandidates(all, q)
+		if q.overCap {
+			// Nothing fits the caps by name: keep the fallback order (name fit, then cheapest)
+			cands = s.fallbackCandidates(q, raw, nil, items)
+		} else {
+			tsDebridBoost(all, cached)
+			tsSortCandidates(all, q)
+			cands = tsTopCandidates(all, q)
+		}
 	}
 	n := 0
 	for _, c := range cands {

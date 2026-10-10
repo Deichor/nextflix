@@ -263,3 +263,40 @@ func TestEnglishTitleSetsFirstAirYear(t *testing.T) {
 		t.Errorf("movie firstAir %d", m.firstAir)
 	}
 }
+
+// docTMDB files movie 1 and show 2 as documentaries.
+type docTMDB struct{}
+
+func (docTMDB) GetMovieDetails(id int) (*tmdb.MovieDetails, error) {
+	d := &tmdb.MovieDetails{Movie: tmdb.Movie{ID: id, Title: "Free Solo", ReleaseDate: "2018-09-28"}}
+	if id == 1 {
+		d.Genres = []tmdb.Genre{{ID: 99, Name: "Documentary"}}
+	}
+	return d, nil
+}
+
+func (docTMDB) GetTVDetails(id int) (*tmdb.TVDetails, error) {
+	d := &tmdb.TVDetails{TV: tmdb.TV{ID: id, Name: "Planet Earth"}}
+	if id == 2 {
+		d.Genres = []tmdb.Genre{{ID: 99, Name: "Documentary"}}
+	}
+	return d, nil
+}
+
+func (docTMDB) GetSeasonDetails(int, int) (*tmdb.Season, error) { return &tmdb.Season{}, nil }
+
+func TestEnglishTitleSetsDocumentary(t *testing.T) {
+	s := NewService(nil, Config{TMDB: docTMDB{}})
+	cases := []struct {
+		mediaType string
+		id        int
+		want      bool
+	}{{"movie", 1, true}, {"movie", 3, false}, {"tv", 2, true}, {"tv", 4, false}}
+	for _, tc := range cases {
+		q := tsResolveQuery{mediaType: tc.mediaType, title: "X", season: 1, episode: 1, tmdbID: tc.id}
+		s.englishTitle(&q)
+		if q.documentary != tc.want {
+			t.Errorf("%s %d: documentary %v", tc.mediaType, tc.id, q.documentary)
+		}
+	}
+}

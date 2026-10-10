@@ -258,6 +258,9 @@ func homeReleaseWorth(a Availability, today string) bool {
 	case StatusInTheaters:
 		return true
 	case StatusNotReleased:
+		if a.TheatricalDate != nil && *a.TheatricalDate > today {
+			return false
+		}
 		return a.ReleaseDate == nil || *a.ReleaseDate <= today || (a.DigitalDate != nil && *a.DigitalDate > today)
 	}
 	return false

@@ -18,7 +18,8 @@ import (
 
 const (
 	baseURL      = "https://api.themoviedb.org/3"
-	imageBaseURL = "https://image.tmdb.org/t/p/"
+	imageBaseURL = "/tmdb-img/t/p/"
+	tmdbImageCDN = "https://image.tmdb.org/t/p/"
 	cacheTTL     = 24 * time.Hour
 	cacheMax     = 4000
 	// Expired entries are kept this long to answer when TMDB is unreachable.
@@ -197,12 +198,16 @@ func refresh[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
 	return v, err
 }
 
-// ImageURL builds a full TMDB image URL; empty paths stay empty and absolute URLs are returned as-is.
+// ImageURL builds a proxied image URL (/tmdb-img/t/p/<size><path>). Empty paths stay empty,
+// image.tmdb.org URLs are moved onto the proxy and other URLs are returned as-is.
 func ImageURL(path, size string) string {
 	if path == "" {
 		return ""
 	}
-	if strings.HasPrefix(path, "http") {
+	if rest, ok := strings.CutPrefix(path, tmdbImageCDN); ok {
+		return imageBaseURL + rest
+	}
+	if strings.HasPrefix(path, "http") || strings.HasPrefix(path, imageBaseURL) {
 		return path
 	}
 	if !strings.HasPrefix(path, "/") {

@@ -321,3 +321,41 @@ func TestSeedRowsUseTheMatcher(t *testing.T) {
 		t.Errorf("partial rows cached for %v, want up to %v", ttl, partialTTL)
 	}
 }
+
+func cachedTTL(s *Service) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Until(s.cache[cacheKey{1, "en"}].expires)
+}
+
+func TestFailedRelatedIsCachedBriefly(t *testing.T) {
+	f, signals := scenario()
+	delete(f.related, keyOf("movie", liked))
+	s := newTestService(f, signals)
+	if resp, err := s.For(1, "en"); err != nil || len(resp.Rows) == 0 {
+		t.Fatalf("%+v %v", resp, err)
+	}
+	if ttl := cachedTTL(s); ttl <= 0 || ttl > partialTTL {
+		t.Errorf("rows missing a seed's lists cached for %v, want up to %v", ttl, partialTTL)
+	}
+}
+
+func TestEmptyMatcherListIsFinal(t *testing.T) {
+	f, signals := scenario()
+	s := newTestService(f, signals)
+	s.SetSimilar(func(lang, mediaType string, id int) ([]Item, bool) {
+		if id == loved {
+			return movies(700, 10, 28), true
+		}
+		return []Item{}, true // nothing similar
+	})
+	if resp, err := s.For(1, "en"); err != nil || len(resp.Rows) == 0 {
+		t.Fatalf("%+v %v", resp, err)
+	}
+	if f.calls != 1 {
+		t.Errorf("TMDB's lists asked %d times, want only for the disliked title", f.calls)
+	}
+	if ttl := cachedTTL(s); ttl <= partialTTL {
+		t.Errorf("complete rows cached for %v, want %v", ttl, cacheTTL)
+	}
+}

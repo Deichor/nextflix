@@ -156,6 +156,27 @@ func TestParseTorznabIMDb(t *testing.T) {
 	}
 }
 
+// imdbid comes as "tt0133093", "0133093" or "133093", like imdb.
+func TestParseTorznabIMDbIDForms(t *testing.T) {
+	item := func(attr, value string) string {
+		return `<item><title>The Matrix 1999 1080p BluRay x264</title><link>magnet:?xt=urn:btih:` + strings.Repeat("a", 40) +
+			`</link><torznab:attr name="` + attr + `" value="` + value + `" /><torznab:attr name="seeders" value="5" /></item>`
+	}
+	for _, tc := range []struct {
+		attr, value string
+		want        int
+	}{
+		{"imdbid", "tt0133093", 1}, {"imdbid", "0133093", 1}, {"imdbid", "133093", 1}, {"imdbid", "TT0133093", 1},
+		{"imdbid", "0133094", 0}, {"imdb", "0133093", 1}, {"imdb", "tt0133094", 0},
+	} {
+		feed := `<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>` + item(tc.attr, tc.value) + `</channel></rss>`
+		res, err := tsParseTorznab(strings.NewReader(feed), "tt0133093")
+		if err != nil || len(res) != tc.want {
+			t.Errorf("%s=%q: %d results (%v), want %d", tc.attr, tc.value, len(res), err, tc.want)
+		}
+	}
+}
+
 func TestIMDbMatchRanksUnknownName(t *testing.T) {
 	res, _ := tsParseTorznab(strings.NewReader(torznabFeed), "tt40656390")
 	q := tsResolveQuery{mediaType: "movie", title: "Detective Brothers", year: 2026}

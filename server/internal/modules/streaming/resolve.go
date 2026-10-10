@@ -126,6 +126,8 @@ type tsResolveQuery struct {
 	imdbID string
 	// Movie directors (TMDB, normalized names; nil = unknown), see tsDisclaimed
 	directors [][]string
+	// TMDB files the title as a documentary: "Documentary" in a name is no bonus material
+	documentary bool
 	// TV: episodes per season (TMDB, [0] = season 1; nil = unknown) and the absolute number
 	// of season/episode (0 = unknown), see episodes.go
 	seasonEps []int
@@ -351,7 +353,7 @@ func tsExtrasName(name string, tokens []string, q tsResolveQuery) bool {
 		}
 	}
 	for _, m := range tsExtrasPattern.FindAllString(strings.Join(tokens, " "), -1) {
-		if !tsInTitle(m, q) {
+		if !tsInTitle(m, q) && !(m == "documentary" && q.documentary) {
 			return true
 		}
 	}
@@ -1234,6 +1236,12 @@ func (s *Service) searchTitle(ctx context.Context, q tsResolveQuery, started tim
 	return sr, q, named, nil
 }
 
+// addLate appends a batch of a slower indexer to raw, without the releases a length check
+// already rejected (like the first batch, see withoutRejectedHome).
+func (s *Service) addLate(q tsResolveQuery, raw, batch []JackettResult) []JackettResult {
+	return append(raw, s.withoutRejectedHome(q, batch)...)
+}
+
 // findSource searches Jackett, ranks the releases and returns the best one TorrServer can open.
 // The seed holds the other candidates (checks of higher resolutions may still be running)
 // and the indexers still searching; the caller passes it to afterPick or cancels it.
@@ -1261,7 +1269,7 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 				sr.late = nil
 				break
 			}
-			raw = append(raw, batch...)
+			raw = s.addLate(q, raw, batch)
 			tsApplyAbsolute(&q, raw)
 			cands = tsRankCandidates(raw, q)
 		case <-ctx.Done():

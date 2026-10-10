@@ -186,6 +186,7 @@ func (s *Service) fetch(ctx context.Context, tmdbID, season, episode int, durati
 		row.CreditsStart, row.CreditsEnd = g.creditsStart, g.creditsEnd
 		row.Source = joinSource(row.Source, "introdb")
 	}
+	row.Incomplete = (err1 != nil || err2 != nil) && (row.IntroEnd <= 0 || row.CreditsStart <= 0)
 	switch {
 	case errors.Is(err1, errRateLimited):
 		return row, fmt.Errorf("theintrodb: %w", err1)
@@ -220,9 +221,10 @@ func (s *Service) cached(tmdbID, season, episode int, duration float64) (SkipSeg
 		if gap > durationSlack {
 			continue
 		}
-		// Without TheIntroDB's answer (missing, failed, rate limited) it is asked again sooner
+		// Without TheIntroDB's answer (missing, failed, rate limited) or with a segment lost to a
+		// failure it is asked again sooner
 		ttl := foundTTL
-		if !strings.Contains(r.Source, "theintrodb") {
+		if !strings.Contains(r.Source, "theintrodb") || r.Incomplete {
 			ttl = missingTTL
 		}
 		if time.Since(r.FetchedAt) > ttl {

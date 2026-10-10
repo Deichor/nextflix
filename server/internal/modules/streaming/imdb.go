@@ -186,7 +186,9 @@ func tsParseTorznab(r io.Reader, imdbID string) ([]JackettResult, error) {
 	if err := xml.NewDecoder(r).Decode(&feed); err != nil {
 		return nil, fmt.Errorf("jackett torznab: %w", err)
 	}
-	wantNum := strings.TrimLeft(strings.TrimPrefix(strings.ToLower(imdbID), "tt"), "0")
+	// Indexers send "tt0133093", "0133093" or "133093"
+	num := func(id string) string { return strings.TrimLeft(strings.TrimPrefix(strings.ToLower(id), "tt"), "0") }
+	wantNum := num(imdbID)
 	var out []JackettResult
 	for _, it := range feed.Items {
 		attr := map[string]string{}
@@ -195,10 +197,10 @@ func tsParseTorznab(r io.Reader, imdbID string) ([]JackettResult, error) {
 				attr[a.Name] = a.Value
 			}
 		}
-		if v := attr["imdbid"]; v != "" && !strings.EqualFold(v, imdbID) {
+		if v := attr["imdbid"]; v != "" && num(v) != wantNum {
 			continue
 		}
-		if v := attr["imdb"]; v != "" && strings.TrimLeft(strings.TrimPrefix(strings.ToLower(v), "tt"), "0") != wantNum {
+		if v := attr["imdb"]; v != "" && num(v) != wantNum {
 			continue
 		}
 		r := JackettResult{

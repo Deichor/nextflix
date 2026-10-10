@@ -16,13 +16,15 @@ var errNoTMDB = errors.New("TMDB service not available")
 func posterURL(path string) string   { return tmdb.ImageURL(path, "w500") }
 func backdropURL(path string) string { return tmdb.ImageURL(path, "w1280") }
 
-// daysUntil returns whole days until a "YYYY-MM-DD" date (negative if past), ok=false if unparsable.
+// daysUntil returns calendar days from now's date to a "YYYY-MM-DD" date (negative if past), ok=false if unparsable.
 func daysUntil(date string, now time.Time) (int, bool) {
 	t, err := time.Parse("2006-01-02", date)
 	if err != nil {
 		return 0, false
 	}
-	return int(t.Sub(now).Hours() / 24), true
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	return int(t.Sub(today) / (24 * time.Hour)), true
 }
 
 func movieMedia(m tmdb.Movie) NotificationMedia {
@@ -213,17 +215,26 @@ func (s *Service) singleMovie(ctx context.Context) error {
 	})
 }
 
+// pickTV returns the first unused well-rated show, else the first unused one.
+func pickTV(shows []tmdb.TV, exclude map[int]bool) (tmdb.TV, bool) {
+	return pickFirst(shows, func(t tmdb.TV) int { return t.ID },
+		func(t tmdb.TV) bool { return t.VoteAverage >= 7.0 && t.Popularity >= 50 }, exclude)
+}
+
 // singleTV features one well-rated show that is currently on the air.
 func (s *Service) singleTV(ctx context.Context) error {
 	if !s.tm.Enabled() {
 		return errNoTMDB
 	}
+	exclude := s.recentIDs()
 	lists, err := s.tm.GetUpcomingTVSeries()
 	if err != nil || len(lists.OnTheAir) == 0 {
 		return errors.New("no suitable TMDB TV show")
 	}
-	t, _ := pickFirst(lists.OnTheAir, func(t tmdb.TV) int { return t.ID },
-		func(t tmdb.TV) bool { return t.VoteAverage >= 7.0 && t.Popularity >= 50 }, nil)
+	t, ok := pickTV(lists.OnTheAir, exclude)
+	if !ok {
+		return fmt.Errorf("no suitable TMDB TV show (excluded %d recently used)", len(exclude))
+	}
 
 	trailer, genres := s.tvExtras(t.ID)
 	now := time.Now()
@@ -246,11 +257,33 @@ func (s *Service) singleTV(ctx context.Context) error {
 	})
 }
 
+type upcomingCandidate struct {
+	movie tmdb.MovieWithVideos
+	days  int
+}
+
+// upcomingCandidates returns the 5 best-scored unused movies releasing within 180 days.
+func upcomingCandidates(all []tmdb.MovieWithVideos, now time.Time, exclude map[int]bool) []upcomingCandidate {
+	var candidates []upcomingCandidate
+	for _, m := range all {
+		if exclude[m.ID] || m.VoteAverage < 6.0 || m.Popularity < 40 || m.Adult || m.Title == "" || m.ReleaseDate == "" {
+			continue
+		}
+		if days, ok := daysUntil(m.ReleaseDate, now); ok && days > 0 && days <= 180 {
+			candidates = append(candidates, upcomingCandidate{m, days})
+		}
+	}
+	score := func(m tmdb.MovieWithVideos) float64 { return m.VoteAverage + m.Popularity/100 }
+	sort.Slice(candidates, func(i, j int) bool { return score(candidates[i].movie) > score(candidates[j].movie) })
+	return candidates[:min(5, len(candidates))]
+}
+
 // upcomingMovies bundles the 5 best-scored movies releasing within 180 days.
 func (s *Service) upcomingMovies(ctx context.Context) error {
 	if !s.tm.Enabled() {
 		return errNoTMDB
 	}
+	exclude := s.recentIDs()
 	var all []tmdb.MovieWithVideos
 	for page := 1; page <= 2; page++ {
 		if movies, err := s.tm.GetUpcomingMoviesList(page); err == nil {
@@ -258,26 +291,11 @@ func (s *Service) upcomingMovies(ctx context.Context) error {
 		}
 	}
 
-	type candidate struct {
-		movie tmdb.MovieWithVideos
-		days  int
-	}
 	now := time.Now()
-	var candidates []candidate
-	for _, m := range all {
-		if m.VoteAverage < 6.0 || m.Popularity < 40 || m.Adult || m.Title == "" || m.ReleaseDate == "" {
-			continue
-		}
-		if days, ok := daysUntil(m.ReleaseDate, now); ok && days > 0 && days <= 180 {
-			candidates = append(candidates, candidate{m, days})
-		}
-	}
+	candidates := upcomingCandidates(all, now, exclude)
 	if len(candidates) == 0 {
 		return nil
 	}
-	score := func(m tmdb.MovieWithVideos) float64 { return m.VoteAverage + m.Popularity/100 }
-	sort.Slice(candidates, func(i, j int) bool { return score(candidates[i].movie) > score(candidates[j].movie) })
-	candidates = candidates[:min(5, len(candidates))]
 
 	var ids []int
 	var titles []string
@@ -380,18 +398,24 @@ func (s *Service) trendingMovies(ctx context.Context) error {
 	})
 }
 
-// tvBundle builds a notification of up to 3 shows from a TMDB TV list.
-func (s *Service) tvBundle(ctx context.Context, shows []tmdb.TV, good func(tmdb.TV) bool, typ NotificationType,
-	title, priority, category string, message func(n int, first string) string) error {
+// pickShows returns up to 3 unused shows matching good.
+func pickShows(shows []tmdb.TV, good func(tmdb.TV) bool, exclude map[int]bool) []tmdb.TV {
 	var picked []tmdb.TV
 	for _, t := range shows {
-		if good(t) {
+		if !exclude[t.ID] && good(t) {
 			picked = append(picked, t)
 			if len(picked) == 3 {
 				break
 			}
 		}
 	}
+	return picked
+}
+
+// tvBundle builds a notification of up to 3 shows from a TMDB TV list.
+func (s *Service) tvBundle(ctx context.Context, shows []tmdb.TV, good func(tmdb.TV) bool, typ NotificationType,
+	title, priority, category string, message func(n int, first string) string) error {
+	picked := pickShows(shows, good, s.recentIDs())
 	if len(picked) == 0 {
 		return nil
 	}

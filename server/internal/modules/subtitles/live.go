@@ -240,7 +240,7 @@ func (l *liveSubs) read(ctx context.Context, tr *liveTrack, run *liveRun) {
 		}
 	}()
 	reached := false // the read ran into a range read before
-	parseVTTStream(r, func(c liveCue) bool {
+	perr := parseVTTStream(r, func(c liveCue) bool {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		if tr.run != run {
@@ -260,7 +260,11 @@ func (l *liveSubs) read(ctx context.Context, tr *liveTrack, run *liveRun) {
 		tr.signalLocked()
 		return true
 	})
-	if reached {
+	if perr != nil && ctx.Err() == nil {
+		// Nobody reads ffmpeg's output any more: stop it, or it blocks on the full pipe
+		log.Printf("subtitles: live read of %s from %.0fs: %v", tr.key, run.from, perr)
+	}
+	if reached || perr != nil {
 		run.cancel()
 	}
 	err = wait()
@@ -309,8 +313,8 @@ func mergeSpans(spans []liveSpan) []liveSpan {
 }
 
 // parseVTTStream reads WebVTT cues as they arrive and calls add for each; add returning false
-// stops the reading.
-func parseVTTStream(r io.Reader, add func(liveCue) bool) {
+// stops the reading. The error is a read that stopped before the end (a line over 1 MB).
+func parseVTTStream(r io.Reader, add func(liveCue) bool) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	var block []string
@@ -335,15 +339,19 @@ func parseVTTStream(r io.Reader, add func(liveCue) bool) {
 		line := strings.TrimRight(sc.Text(), "\r")
 		if strings.TrimSpace(line) == "" {
 			if len(block) > 0 && !flush() {
-				return
+				return nil
 			}
 			continue
 		}
 		block = append(block, line)
 	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
 	if len(block) > 0 {
 		flush()
 	}
+	return nil
 }
 
 // parseVTTTime reads "01:02:03.456" or "02:03.456" as seconds.

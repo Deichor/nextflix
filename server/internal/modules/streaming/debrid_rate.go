@@ -90,11 +90,14 @@ func (l *tsDebridLine) fetched(n int, now time.Time) {
 // measurement whose first bytes came fast keeps up when TorBox recently delivered
 // tsKeepUpFactor times the file's need (the cold read was the slow part, not TorBox).
 func (s *Service) debridHealth(ctx context.Context, hash string, index int, size, offset, need int64, seeders int) *tsHealth {
-	h, first := s.debridSpeed(ctx, hash, index, size, offset, need, seeders)
+	h, first, cached := s.debridSpeed(ctx, hash, index, size, offset, need, seeders)
 	if h == nil {
 		return nil
 	}
-	s.debrid.line.note(h.Rate, time.Now())
+	// Bytes the proxy had cached say nothing about the line (the proxy's CDN reads count it)
+	if !cached {
+		s.debrid.line.note(h.Rate, time.Now())
+	}
 	if h.KeepsUp {
 		return h
 	}
@@ -109,16 +112,19 @@ func (s *Service) debridHealth(ctx context.Context, hash string, index int, size
 // debridSpeed reads tsDebridSpeedLanes bounded ranges of the file from offset through the
 // proxy in parallel for tsDebridSpeedTime after the first byte (or until they are read). The
 // rate leaves out the first tsDebridSpeedSkip (connection ramp); peak is the best 1 s. It
-// returns nil when nothing arrived, and the time to the first byte.
-func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size, offset, need int64, seeders int) (*tsHealth, time.Duration) {
+// returns nil when nothing arrived, the time to the first byte, and whether most bytes read
+// came from the proxy's cache rather than the CDN.
+func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size, offset, need int64, seeders int) (*tsHealth, time.Duration, bool) {
 	base, err := s.debrid.proxy()
 	if err != nil || size <= 0 {
-		return nil, 0
+		return nil, 0, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, tsDebridSpeedTime+8*time.Second)
 	defer cancel()
 	started := time.Now()
 	var total atomic.Int64
+	var laneRead [tsDebridSpeedLanes]atomic.Int64
+	var laneCached [tsDebridSpeedLanes]int64 // bytes of each lane cached before the read
 	firstCh := make(chan struct{})
 	var firstOnce sync.Once
 	var wg sync.WaitGroup
@@ -128,6 +134,8 @@ func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size,
 			break
 		}
 		to := min(from+tsDebridSpeedLane, size) - 1
+		laneCached[k] = s.debrid.cachedFrom(hash, index, from)
+		read := &laneRead[k]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -150,6 +158,7 @@ func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size,
 				if n > 0 {
 					firstOnce.Do(func() { close(firstCh) })
 					total.Add(int64(n))
+					read.Add(int64(n))
 				}
 				if err != nil {
 					return
@@ -164,9 +173,9 @@ func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size,
 	select {
 	case <-firstCh:
 	case <-allDone:
-		return nil, 0
+		return nil, 0, false
 	case <-ctx.Done():
-		return nil, 0
+		return nil, 0, false
 	}
 	first := time.Now()
 	ttfb := first.Sub(started)
@@ -183,7 +192,7 @@ func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size,
 		case <-allDone:
 			over = true
 		case <-ctx.Done():
-			return nil, ttfb
+			return nil, ttfb, false
 		}
 		at := time.Since(first)
 		samples = append(samples, sample{at, total.Load()})
@@ -210,18 +219,40 @@ func (s *Service) debridSpeed(ctx context.Context, hash string, index int, size,
 	h.sampled = last.at
 	h.series = fmt.Sprintf("%d reads, first byte %s, %.1f MB in %s", min(tsDebridSpeedLanes, (size-offset+tsDebridSpeedLane-1)/tsDebridSpeedLane),
 		ttfb.Round(10*time.Millisecond), float64(last.read)/float64(tsMB), last.at.Round(10*time.Millisecond))
-	return h, ttfb
+	var fromCDN, read int64
+	for k := range laneRead {
+		n := laneRead[k].Load()
+		read += n
+		fromCDN += max(0, n-laneCached[k])
+	}
+	return h, ttfb, fromCDN*2 < read
 }
 
 // debridStreams: hash plays from TorBox's CDN now (a registered source, TorBox usable, its
-// reads not given up), so reading it never competes with a swarm.
+// reads not given up for any of its files), so reading it never competes with a swarm.
 func (s *Service) debridStreams(hash string) bool {
 	d := s.debrid
 	if !d.usable() {
 		return false
 	}
 	src, ok := d.hashSource(hash)
-	return ok && !d.isBroken(src.hash, src.index)
+	if !ok {
+		return false
+	}
+	d.mu.Lock()
+	var indexes []int
+	if t := d.sources[src.hash]; t != nil {
+		for idx := range t.files {
+			indexes = append(indexes, idx)
+		}
+	}
+	d.mu.Unlock()
+	for _, idx := range indexes {
+		if d.isBroken(src.hash, idx) {
+			return false
+		}
+	}
+	return true
 }
 
 // tsHealthSeries is the measurement detail of h for a log line ("" when there is none).

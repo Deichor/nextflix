@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,8 +90,9 @@ func (r syncRef) kind() string {
 }
 
 type syncRefState struct {
-	mu  sync.Mutex
-	ref *syncRef
+	mu    sync.Mutex
+	ref   *syncRef
+	users int // callers holding it (guarded by syncer.mu); only unused states are evicted
 }
 
 type syncer struct {
@@ -302,14 +304,19 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 			}
 			am := y.meta(altKey)
 			var altVTT []byte
+			if am != nil {
+				if a, ok := y.result(altKey, altBase); ok {
+					altVTT = a.VTT
+				} else if am.State == syncStateSynced {
+					am = nil // its timed cues are gone from the cache: time it again
+				}
+			}
 			if am == nil {
 				var a syncMeta
 				a, altVTT, ref = y.fitOne(ctx, hash, index, ref, altBase)
 				y.store(altKey, a, altVTT)
 				am = &a
 				logSync(alt, hash, index, a, time.Since(start))
-			} else if a, ok := y.result(altKey, altBase); ok {
-				altVTT = a.VTT
 			}
 			if am.fits() {
 				if altVTT == nil {
@@ -454,40 +461,56 @@ func (y *syncer) alternatives(hash string, index int, inner string) []string {
 	return out[:min(len(out), syncAlternatives)]
 }
 
-func (y *syncer) refState(fk string) *syncRefState {
+// refState returns the reference state of a file; release gives it back.
+func (y *syncer) refState(fk string) (st *syncRefState, release func()) {
 	y.mu.Lock()
 	defer y.mu.Unlock()
-	st := y.refs[fk]
+	st = y.refs[fk]
 	if st == nil {
 		if len(y.refs) >= 32 {
 			for k, o := range y.refs {
-				if o.mu.TryLock() {
+				if o.users == 0 {
 					delete(y.refs, k)
-					o.mu.Unlock()
 				}
 			}
 		}
 		st = &syncRefState{}
 		y.refs[fk] = st
 	}
-	return st
+	st.users++
+	return st, func() {
+		y.mu.Lock()
+		st.users--
+		y.mu.Unlock()
+	}
+}
+
+// loadRef fills st from the reference saved on disk; false without one.
+func (y *syncer) loadRef(fk string, st *syncRefState) bool {
+	if st.ref != nil {
+		return true
+	}
+	b, ok := y.svc.files.read("syncref", fk, ".json", 0)
+	if !ok {
+		return false
+	}
+	var r syncRef
+	if json.Unmarshal(b, &r) != nil || len(r.Windows) == 0 {
+		return false
+	}
+	st.ref = &r
+	return true
 }
 
 // reference returns the file's timing reference, read once (cached on disk).
 func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef, error) {
 	fk := syncFileKey(hash, index)
-	st := y.refState(fk)
+	st, release := y.refState(fk)
+	defer release()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.ref != nil {
+	if y.loadRef(fk, st) {
 		return *st.ref, nil
-	}
-	if b, ok := y.svc.files.read("syncref", fk, ".json", 0); ok {
-		var r syncRef
-		if json.Unmarshal(b, &r) == nil && len(r.Windows) > 0 {
-			st.ref = &r
-			return r, nil
-		}
 	}
 	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
 	select {
@@ -515,7 +538,8 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 		case <-ctx.Done():
 			return syncRef{}, ctx.Err()
 		}
-		for _, at := range windowStarts(probe.Duration, syncWindowLen, r.MaxWindows) {
+		starts := windowStarts(probe.Duration, syncWindowLen, r.MaxWindows)
+		for _, at := range starts {
 			if w, err := y.readWindow(ctx, url, probe, at); err == nil {
 				r.Windows = append(r.Windows, w)
 			} else if ctx.Err() != nil {
@@ -524,8 +548,9 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 				log.Printf("subtitles: timing reference of %s:%d: %v", hash[:8], index, err)
 			}
 		}
-		if len(r.Windows) < 2 {
-			return syncRef{}, fmt.Errorf("only %d of the reference windows could be read", len(r.Windows))
+		// The reference is kept for good: a weak one is not saved, a later timing reads it again
+		if len(r.Windows) < max(3, (len(starts)+1)/2) {
+			return syncRef{}, fmt.Errorf("only %d of %d reference windows could be read", len(r.Windows), len(starts))
 		}
 	}
 	log.Printf("subtitles: timing reference of %s:%d: %s, %d windows, %d MB read in %s", hash[:8], index, r.kind(),
@@ -537,10 +562,11 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 // addWindows reads more reference windows of the file (kept with its reference).
 func (y *syncer) addWindows(ctx context.Context, hash string, index int, starts []float64) (syncRef, error) {
 	fk := syncFileKey(hash, index)
-	st := y.refState(fk)
+	st, release := y.refState(fk)
+	defer release()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.ref == nil {
+	if !y.loadRef(fk, st) { // an evicted state starts empty
 		return syncRef{}, errors.New("no reference")
 	}
 	r := *st.ref
@@ -649,6 +675,8 @@ func (y *syncer) fullReference(ctx context.Context, hash string, index int) []sp
 	y.mu.Lock()
 	list := y.lists[syncFileKey(hash, index)]
 	y.mu.Unlock()
+	var files []torrFile
+	filesRead := false
 	for _, s := range list {
 		if !s.Synced || s.Forced {
 			continue
@@ -662,6 +690,18 @@ func (y *syncer) fullReference(ctx context.Context, hash string, index int) []sp
 		}
 		var vtt []byte
 		if source == SourceTorrent {
+			// Collections and season packs ship subtitles of their other files too
+			if !filesRead {
+				files, _ = torrentFiles(ctx, y.svc.cfg.TorrServerURL, hash)
+				filesRead = true
+			}
+			p := strings.Split(ref, "|")
+			if len(p) != 3 {
+				continue
+			}
+			if id, err := strconv.Atoi(p[1]); err != nil || !torrentSubForFile(files, id, index) {
+				continue
+			}
 			vtt, err = y.svc.File(ctx, s.ID)
 		} else if b, ok := y.svc.files.read(source, source+"|"+ref, ".vtt", 0); ok {
 			vtt = b
@@ -680,6 +720,59 @@ func (y *syncer) fullReference(ctx context.Context, hash string, index int) []sp
 		return out
 	}
 	return nil
+}
+
+// torrentSubForFile reports whether the torrent's subtitle file sub belongs to its file video:
+// named after it ("Movie.mkv", "Subs/Movie.en.srt"), or below its folder and naming its episode,
+// or naming none while the folder holds no other big file (another movie or episode).
+func torrentSubForFile(files []torrFile, sub, video int) bool {
+	var s, v *torrFile
+	for i := range files {
+		switch files[i].ID {
+		case sub:
+			s = &files[i]
+		case video:
+			v = &files[i]
+		}
+	}
+	if s == nil || v == nil {
+		return false
+	}
+	norm := func(p string) string { return strings.ToLower(strings.ReplaceAll(p, "\\", "/")) }
+	stem := func(p string) string { b := path.Base(p); return strings.TrimSuffix(b, path.Ext(b)) }
+	sp, vp := norm(s.Path), norm(v.Path)
+	if rest, ok := strings.CutPrefix(stem(sp), stem(vp)); ok {
+		named := true
+		for _, t := range nameTokens(rest) { // only language and flag tokens may follow
+			if !flagTokens[t] && codeOrName(t, true) == "" {
+				named = false
+			}
+		}
+		if named {
+			return true
+		}
+	}
+	dir := path.Dir(vp) + "/"
+	if dir == "./" {
+		dir = ""
+	}
+	rel, ok := strings.CutPrefix(sp, dir)
+	if !ok {
+		return false
+	}
+	vs, ve := episodeOf(vp)
+	for _, part := range strings.Split(rel, "/") {
+		if ss, se := episodeOf(part); se != 0 {
+			return se == ve && (ss == 0 || vs == 0 || ss == vs)
+		}
+	}
+	for _, f := range files {
+		p := norm(f.Path)
+		if f.ID != video && f.Length >= v.Length/5 && strings.HasPrefix(p, dir) && subtitleExts[path.Ext(p)] == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // listed takes a ranked list for a file: subtitles not made for it get file ids, known timing

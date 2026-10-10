@@ -1,9 +1,11 @@
 package catalog
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"net/url"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -25,6 +27,8 @@ const (
 	browsePageAll  = 40
 	browsePageSide = 20
 	localTTL       = 5 * time.Minute
+	browseOrderTTL = 10 * time.Minute // since the last page asked
+	browseOrderMax = 64
 )
 
 // Browse score weights
@@ -336,27 +340,89 @@ func (s *Service) browsePool(tm *tmdb.Client, f Filter) (pool []tmdb.SearchResul
 	return pool, popPages, popResults, nil
 }
 
+// browseOrder is the ranked pool of one browse (profile, filter, language). Later pages slice
+// the order page 1 made, so a taste or signals change mid-scroll causes no repeats or gaps.
+type browseOrder struct {
+	ranked               []tmdb.SearchResult
+	popPages, popResults int
+	expires              time.Time
+}
+
+type browseOrders struct {
+	mu    sync.Mutex
+	items map[string]browseOrder
+}
+
+// get returns a live order and extends its life.
+func (c *browseOrders) get(key string, now time.Time) (browseOrder, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	o, ok := c.items[key]
+	if !ok || !now.Before(o.expires) {
+		return browseOrder{}, false
+	}
+	o.expires = now.Add(browseOrderTTL)
+	c.items[key] = o
+	return o, true
+}
+
+func (c *browseOrders) put(key string, o browseOrder, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.items == nil {
+		c.items = map[string]browseOrder{}
+	}
+	for k, old := range c.items {
+		if !now.Before(old.expires) {
+			delete(c.items, k)
+		}
+	}
+	for len(c.items) >= browseOrderMax {
+		oldest := ""
+		for k, old := range c.items {
+			if oldest == "" || old.expires.Before(c.items[oldest].expires) {
+				oldest = k
+			}
+		}
+		delete(c.items, oldest)
+	}
+	o.expires = now.Add(browseOrderTTL)
+	c.items[key] = o
+}
+
+func browseKey(tm *tmdb.Client, f Filter, profileID uint) string {
+	genres := slices.Sorted(slices.Values(f.Genres))
+	return fmt.Sprintf("%d|%s|%s|%v|%v", profileID, tm.Lang(), f.Type, genres, f.Anime)
+}
+
 // Browse lists the titles of a filter: the ranked pool first (pages of 40 for type all, 20
 // for one type), then TMDB's popularity pages after the ones in the pool, without repeats.
+// Page 1 ranks the pool anew; later pages reuse that order while it is cached.
 func (s *Service) Browse(tm *tmdb.Client, f Filter, page int, profileID uint) (*DiscoverPage, error) {
 	page = min(max(page, 1), maxDiscoverPages)
-	pool, popPages, popResults, err := s.browsePool(tm, f)
-	if err != nil {
-		return nil, err
+	key, now := browseKey(tm, f, profileID), time.Now()
+	o, ok := s.browse.get(key, now)
+	if !ok || page == 1 {
+		pool, popPages, popResults, err := s.browsePool(tm, f)
+		if err != nil {
+			return nil, err
+		}
+		in := browseInput{b: newBayes(pool), local: s.local.get(), profile: profileID,
+			taste: s.taste.affinity(profileID), now: now}
+		o = browseOrder{ranked: rankBrowse(in, pool), popPages: popPages, popResults: popResults}
+		s.browse.put(key, o, now)
 	}
+	pool, popPages := o.ranked, o.popPages
 	size := browsePageAll
 	if f.Type != "all" {
 		size = browsePageSide
 	}
 	rankedPages := (len(pool) + size - 1) / size
 	total := min(rankedPages+max(popPages-browsePopPages, 0), maxDiscoverPages)
-	out := &DiscoverPage{Page: page, TotalPages: total, TotalResults: max(popResults, len(pool)),
+	out := &DiscoverPage{Page: page, TotalPages: total, TotalResults: max(o.popResults, len(pool)),
 		Results: []tmdb.SearchResult{}}
 	if page <= rankedPages {
-		in := browseInput{b: newBayes(pool), local: s.local.get(), profile: profileID,
-			taste: s.taste.affinity(profileID), now: time.Now()}
-		ranked := rankBrowse(in, pool)
-		out.Results = ranked[(page-1)*size : min(page*size, len(ranked))]
+		out.Results = slices.Clone(pool[(page-1)*size : min(page*size, len(pool))])
 		return out, nil
 	}
 	// Past the pool: TMDB's popularity order, minus what the pool already showed

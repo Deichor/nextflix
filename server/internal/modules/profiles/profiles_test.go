@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"nextflix/internal/platform/database"
+
+	"gorm.io/gorm"
 )
 
 func testService(t *testing.T) *Service {
@@ -87,6 +89,90 @@ func mustFirst(t *testing.T, s *Service) uint {
 		t.Fatal("no profiles")
 	}
 	return list[0].ID
+}
+
+func TestUpdateDoesNotRecreateDeletedProfile(t *testing.T) {
+	s := testService(t)
+	a, b := "A", "B"
+	if _, err := s.Create(Input{Name: &a}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.Create(Input{Name: &b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := p.CreatedAt
+	renamed := "B2"
+	if err := s.Update(p, Input{Name: &renamed}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(p.ID); got.Name != "B2" || got.Avatar != defaultProfileAvatar || !got.CreatedAt.Equal(created) {
+		t.Fatalf("after update: %+v", got)
+	}
+
+	// A PUT that loaded the profile before a concurrent DELETE
+	if err := s.Delete(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(p, Input{Name: &renamed}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update of deleted profile: %v", err)
+	}
+	if ok, _ := s.Exists(p.ID); ok {
+		t.Fatal("deleted profile was re-inserted")
+	}
+}
+
+type hookCleaner struct {
+	s       *Service
+	fail    bool
+	deleted []uint
+	existed []bool
+}
+
+func (c *hookCleaner) DeleteByProfile(_ *gorm.DB, _ uint) error {
+	if c.fail {
+		return errors.New("cleaner failed")
+	}
+	return nil
+}
+
+func (c *hookCleaner) ProfileDeleted(id uint) {
+	ok, _ := c.s.Exists(id)
+	c.deleted = append(c.deleted, id)
+	c.existed = append(c.existed, ok)
+}
+
+func TestProfileDeletedHookRunsAfterCommit(t *testing.T) {
+	s := testService(t)
+	c := &hookCleaner{s: s}
+	s.cleaners = []ProfileDataCleaner{c}
+	var ids []uint
+	for _, n := range []string{"A", "B"} {
+		p, err := s.Create(Input{Name: &n})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, p.ID)
+	}
+
+	c.fail = true
+	if err := s.Delete(ids[1]); err == nil {
+		t.Fatal("expected cleaner error")
+	}
+	if len(c.deleted) != 0 {
+		t.Fatalf("hook ran on rollback: %v", c.deleted)
+	}
+
+	c.fail = false
+	if err := s.Delete(ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ids[0]); !errors.Is(err, ErrLastProfile) {
+		t.Fatalf("last profile: %v", err)
+	}
+	if len(c.deleted) != 1 || c.deleted[0] != ids[1] || c.existed[0] {
+		t.Fatalf("hook calls %v, profile still visible %v", c.deleted, c.existed)
+	}
 }
 
 func TestNameAndAvatarCaps(t *testing.T) {

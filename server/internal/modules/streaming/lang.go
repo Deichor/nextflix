@@ -18,8 +18,15 @@ import (
 const (
 	tsLangDubPart   = -8 // a dub-only marker in the name
 	tsLangMultiPart = 4  // MULTi / Dual Audio / ENG: the original is likely there
-	tsOrigLangWait  = 2 * time.Second
 )
+
+const (
+	tsOrigLangKeep  = 30 * time.Minute // a looked-up original language is reused this long
+	tsOrigLangRetry = time.Minute      // ... a failed lookup this long
+)
+
+// tsOrigLangWait: the longest the checks of a title wait for its TMDB lookup (a var for tests).
+var tsOrigLangWait = 2 * time.Second
 
 // tsISO6392 maps ffprobe's ISO 639-2 tags (B and T forms) to TMDB's ISO 639-1.
 var tsISO6392 = map[string]string{
@@ -161,30 +168,62 @@ func tsTag(st *tsProbeStream, key string) string {
 	return ""
 }
 
-// originalLanguage is q's original language: from the names lookup, else from TMDB (cached
-// in memory by the shared client), waiting at most tsOrigLangWait.
+// tsOrigLangCall is one TMDB lookup of a title's original language, shared by all checks.
+type tsOrigLangCall struct {
+	done    chan struct{}
+	lang    string
+	started time.Time
+}
+
+// originalLanguage is q's original language: from the names lookup, else from TMDB. The
+// checks of a title share one lookup and wait at most tsOrigLangWait from its start, so a
+// slow TMDB stalls a resolve once, not every candidate.
 func (s *Service) originalLanguage(q tsResolveQuery) string {
 	if q.origLang != "" || q.tmdbID <= 0 || s.cfg.TMDB == nil {
 		return q.origLang
 	}
-	ch := make(chan string, 1)
-	go func() {
-		lang := ""
-		if q.mediaType == "movie" {
-			if d, err := s.cfg.TMDB.GetMovieDetails(q.tmdbID); err == nil && d != nil {
-				lang = d.OriginalLanguage
-			}
-		} else if d, err := s.cfg.TMDB.GetTVDetails(q.tmdbID); err == nil && d != nil {
-			lang = d.OriginalLanguage
-		}
-		ch <- strings.ToLower(lang)
-	}()
+	kind := "tv"
+	if q.mediaType == "movie" {
+		kind = "movie"
+	}
+	key := fmt.Sprintf("%s:%d", kind, q.tmdbID)
+	call := &tsOrigLangCall{done: make(chan struct{}), started: time.Now()}
+	if v, loaded := s.origLangs.LoadOrStore(key, call); loaded {
+		call = v.(*tsOrigLangCall)
+	} else {
+		go s.lookupOrigLang(key, kind, q.tmdbID, call)
+	}
 	select {
-	case lang := <-ch:
-		return lang
-	case <-time.After(tsOrigLangWait):
+	case <-call.done:
+		return call.lang
+	default:
+	}
+	t := time.NewTimer(time.Until(call.started.Add(tsOrigLangWait)))
+	defer t.Stop()
+	select {
+	case <-call.done:
+		return call.lang
+	case <-t.C:
 		return ""
 	}
+}
+
+func (s *Service) lookupOrigLang(key, kind string, id int, call *tsOrigLangCall) {
+	lang := ""
+	if kind == "movie" {
+		if d, err := s.cfg.TMDB.GetMovieDetails(id); err == nil && d != nil {
+			lang = d.OriginalLanguage
+		}
+	} else if d, err := s.cfg.TMDB.GetTVDetails(id); err == nil && d != nil {
+		lang = d.OriginalLanguage
+	}
+	call.lang = strings.ToLower(lang)
+	close(call.done)
+	keep := tsOrigLangKeep
+	if call.lang == "" {
+		keep = tsOrigLangRetry
+	}
+	time.AfterFunc(keep, func() { s.origLangs.CompareAndDelete(key, call) })
 }
 
 // applyProbedLanguage marks a checked result unfit when its probed audio has neither the

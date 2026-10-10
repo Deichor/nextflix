@@ -154,6 +154,23 @@ func TestLiveReadGrowsAndCompletes(t *testing.T) {
 	}
 }
 
+func TestLiveReadStopsOnAnOverlongLine(t *testing.T) {
+	saved := liveFirstWait
+	defer func() { liveFirstWait = saved }()
+	liveFirstWait = 10 * time.Millisecond
+	reads := &fakeReads{}
+	l := newLiveSubs("http://torrserver", nil)
+	l.start = reads.start
+	l.get(context.Background(), "k", liveHash, 1, 3, 0)
+	r := reads.last()
+	r.cue(1, 2, "Bir")
+	// A line past the scanner's 1 MB limit: the rest is never read, so the writer blocks
+	// like ffmpeg on a full pipe until the read is stopped
+	go fmt.Fprint(r.w, strings.Repeat("x", 1<<20+10))
+	waitUntil(t, func() bool { return r.ctx.Err() != nil })
+	waitUntil(t, func() bool { l.mu.Lock(); defer l.mu.Unlock(); return l.tracks["k"].run == nil })
+}
+
 func TestLiveSwitchingTrackStopsTheOther(t *testing.T) {
 	saved := liveFirstWait
 	defer func() { liveFirstWait = saved }()

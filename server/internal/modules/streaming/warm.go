@@ -902,7 +902,8 @@ func (h handler) release(c *gin.Context) {
 			return
 		}
 		delay, _ := strconv.Atoi(c.Query("delay"))
-		d := min(max(time.Duration(delay)*time.Second, 0), tsReleaseGraceMax)
+		// Clamped before the conversion: a huge delay would overflow to a negative duration
+		d := time.Duration(min(max(delay, 0), int(tsReleaseGraceMax/time.Second))) * time.Second
 		out["titles"] = h.s.releaseTitle(tsResolveBaseKey(q), d)
 		if d > 0 {
 			out["status"] = "scheduled"

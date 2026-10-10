@@ -170,3 +170,86 @@ func TestBrowseRankedPoolAndFallback(t *testing.T) {
 		t.Errorf("page 2 = %v, want the pool title on page 6 dropped", got)
 	}
 }
+
+func TestBrowsePagesKeepOneOrder(t *testing.T) {
+	// 20 movies per popularity page: a pool of 100, five ranked pages
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		page, _ := strconv.Atoi(q.Get("page"))
+		results := []map[string]any{}
+		if r.URL.Path == "/discover/movie" && q.Get("sort_by") == "popularity.desc" {
+			for i := range 20 {
+				id := page*100 + i
+				results = append(results, movieJSON(id, 5+float64(id%37)/10, 100+id, float64(id%13)))
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"page": page, "total_pages": 5, "total_results": 100, "results": results})
+	}))
+	defer srv.Close()
+	tm := tmdb.New("test-key").WithBaseURL(srv.URL)
+	s := NewService(tm)
+	var mu sync.Mutex
+	signals := map[uint][]LocalTitle{}
+	s.SetLocalSignals(func() (map[uint][]LocalTitle, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return signals, nil
+	})
+	f := Filter{Type: "movie"}
+
+	p1, err := s.Browse(tm, f, 1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := browseIDs(p1.Results)
+	// The signals change mid-scroll (cache expiry, a rating elsewhere): 20 titles beyond page 1
+	// are loved by ten profiles now, so a re-ranked page 2 would be the old page 1
+	full := map[int]bool{}
+	for _, id := range first {
+		full[id] = true
+	}
+	var loved []LocalTitle
+	for id := 100; len(loved) < 20; id++ {
+		if !full[id] && id%100 < 20 {
+			loved = append(loved, LocalTitle{MediaType: "movie", TmdbID: id, Rating: "love"})
+		}
+	}
+	mu.Lock()
+	for pid := uint(1); pid <= 10; pid++ {
+		signals[pid] = loved
+	}
+	mu.Unlock()
+	s.local.invalidate()
+
+	p2, err := s.Browse(tm, f, 2, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range browseIDs(p2.Results) {
+		if full[id] {
+			t.Fatalf("page 2 repeats %d from page 1: %v / %v", id, first, browseIDs(p2.Results))
+		}
+	}
+	// A new scroll (page 1 again) ranks with the new signals
+	p1, _ = s.Browse(tm, f, 1, 7)
+	if id := p1.Results[0].ID; full[id] {
+		t.Errorf("fresh page 1 starts with %d, want a loved title", id)
+	}
+}
+
+func TestBrowseOrdersBounded(t *testing.T) {
+	var c browseOrders
+	now := time.Now()
+	for i := range browseOrderMax + 10 {
+		c.put(strconv.Itoa(i), browseOrder{}, now.Add(time.Duration(i)*time.Millisecond))
+	}
+	if len(c.items) != browseOrderMax {
+		t.Fatalf("%d orders kept", len(c.items))
+	}
+	if _, ok := c.get("0", now); ok {
+		t.Error("the oldest order was not evicted")
+	}
+	if _, ok := c.get(strconv.Itoa(browseOrderMax+9), now.Add(browseOrderTTL+time.Second)); ok {
+		t.Error("expired order returned")
+	}
+}

@@ -13,6 +13,8 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -192,9 +194,10 @@ type result struct {
 }
 
 // Get fetches url and reads the whole body. Transport errors, resets, truncated bodies,
-// 429 and 5xx (Options.RetryStatus) are retried on a new connection; other statuses are
-// returned as they are. When the budget runs out the error wraps context.DeadlineExceeded;
-// every network failure wraps ErrTransport.
+// 429 and 5xx (Options.RetryStatus) are retried on a new connection (waiting out a Retry-After of
+// up to 5 s); other statuses are returned as they are. When the tries or the budget run out, the last
+// retryable response is returned if there was one; otherwise the error wraps ErrTransport, and
+// context.DeadlineExceeded when the budget ran out.
 func (c *Client) Get(ctx context.Context, url string, header http.Header) (*Response, error) {
 	return c.do(ctx, http.MethodGet, url, header, nil)
 }
@@ -249,8 +252,9 @@ func (c *Client) do(ctx context.Context, method, url string, header http.Header,
 		hedge = t.C
 	}
 	headers := false
-	retryPending := false
-	var last result
+	retryPending, noRetry := false, false
+	var lastResp *Response
+	var lastErr error
 	for {
 		select {
 		case <-gotHeaders:
@@ -270,30 +274,69 @@ func (c *Client) do(ctx context.Context, method, url string, header http.Header,
 			if r.err == nil && !c.opts.RetryStatus(r.resp.Status) {
 				return r.resp, nil
 			}
-			last = r
 			if r.permanent {
 				c.failures.Add(1)
 				return nil, r.err
 			}
+			if r.resp != nil {
+				lastResp = r.resp
+			} else {
+				lastErr = r.err
+			}
 			if ctx.Err() != nil {
 				c.failures.Add(1)
-				return nil, transportError{budgetErr(ctx, last.err)}
+				return giveUp(ctx, lastResp, lastErr)
 			}
-			if !retryPending && planned < c.opts.Attempts {
-				retryPending = true
-				retry = time.After(100*time.Millisecond + rand.N(200*time.Millisecond))
-			} else if running == 0 && !retryPending {
-				c.failures.Add(1)
-				if last.resp != nil {
-					return last.resp, nil
+			if !retryPending && !noRetry && planned < c.opts.Attempts {
+				if d, ok := retryDelay(ctx, r.resp); ok {
+					retryPending = true
+					retry = time.After(d)
+				} else {
+					noRetry = true
 				}
-				return nil, transportError{last.err}
+			}
+			if running == 0 && !retryPending {
+				c.failures.Add(1)
+				return giveUp(ctx, lastResp, lastErr)
 			}
 		case <-ctx.Done():
 			c.failures.Add(1)
-			return nil, transportError{budgetErr(ctx, last.err)}
+			return giveUp(ctx, lastResp, lastErr)
 		}
 	}
+}
+
+// maxRetryAfter caps how long a Retry-After is waited for; a longer one ends the request.
+const maxRetryAfter = 5 * time.Second
+
+// retryDelay is the pause before the next try: a short jitter, or the response's Retry-After in
+// seconds. It reports false when Retry-After is longer than maxRetryAfter or the time left.
+func retryDelay(ctx context.Context, resp *Response) (time.Duration, bool) {
+	d := 100*time.Millisecond + rand.N(200*time.Millisecond)
+	if resp == nil {
+		return d, true
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if err != nil || secs <= 0 {
+		return d, true
+	}
+	wait := time.Duration(secs) * time.Second
+	if deadline, ok := ctx.Deadline(); wait > maxRetryAfter || (ok && time.Until(deadline) <= wait) {
+		return 0, false
+	}
+	return max(d, wait), true
+}
+
+// giveUp ends a request whose tries are used up: the last retryable status wins over later
+// network errors, so callers still see a 429 / 503 and its Retry-After.
+func giveUp(ctx context.Context, lastResp *Response, lastErr error) (*Response, error) {
+	if lastResp != nil {
+		return lastResp, nil
+	}
+	if ctx.Err() != nil {
+		return nil, transportError{budgetErr(ctx, lastErr)}
+	}
+	return nil, transportError{lastErr}
 }
 
 func budgetErr(ctx context.Context, last error) error {

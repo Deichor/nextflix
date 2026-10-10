@@ -349,3 +349,34 @@ func TestPickMovieFileInCollections(t *testing.T) {
 		}
 	}
 }
+
+// "Documentary" names bonus material of a film, but is a plain tag of a documentary.
+func TestScoreDocumentaryTag(t *testing.T) {
+	r := JackettResult{Title: "Free Solo 2018 Documentary 1080p WEBRip x264", Seeders: 50, Size: 2 * tsGB, InfoHash: strings.Repeat("a", 40)}
+	q := tsResolveQuery{mediaType: "movie", title: "Free Solo", year: 2018, documentary: true}
+	if _, ok := tsScore(r, q, tsNormalize(q.title)); !ok {
+		t.Error("documentary rejected as an extra")
+	}
+	making := r
+	making.Title = "Free Solo 2018 Documentary Making of 1080p WEBRip x264"
+	if _, ok := tsScore(making, q, tsNormalize(q.title)); ok {
+		t.Error("making-of of a documentary accepted")
+	}
+	q.documentary = false
+	if _, ok := tsScore(r, q, tsNormalize(q.title)); ok {
+		t.Error("documentary about a film accepted")
+	}
+}
+
+// Late batches of slower indexers drop the releases a length check rejected, like the first one.
+func TestAddLateSkipsRejectedHome(t *testing.T) {
+	s := NewService(nil, Config{})
+	q := tsResolveQuery{mediaType: "movie", title: "The Odyssey", year: 2026, tmdbID: 1368337}
+	bad, good := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	s.demoteHome(q.tmdbID, q.title, []string{bad}, "wrong length")
+	raw := []JackettResult{{Title: "first", InfoHash: good}}
+	raw = s.addLate(q, raw, []JackettResult{{Title: "rejected", InfoHash: strings.ToUpper(bad)}, {Title: "late", InfoHash: good}})
+	if len(raw) != 2 || raw[0].Title != "first" || raw[1].Title != "late" {
+		t.Fatalf("raw %+v, want the rejected release dropped", raw)
+	}
+}

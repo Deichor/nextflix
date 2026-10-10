@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -116,13 +117,16 @@ func (s *Service) stepDownAlternative(key string, q tsResolveQuery, sv tsSaved, 
 	if err != nil {
 		return nil
 	}
+	// The cap sits before |cinema in a key (tsResolveCaps)
 	for _, row := range rows {
-		if strings.HasPrefix(row.SourceKey, key+"|max") {
+		if k := tsMaxCapPattern.ReplaceAllString(row.SourceKey, ""); k != row.SourceKey && k == key {
 			return cached
 		}
 	}
 	return nil
 }
+
+var tsMaxCapPattern = regexp.MustCompile(`\|max\d+`)
 
 // reuseDebrid plays the saved release from TorBox when TorBox has it cached; why says why not.
 func (s *Service) reuseDebrid(ctx context.Context, q tsResolveQuery, sv tsSaved, cached *tsResolveResult) (*tsResolveResult, string) {
@@ -136,7 +140,7 @@ func (s *Service) reuseDebrid(ctx context.Context, q tsResolveQuery, sv tsSaved,
 		return nil, "not cached on TorBox (or TorBox did not answer)"
 	}
 	files := tsCachedFiles(it)
-	cand := tsReuseCandidate(it.Name, q)
+	cand := tsReuseCandidate(it.Name, sv.hash, q)
 	file, ok := tsReuseFile(files, q, sv, cand, cached)
 	if !ok {
 		return nil, "no matching video file in TorBox's list"
@@ -221,7 +225,7 @@ func (s *Service) reuseTorrent(ctx context.Context, q tsResolveQuery, sv tsSaved
 		res.Quality, res.HDR, res.Format, res.Cinema = cached.Quality, cached.HDR, cached.Format, cached.Cinema
 		res.Duration, res.DurationVerified, res.TorrentTitle = cached.Duration, cached.DurationVerified, cached.TorrentTitle
 	} else {
-		c := tsReuseCandidate(st.Name, q)
+		c := tsReuseCandidate(st.Name, sv.hash, q)
 		res.Quality, res.HDR = tsQualityLabel(c.quality), c.hdr
 	}
 	s.applyProbedQuality(res)
@@ -314,9 +318,10 @@ func tsCachedFiles(it *torbox.CachedItem) []tsFileStat {
 }
 
 // tsReuseCandidate reads a saved torrent's name like a search result (episode info,
-// resolution, HDR); a name ranking rejects gives an empty candidate.
-func tsReuseCandidate(name string, q tsResolveQuery) tsCandidate {
-	if cands := tsRankAll([]JackettResult{{Title: name, Seeders: 1}}, q); len(cands) > 0 && cands[0].quality > 0 {
+// resolution, HDR); a name ranking rejects gives an empty candidate. The hash makes it a
+// result ranking takes (one without a magnet or link is rejected).
+func tsReuseCandidate(name, hash string, q tsResolveQuery) tsCandidate {
+	if cands := tsRankAll([]JackettResult{{Title: name, Seeders: 1, InfoHash: hash}}, q); len(cands) > 0 && cands[0].quality > 0 {
 		return cands[0]
 	}
 	tokens := map[string]bool{}

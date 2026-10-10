@@ -288,6 +288,10 @@ func TestSubAltScanRateLimit(t *testing.T) {
 		<-release
 	}
 	cur := hashN(1)
+	// Without a language (no ?lang=, no profile language) nothing can match: no scan
+	if r, scanning := s.subaltFor(belowQuery, cur, 1080, ""); r != nil || scanning || scans.Load() != 0 {
+		t.Fatalf("scan without a language: %v scanning=%v", r, scanning)
+	}
 	if r, scanning := s.subaltFor(belowQuery, cur, 1080, "tr"); r != nil || !scanning {
 		t.Fatalf("first ask: %v scanning=%v", r, scanning)
 	}

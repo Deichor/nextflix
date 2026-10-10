@@ -141,6 +141,36 @@ func TestUpgradeSkipsDeadHigherResolution(t *testing.T) {
 	}
 }
 
+// A watch with nothing to warm (its only 4K is unfit) ends at once, but the seed lives on
+// while checks of the picked resolution are pending: one that keeps up still replaces the
+// starving pick.
+func TestUpgradeWatchKeepsSeedForPendingChecks(t *testing.T) {
+	s, _ := newWarmService(t)
+	q := tsResolveQuery{mediaType: "movie", title: "Sintel", year: 2010, hevc: true}
+	key := tsResolveKey(q)
+	q.warm = s.holdWarm(key)
+	pickRes := result(hx('a'), "1080p", 0.05)
+	unfit := result(hx('b'), "2160p", 3)
+	unfit.unfit = "DV profile 5"
+	alt := result(hx('c'), "1080p", 3)
+	later := make(chan tsOutcome, 1)
+	p := &tsPick{best: 0, res: pickRes, results: []*tsResolveResult{pickRes, unfit, nil}, kept: []bool{false, false, true},
+		errs: make([]error, 3), later: later}
+	s.storeSource(key, *pickRes)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.afterPick(key, pickRes, &tsUpgradeSeed{q: q, cands: []tsCandidate{{quality: 1080}, {quality: 2160}, {quality: 1080}}, pick: p, ctx: ctx, cancel: cancel})
+	if ctx.Err() != nil {
+		t.Fatal("the seed ended while a check was pending")
+	}
+	later <- tsOutcome{i: 2, res: alt}
+	waitFor(t, func() bool {
+		c, _ := s.cachedSource(key)
+		return c != nil && c.Hash == alt.Hash
+	})
+	waitFor(t, func() bool { return ctx.Err() != nil })
+}
+
 func TestUpgradeEndpointNoFlap(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	s := NewService(nil, Config{})

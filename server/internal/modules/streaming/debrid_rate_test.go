@@ -6,6 +6,55 @@ import (
 	"time"
 )
 
+func lineSamples(s *Service) int {
+	l := &s.debrid.line
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.samples)
+}
+
+// A measurement the proxy answers from its cache (the same file checked again with other caps)
+// reads at RAM speed: it is no line rate, or every TorBox file would keep up for tsLineFresh.
+func TestDebridHealthIgnoresCachedReads(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	size := int64(len(f.content))
+	n := lineSamples(s)
+	if h := s.debridHealth(context.Background(), tbHash, 1, size, 0, tsMB, 3); h == nil {
+		t.Fatal("cold read measured nothing")
+	}
+	if lineSamples(s) <= n {
+		t.Fatal("a read from the CDN is not a line rate")
+	}
+	// The whole file is cached now: no CDN read, no line rate
+	n = lineSamples(s)
+	if h := s.debridHealth(context.Background(), tbHash, 1, size, 0, tsMB, 3); h == nil {
+		t.Fatal("cached read measured nothing")
+	}
+	if got := lineSamples(s); got != n {
+		t.Fatalf("cached read noted as a line rate (%d -> %d samples)", n, got)
+	}
+}
+
+// Two episodes of one pack: the hash streams from the CDN only while neither is broken,
+// whatever file the map hands out first.
+func TestDebridStreamsChecksEveryFileOfThePack(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	registerVideo(t, s)
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 2, path: tbSample, size: 1000, title: "Movie (2020)"})
+	if !s.debridStreams(tbHash) {
+		t.Fatal("registered pack does not stream from TorBox")
+	}
+	s.debrid.markBroken(tbHash, 2)
+	for range 50 {
+		if s.debridStreams(tbHash) {
+			t.Fatal("a pack with a broken file counts as CDN-only")
+		}
+	}
+}
+
 func TestDebridLineKeepsTheBestRecentRate(t *testing.T) {
 	var l tsDebridLine
 	now := time.Now()

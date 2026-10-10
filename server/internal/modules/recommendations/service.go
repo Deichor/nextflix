@@ -10,7 +10,7 @@ import (
 
 const (
 	cacheTTL    = 30 * time.Minute
-	partialTTL  = 2 * time.Minute // some seeds used TMDB's lists because the matcher was not ready
+	partialTTL  = 2 * time.Minute // the matcher was not ready for some seeds or TMDB's lists failed
 	fetchers    = 6
 	cacheMaxLen = 200
 )
@@ -144,7 +144,7 @@ func (s *Service) For(profileID uint, lang string) (*Response, error) {
 	return cl.resp, cl.err
 }
 
-// compute builds the rows; partial reports that some seeds fell back to TMDB's lists.
+// compute builds the rows; partial reports that some seeds fell back to TMDB's lists or lack them.
 func (s *Service) compute(profileID uint, lang string) (resp *Response, partial bool, err error) {
 	signals, err := s.ratings.Signals(profileID)
 	if err != nil {
@@ -195,7 +195,8 @@ func (s *Service) fetch(lang string, signals []Signal, seeds, dislikes []seed) s
 		positive := i < len(seeds)
 		run(func() {
 			if positive && s.similar != nil {
-				if items, ok := s.similar(lang, k.mediaType, k.id); ok && len(items) > 0 {
+				// ok with an empty list: the matcher found nothing similar
+				if items, ok := s.similar(lang, k.mediaType, k.id); ok {
 					mu.Lock()
 					in.related[k] = relatedLists{items, nil}
 					mu.Unlock()
@@ -211,6 +212,9 @@ func (s *Service) fetch(lang string, signals []Signal, seeds, dislikes []seed) s
 			}
 			mu.Lock()
 			in.related[k] = relatedLists{recs, similar}
+			if err != nil {
+				in.partial = true
+			}
 			mu.Unlock()
 		})
 	}

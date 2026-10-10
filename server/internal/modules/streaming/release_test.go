@@ -326,6 +326,13 @@ func TestReleaseEndpoint(t *testing.T) {
 	if got := rec.list(); got != "" {
 		t.Fatalf("delayed release dropped %q at once", got)
 	}
+	// A delay too large for a Duration is capped, not wrapped into an immediate release
+	if w := post("type=movie&title=Night+of+the+Living+Dead&year=1968&delay=9223372037"); w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), "scheduled") {
+		t.Fatalf("huge delay: %d %s", w.Code, w.Body.String())
+	}
+	if got := rec.list(); got != "" {
+		t.Fatalf("huge delay dropped %q at once", got)
+	}
 	if w := post("type=movie&title=Night+of+the+Living+Dead&year=1968&hash=" + hx('b')); w.Code != http.StatusAccepted {
 		t.Fatalf("release: %d", w.Code)
 	}

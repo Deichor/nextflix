@@ -339,7 +339,7 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 		var t tsTMDBTitle
 		if movie {
 			if d, err := s.cfg.TMDB.GetMovieDetails(id); err == nil && d != nil {
-				t.title, t.year = d.Title, tsDateYear(d.ReleaseDate)
+				t.title, t.year, t.documentary = d.Title, tsDateYear(d.ReleaseDate), tsDocumentary(d.Genres)
 				for _, c := range d.Credits.Crew {
 					if n := tsNormalize(c.Name); c.Job == "Director" && len(n) > 0 {
 						t.directors = append(t.directors, n)
@@ -347,7 +347,7 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 				}
 			}
 		} else if d, err := s.cfg.TMDB.GetTVDetails(id); err == nil && d != nil {
-			t.title, t.year = d.Name, tsDateYear(d.FirstAirDate)
+			t.title, t.year, t.documentary = d.Name, tsDateYear(d.FirstAirDate), tsDocumentary(d.Genres)
 		}
 		t.title = strings.TrimSpace(t.title)
 		ch <- t
@@ -372,13 +372,25 @@ func (s *Service) englishTitle(q *tsResolveQuery) {
 
 // tsTMDBTitle is what englishTitle keeps per tmdb id (year 0: unknown, the client's stays).
 type tsTMDBTitle struct {
-	title     string
-	year      int        // movie: release year, TV: first-air year
-	directors [][]string // normalized names (movies)
+	title       string
+	year        int        // movie: release year, TV: first-air year
+	directors   [][]string // normalized names (movies)
+	documentary bool
+}
+
+// tsDocumentary: TMDB's Documentary genre (id 99) is among genres.
+func tsDocumentary(genres []tmdb.Genre) bool {
+	for _, g := range genres {
+		if g.ID == 99 {
+			return true
+		}
+	}
+	return false
 }
 
 func tsApplyTMDBTitle(q *tsResolveQuery, t tsTMDBTitle) {
 	q.title = t.title
+	q.documentary = t.documentary
 	if q.mediaType == "movie" {
 		if t.year > 0 {
 			q.year = t.year

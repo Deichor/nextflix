@@ -142,8 +142,42 @@ func TestTheIntroDBRateLimitPausesAndShortensTheCache(t *testing.T) {
 	if _, ok := s.cached(1396, 1, 2, 2900); ok {
 		t.Fatal("a row without TheIntroDB data kept for foundTTL")
 	}
-	db.Model(&row).Update("source", "theintrodb+introdb")
+	db.Model(&row).Updates(map[string]any{"source": "theintrodb+introdb", "incomplete": false})
 	if _, ok := s.cached(1396, 1, 2, 2900); !ok {
 		t.Fatal("a TheIntroDB row expired early")
+	}
+}
+
+func TestIntroDBFailureShortensTheCache(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "s.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(Models()...); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/the") {
+			w.Write([]byte(`{"intro":[{"start_ms":314360,"end_ms":330461}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	s := NewService(db, Config{IMDb: func(int) (string, error) { return "tt0903747", nil }})
+	s.theIntroDBURL, s.introDBURL = srv.URL+"/the", srv.URL+"/intro"
+
+	r := s.Get(context.Background(), Query{TmdbID: 1396, Season: 1, Episode: 2, Duration: 2900})
+	if r.Intro == nil || r.Intro.Source != "theintrodb" || r.Credits != nil {
+		t.Fatalf("intro = %+v, credits = %+v", r.Intro, r.Credits)
+	}
+	var row SkipSegment
+	if err := db.First(&row).Error; err != nil || row.Source != "theintrodb" {
+		t.Fatalf("saved %+v %v", row, err)
+	}
+	// The credits IntroDB failed to answer are asked again after missingTTL, not foundTTL
+	db.Model(&row).Update("fetched_at", time.Now().Add(-missingTTL-time.Hour))
+	if _, ok := s.cached(1396, 1, 2, 2900); ok {
+		t.Fatal("a row missing credits after a failure kept for foundTTL")
 	}
 }

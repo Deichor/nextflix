@@ -2,6 +2,7 @@ package progress
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -36,6 +37,38 @@ func save(t *testing.T, s *Service, tv, season, episode int, pos float64, age ti
 	}
 	s.db.Model(&StreamProgress{}).Where(keyWhere, 1, "tv", tv, season, episode).
 		UpdateColumn("updated_at", time.Now().Add(-age))
+}
+
+// A save racing a profile delete must not leave rows of the deleted profile behind.
+func TestSaveDuringProfileDeleteLeavesNoOrphans(t *testing.T) {
+	s := testService(t)
+	tx := s.db.Begin() // immediate: holds the write lock like profiles.Delete
+	if tx.Error != nil {
+		t.Fatal(tx.Error)
+	}
+	if err := s.DeleteByProfile(tx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Exec("DELETE FROM profiles WHERE id = 1").Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Save(StreamProgress{ProfileID: 1, MediaType: "movie", TmdbID: 550, Title: "Fight Club", Position: 10, Duration: 100})
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond) // let Save reach the write lock
+	if err := tx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; !errors.Is(err, ErrUnknownProfile) {
+		t.Fatalf("save: %v, want ErrUnknownProfile", err)
+	}
+	var n int64
+	s.db.Model(&StreamProgress{}).Where("profile_id = ?", 1).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d orphaned rows", n)
+	}
 }
 
 // tenEpisodes: every season has 10 episodes, all released.

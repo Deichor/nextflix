@@ -21,11 +21,17 @@ func (h handler) seekPoint(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Negative times count as 0, as in play
+	t, err := strconv.ParseFloat(c.DefaultQuery("t", "0"), 64)
+	if err != nil || math.IsNaN(t) || t > tsThumbMaxT {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("t must be a time in seconds (0-%d)", tsThumbMaxT)})
+		return
+	}
 	h.s.touch(hash)
+	h.s.adoptSaved(hash) // a saved TorBox source after a restart plays from TorBox
 	// A seek point is asked right before a stream starts: its torrent must stay
 	h.s.seekBegin(hash)
 	defer h.s.seekEnd(hash)
-	t, _ := strconv.ParseFloat(c.DefaultQuery("t", "0"), 64)
 	if t <= 0 {
 		c.JSON(http.StatusOK, gin.H{"t": 0})
 		return

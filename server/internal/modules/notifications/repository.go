@@ -24,7 +24,7 @@ const (
 	maxReadIDs    = 500
 )
 
-// stateOwner is the redis key suffix for a profile; requests without X-User-ID share one key.
+// stateOwner is the redis key suffix for a profile; requests without a known profile share one key.
 func stateOwner(profile uint) string {
 	if profile == 0 {
 		return "shared"
@@ -124,16 +124,17 @@ func (r *repository) seenAt(ctx context.Context, owner string) (int64, error) {
 	return v, err
 }
 
+// setSeenScript keeps the larger of the stored and the given timestamp in one atomic step.
+var setSeenScript = redis.NewScript(`
+local v = ARGV[1]
+local cur = redis.call('GET', KEYS[1])
+if cur and tonumber(cur) and tonumber(cur) > tonumber(v) then v = cur end
+redis.call('SET', KEYS[1], v, 'EX', ARGV[2])
+return 1`)
+
 // setSeen moves the owner's "seen up to" timestamp forward (never back).
 func (r *repository) setSeen(ctx context.Context, owner string, unix int64) error {
-	cur, err := r.seenAt(ctx, owner)
-	if err != nil {
-		return err
-	}
-	if unix < cur {
-		unix = cur
-	}
-	return r.rdb.Set(ctx, seenKeyPrefix+owner, unix, stateTTL).Err()
+	return setSeenScript.Run(ctx, r.rdb, []string{seenKeyPrefix + owner}, unix, int64(stateTTL/time.Second)).Err()
 }
 
 // purgeNonTMDB removes leftovers of the old local-media generators; false when redis did not answer.

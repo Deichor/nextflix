@@ -39,9 +39,10 @@ const (
 
 	tsSourceTorBox = "torbox" // tsResolveResult.Source of a debrid source
 
-	tsDebridSourceIdle = 6 * time.Hour   // a registered source nothing asked for this long is forgotten
-	tsDebridKeep       = 24 * time.Hour  // torrent ids and "added" marks of unregistered hashes
-	tsDebridPruneEvery = 5 * time.Minute // how often the maps above are pruned
+	tsDebridSourceIdle = 6 * time.Hour    // a registered source nothing asked for this long is forgotten
+	tsDebridKeep       = 24 * time.Hour   // torrent ids and "added" marks of unregistered hashes
+	tsDebridPruneEvery = 5 * time.Minute  // how often the maps above are pruned
+	tsDebridRemapRetry = 30 * time.Second // a debrid file TorrServer could not find is looked up again after this
 )
 
 var (
@@ -106,6 +107,7 @@ type tsDebrid struct {
 	links     map[string]*tsDebridLink      // "hash:index" -> download link
 	calls     map[string]*tsDebridCall      // running link requests
 	remaps    map[string]int                // "hash:index" -> TorrServer file id (fallback)
+	noRemap   map[string]time.Time          // "hash:index" -> when TorrServer could not find it
 	broken    map[string]time.Time          // "hash:index" -> when its CDN reads gave up (plays from TorrServer for a while)
 	warmed    map[string]time.Time          // "hash:index" -> last keep-alive read
 	downUntil time.Time
@@ -127,7 +129,7 @@ func newDebrid(s *Service, base string) *tsDebrid {
 	d := &tsDebrid{
 		s: s, base: base, hc: torbox.NewHTTPClient(),
 		checks: map[string]tsDebridCheck{}, sources: map[string]*tsDebridTorrent{}, torrents: map[string]tsDebridTorrentRef{},
-		links: map[string]*tsDebridLink{}, calls: map[string]*tsDebridCall{}, remaps: map[string]int{},
+		links: map[string]*tsDebridLink{}, calls: map[string]*tsDebridCall{}, remaps: map[string]int{}, noRemap: map[string]time.Time{},
 		broken: map[string]time.Time{}, warmed: map[string]time.Time{},
 		added: map[string]time.Time{}, adoptTried: map[string]time.Time{},
 	}
@@ -172,6 +174,7 @@ func (d *tsDebrid) pruneDebrid(now time.Time) {
 			}
 		}
 	}
+	prune(d.noRemap, tsDebridRemapRetry)
 	prune(d.warmed, tsDebridWarmEvery)
 	prune(d.broken, tsDebridBrokenFor)
 	prune(d.added, tsDebridKeep)
@@ -681,15 +684,35 @@ func (s *Service) debridURL(hash string, index int) (string, bool) {
 }
 
 // torrServerIndex finds a debrid source's file in TorrServer (fallback): TorBox's list
-// order need not be the torrent's.
+// order need not be the torrent's. -1 when TorrServer cannot tell (TorBox's index could
+// play the wrong file of a pack); that answer is kept for tsDebridRemapRetry.
 func (d *tsDebrid) torrServerIndex(src tsDebridSource) int {
 	k := tsDebridKey(src.hash, src.index)
 	d.mu.Lock()
 	idx, ok := d.remaps[k]
+	failedAt, failed := d.noRemap[k]
 	d.mu.Unlock()
 	if ok {
 		return idx
 	}
+	if failed && time.Since(failedAt) < tsDebridRemapRetry {
+		return -1
+	}
+	id, err := d.findInTorrServer(src)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil {
+		d.noRemap[k] = time.Now()
+		log.Printf("torbox: %s:%d not found in TorrServer: %v", tsShortHash(src.hash), src.index, err)
+		return -1
+	}
+	delete(d.noRemap, k)
+	d.remaps[k] = id
+	return id
+}
+
+// findInTorrServer is TorrServer's file id of a debrid source, matched by path and size.
+func (d *tsDebrid) findInTorrServer(src tsDebridSource) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	link := src.magnet
@@ -699,16 +722,19 @@ func (d *tsDebrid) torrServerIndex(src tsDebridSource) int {
 	statURL := d.s.torrServerURL() + "/stream?" + url.Values{"link": {link}, "stat": {""}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statURL, nil)
 	if err != nil {
-		return src.index
+		return 0, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return src.index
+		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("stat: HTTP %d", resp.StatusCode)
+	}
 	var st tsTorrentStat
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&st) != nil {
-		return src.index
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return 0, fmt.Errorf("stat: %w", err)
 	}
 	files := make([]torbox.File, 0, len(st.FileStats))
 	for _, f := range st.FileStats {
@@ -716,12 +742,9 @@ func (d *tsDebrid) torrServerIndex(src tsDebridSource) int {
 	}
 	id, found := tsDebridMatchFile(files, tsDebridSource{path: src.path, size: src.size}, nil)
 	if !found {
-		return src.index
+		return 0, fmt.Errorf("no file %q of %d bytes", path.Base(src.path), src.size)
 	}
-	d.mu.Lock()
-	d.remaps[k] = int(id)
-	d.mu.Unlock()
-	return int(id)
+	return int(id), nil
 }
 
 // debridStat answers TorrServer's stat for a debrid source from what is known (name and

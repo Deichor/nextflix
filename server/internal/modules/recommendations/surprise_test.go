@@ -486,6 +486,15 @@ func TestTasteSeedsOrder(t *testing.T) {
 	}
 }
 
+func TestEveryTVGenreKnown(t *testing.T) {
+	// TMDB's TV genres: Action & Adventure ... Talk, War & Politics
+	for _, g := range []int{10759, 16, 35, 80, 99, 18, 10751, 10762, 9648, 10763, 10764, 10765, 10766, 10767, 10768, 37} {
+		if tvGenre(canonGenre(g)) == 0 {
+			t.Errorf("TV genre %d has no TV discover genre", g)
+		}
+	}
+}
+
 func TestParseExclude(t *testing.T) {
 	got := ParseExclude("movie-1, tv:2,person-3,movie-x,,tv-0")
 	if !reflect.DeepEqual(got, []titleKey{keyOf("movie", 1), keyOf("tv", 2)}) {

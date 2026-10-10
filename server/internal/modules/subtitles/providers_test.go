@@ -256,6 +256,19 @@ func TestEpisodeOf(t *testing.T) {
 	}
 }
 
+func TestPickFromArchiveLanguageLookalike(t *testing.T) {
+	// "Danish" in the title reads as another language; the only file is still the subtitle
+	raw := makeZip(t, map[string]string{"The.Danish.Girl.2015.720p.srt": "1\n00:00:01,000 --> 00:00:02,000\nMerhaba\n"})
+	if _, name, err := pickFromArchive(raw, 0, 0, "tr"); err != nil || name != "The.Danish.Girl.2015.720p.srt" {
+		t.Fatalf("picked %q: %v", name, err)
+	}
+	// with a file in the asked language, that one wins
+	raw = makeZip(t, map[string]string{"Movie.da.srt": "x", "Movie.tr.srt": "y"})
+	if _, name, _ := pickFromArchive(raw, 0, 0, "tr"); name != "Movie.tr.srt" {
+		t.Fatalf("picked %q", name)
+	}
+}
+
 func TestRarReported(t *testing.T) {
 	if _, _, err := pickFromArchive([]byte("Rar!\x1a\x07\x00rest"), 0, 0, ""); !errors.Is(err, ErrRarUnsupported) {
 		t.Fatal(err)

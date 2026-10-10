@@ -38,18 +38,22 @@ func (s *Service) DeleteByProfile(tx *gorm.DB, id uint) error {
 // Save upserts a resume position keyed by (profile, media_type, tmdb_id, season, episode).
 // The handler validates the input first.
 func (s *Service) Save(row StreamProgress) (*StreamProgress, error) {
-	ok, err := profileExists(s.db, row.ProfileID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrUnknownProfile
-	}
 	now := time.Now()
 	row.ID = 0
 	row.Hash = strings.ToLower(strings.TrimSpace(row.Hash))
 	row.CreatedAt, row.UpdatedAt = now, now
-	if err := upsert(s.db, &row); err != nil {
+	// Check and write in one (immediate) transaction so a concurrent profile delete cannot leave orphans
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		ok, err := profileExists(tx, row.ProfileID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrUnknownProfile
+		}
+		return upsert(tx, &row)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return findByKey(s.db, row.ProfileID, row.MediaType, row.TmdbID, row.Season, row.Episode)

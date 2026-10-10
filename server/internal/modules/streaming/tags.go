@@ -346,14 +346,16 @@ func tsMergeProbed(name, probed tsTags) tsTags {
 	} else if probed.Atmos {
 		t.Atmos = true
 	}
-	if probed.DV {
-		t.DV = true
-	}
 	t.DVOnly = probed.DVOnly
-	if t.DVOnly {
-		t.HDR10, t.HDR10Plus = false, false
-	} else if probed.HDR10 {
-		t.HDR10 = true
+	switch {
+	case probed.Video != "":
+		// The probe cannot see HDR10+ metadata: the name's tag stays on an HDR10 base layer
+		t.DV, t.HDR10 = probed.DV, probed.HDR10
+		t.HDR10Plus = name.HDR10Plus && probed.HDR10
+	case t.DVOnly:
+		t.DV, t.HDR10, t.HDR10Plus = true, false, false
+	case probed.DV:
+		t.DV = true
 	}
 	t.Undecodable = probed.Undecodable
 	t.Video = probed.Video

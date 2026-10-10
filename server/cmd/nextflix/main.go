@@ -117,6 +117,7 @@ func run() error {
 	providersSvc := providers.NewService(tm)
 
 	notificationsSvc := notifications.NewService(rc, tm)
+	notificationsSvc.SetProfiles(profilesSvc.Exists)
 	go notificationsSvc.Start(ctx)
 	defer notificationsSvc.Close()
 

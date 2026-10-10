@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -137,6 +138,8 @@ func (s *Service) afterPick(key string, res *tsResolveResult, seed *tsUpgradeSee
 	var watch *tsUpgradeWatch
 	if q.hevc && q.maxQ == 0 && floor < 2160 && seed.hasAbove(floor) {
 		if u, ok := s.beginUpgrade(key); ok {
+			// The watch and the checks below share the seed: it ends once both are done
+			seed.cancel = tsCancelAfter(2, seed.cancel)
 			watch = s.newUpgradeWatch(u, key, seed, floor)
 		}
 	}
@@ -187,15 +190,11 @@ func (s *Service) afterPick(key string, res *tsResolveResult, seed *tsUpgradeSee
 		watch.start()
 	}
 	if pending == 0 {
-		if watch == nil {
-			seed.cancel()
-		}
+		seed.cancel()
 		return
 	}
 	go func() {
-		if watch == nil {
-			defer seed.cancel()
-		}
+		defer seed.cancel()
 		for pending > 0 {
 			select {
 			case o := <-seed.pick.later:
@@ -224,6 +223,18 @@ func (s *Service) afterPick(key string, res *tsResolveResult, seed *tsUpgradeSee
 			}
 		}
 	}()
+}
+
+// tsCancelAfter returns a cancel func for n owners that each call it once: cancel runs on
+// the last call.
+func tsCancelAfter(n int32, cancel context.CancelFunc) context.CancelFunc {
+	var left atomic.Int32
+	left.Store(n)
+	return func() {
+		if left.Add(-1) == 0 {
+			cancel()
+		}
+	}
 }
 
 // watchUpgrade follows the candidates of an upgrade search above floor until one keeps up,

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"path"
 	"regexp"
 	"strconv"
@@ -102,7 +103,7 @@ func pickFromArchive(raw []byte, season, episode int, lang string) ([]byte, stri
 		return nil, "", err
 	}
 	var best *zip.File
-	bestScore := -1
+	bestScore := math.MinInt // a language penalty only ranks: a file that is alone is still picked
 	for _, f := range zr.File {
 		extScore, ok := subtitleEntry(f)
 		if !ok {

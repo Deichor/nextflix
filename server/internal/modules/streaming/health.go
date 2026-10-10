@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -525,6 +526,20 @@ func (m *tsWarmMeter) health(need int64) *tsHealth {
 	return h
 }
 
+// wholeRead is the health of a read that ended (EOF or tsWarmMaxBytes) before the verdict
+// window could judge it: a fast source finishes a short read in a few seconds, so the rate
+// of the whole read decides.
+func (m *tsWarmMeter) wholeRead(need int64) *tsHealth {
+	h := m.health(need)
+	if n := len(m.samples); n > 0 {
+		rate := m.rate(tsWarmSample{}, m.samples[n-1])
+		h.Rate, h.Peak = int64(rate), max(h.Peak, int64(rate))
+		h.KeepsUp = rate >= m.enough
+		h.Dead = m.dead && !h.KeepsUp
+	}
+	return h
+}
+
 // series lists each poll's read rate / TorrServer speed in MB/s ("-" = stat failed).
 func (m *tsWarmMeter) series() string {
 	var b strings.Builder
@@ -586,14 +601,14 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 	defer cancel() // also stops the read
 
 	var read atomic.Int64
-	var failed atomic.Bool
+	var failed, complete atomic.Bool
 	ended := make(chan struct{})
 	start := time.Now()
 	go func() {
 		defer close(ended)
-		if !tsReadInto(rctx, s.fileURL(hash, index), offset, &read) {
-			failed.Store(true)
-		}
+		opened, whole := tsReadInto(rctx, s.fileURL(hash, index), offset, &read)
+		failed.Store(!opened)
+		complete.Store(whole)
 	}()
 
 	m := newWarmMeter(need)
@@ -633,6 +648,9 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 			hooks.live(h)
 		}
 		if done || finished {
+			if complete.Load() && !verdict {
+				return m.wholeRead(need), false
+			}
 			return m.health(need), false
 		}
 		// A resolve's checks turn background once it answered; another title's playback
@@ -648,30 +666,31 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 }
 
 // tsReadInto streams src from offset into total until ctx ends, tsWarmMaxBytes or EOF.
-// It is false when the file could not be opened (no answer within ctx is a measured zero).
-func tsReadInto(ctx context.Context, src string, offset int64, total *atomic.Int64) bool {
+// opened is false when the file could not be opened (no answer within ctx is a measured
+// zero); complete reports that the read reached EOF or tsWarmMaxBytes.
+func tsReadInto(ctx context.Context, src string, offset int64, total *atomic.Int64) (opened, complete bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return ctx.Err() != nil
+		return ctx.Err() != nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return false
+		return false, false
 	}
 	buf := make([]byte, 64<<10)
 	for total.Load() < tsWarmMaxBytes {
 		n, err := resp.Body.Read(buf)
 		total.Add(int64(n))
 		if err != nil {
-			return true
+			return true, err == io.EOF
 		}
 	}
-	return true
+	return true, true
 }
 
 func (s *Service) swarmStat(ctx context.Context, hash string, out *tsSwarmStat) error {

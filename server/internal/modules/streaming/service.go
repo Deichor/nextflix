@@ -34,6 +34,7 @@ type Service struct {
 	jackettBase  sync.Map // "base" -> last Jackett URL that answered
 	runtimes     sync.Map // "movie:id" / "tv:id:s:e" -> tsRuntimeEntry
 	titles       sync.Map // "movie:id" / "tv:id" -> English TMDB title
+	origLangs    sync.Map // "movie:id" / "tv:id" -> *tsOrigLangCall (lang.go)
 	imdbTitles   sync.Map // IMDb id -> tsIMDbTitle
 	seasonEps    sync.Map // TMDB tv id -> tsSeasonEpsEntry (episodes per season)
 	bitsearch    *bitsearch

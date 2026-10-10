@@ -14,6 +14,11 @@ type ProfileDataCleaner interface {
 	DeleteByProfile(tx *gorm.DB, profileID uint) error
 }
 
+// ProfileDeletedHook is optionally implemented by cleaners that must act only after the deletion committed.
+type ProfileDeletedHook interface {
+	ProfileDeleted(profileID uint)
+}
+
 type Service struct {
 	db       *gorm.DB
 	cleaners []ProfileDataCleaner
@@ -144,15 +149,37 @@ func (s *Service) Create(in Input) (*Profile, error) {
 	return &p, nil
 }
 
+// Update writes the editable fields; ErrNotFound when the profile was deleted meanwhile.
+// (Save would re-insert a deleted row and bypass MaxProfiles.)
 func (s *Service) Update(p *Profile, in Input) error {
 	if err := in.applyTo(p); err != nil {
 		return err
 	}
-	return s.db.Save(p).Error
+	res := s.db.Model(p).Select("name", "avatar", "color", "language", "updated_at").Updates(p)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
-// Delete removes a profile and all its per-profile data in one transaction.
+// Delete removes a profile and all its per-profile data in one transaction,
+// then tells cleaners that implement ProfileDeletedHook.
 func (s *Service) Delete(id uint) error {
+	if err := s.delete(id); err != nil {
+		return err
+	}
+	for _, c := range s.cleaners {
+		if h, ok := c.(ProfileDeletedHook); ok {
+			h.ProfileDeleted(id)
+		}
+	}
+	return nil
+}
+
+func (s *Service) delete(id uint) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		n, err := countProfiles(tx)
 		if err != nil {

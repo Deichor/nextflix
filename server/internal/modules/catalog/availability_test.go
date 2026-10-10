@@ -227,6 +227,8 @@ func TestAvailabilityWithHomeRelease(t *testing.T) {
 		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(-1))}, true},
 		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(5)), DigitalDate: ptr(day(5))}, true},
 		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(5))}, false},
+		// cinema release still ahead, even with a digital date after it
+		{Availability{Status: StatusNotReleased, ReleaseDate: ptr(day(5)), TheatricalDate: ptr(day(5)), DigitalDate: ptr(day(40))}, false},
 		{Availability{Status: StatusAvailable}, false},
 		{Availability{Status: StatusUnknown}, false},
 	} {

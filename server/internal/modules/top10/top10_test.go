@@ -1,6 +1,8 @@
 package top10
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -167,9 +169,12 @@ func TestRefreshMapsAndFallsBack(t *testing.T) {
 		CountriesURLs: []string{srv.URL + "/down/countries.tsv", srv.URL + "/mirror/countries.tsv"},
 		GlobalURLs:    []string{srv.URL + "/down/global.tsv", srv.URL + "/mirror/global.tsv"},
 	})
-	// The global titles are unknown to the fake TMDB, so only that part may fail
-	if err := s.Refresh(t.Context()); err != nil && !strings.Contains(err.Error(), "global") {
+	// The global titles are unknown to the fake TMDB: those lists are skipped, the refresh succeeds
+	if err := s.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	if l, ok := s.Get(Global, "movie"); ok {
+		t.Fatalf("global list without matches: %+v", l)
 	}
 
 	films, ok := s.Get("TR", "movie")
@@ -270,5 +275,69 @@ func TestGetInLocalizesWithoutChangingRanks(t *testing.T) {
 	// The stored English list is untouched
 	if got, _ := s.GetIn(Global, "movie", "en"); got.Items[0].Title != "Inception" {
 		t.Errorf("english list changed: %+v", got.Items[0])
+	}
+}
+
+func TestPublishKeepsNewerStoredWeek(t *testing.T) {
+	db := testDB(t)
+	s := NewService(db, fakeTMDB(), Config{})
+	if err := s.publish(t.Context(), "TR", "movie", "2026-10-04", []entry{{Rank: 1, Title: "UNABOMBER"}}); err != nil {
+		t.Fatal(err)
+	}
+	// An old archived copy must not replace the current week
+	if err := s.publish(t.Context(), "TR", "movie", "2026-09-06", []entry{{Rank: 1, Title: "The Mummy"}}); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := s.Get("TR", "movie"); l.Week != "2026-10-04" || l.Items[0].TmdbID != 11 {
+		t.Fatalf("memory list replaced: %+v", l)
+	}
+	var row storedList
+	if err := db.First(&row, "region = ? AND media_type = ?", "TR", "movie").Error; err != nil || row.Week != "2026-10-04" {
+		t.Fatalf("stored list replaced: %+v %v", row, err)
+	}
+}
+
+type cancelSearcher struct {
+	*fakeSearcher
+	cancel func()
+}
+
+func (c cancelSearcher) SearchMovies(q string) ([]Match, error) {
+	c.cancel()
+	return c.fakeSearcher.SearchMovies(q)
+}
+
+func TestPublishCancelledDoesNotSavePartialList(t *testing.T) {
+	db := testDB(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	s := NewService(db, cancelSearcher{fakeTMDB(), cancel}, Config{})
+	entries := []entry{{Rank: 1, Title: "UNABOMBER"}, {Rank: 2, Title: "Sonic the Hedgehog 3"}, {Rank: 3, Title: "The Mummy"}}
+	if err := s.publish(ctx, "TR", "movie", "2026-10-04", entries); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if l, ok := s.Get("TR", "movie"); ok {
+		t.Fatalf("partial list published: %+v", l)
+	}
+	var n int64
+	db.Model(&storedList{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d lists stored", n)
+	}
+}
+
+type failingSearcher struct{}
+
+func (failingSearcher) SearchMovies(string) ([]Match, error) { return nil, errors.New("tmdb down") }
+func (failingSearcher) SearchTV(string) ([]Match, error)     { return nil, errors.New("tmdb down") }
+
+func TestPublishNoMatchFailsOnlyOnSearchErrors(t *testing.T) {
+	unknown := []entry{{Rank: 1, Title: "Nobody Knows"}}
+	s := NewService(testDB(t), fakeTMDB(), Config{})
+	if err := s.publish(t.Context(), Global, "movie", "2026-10-04", unknown); err != nil {
+		t.Fatalf("a list without matches failed the refresh: %v", err)
+	}
+	s = NewService(testDB(t), failingSearcher{}, Config{})
+	if err := s.publish(t.Context(), Global, "movie", "2026-10-04", unknown); err == nil {
+		t.Fatal("a TMDB outage must still fail the refresh")
 	}
 }

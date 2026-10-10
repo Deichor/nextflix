@@ -271,6 +271,64 @@ func TestPrefetchDeferredDuringPlayback(t *testing.T) {
 	}
 }
 
+// A prefetch put off without a pause (the playback ended before the next tick), or by a
+// resolve that timed out after its title resumed, still starts once nothing blocks it.
+func TestDeferredPrefetchStartsWithoutPause(t *testing.T) {
+	s, _ := newWarmService(t)
+	shortPriority(s, 20*time.Millisecond)
+	waitSource := func(w *tsWarm, want string) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			s.warmMu.Lock()
+			src := w.source
+			s.warmMu.Unlock()
+			if src == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the deferred prefetch never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	playing := warmWith(s, tsResolveQuery{mediaType: "movie", title: "Spider-Man", year: 2002}, hx('a'))
+	s.setSource(playing, hx('a'))
+
+	// (a) deferred while another title played, which ended before any tick paused it
+	charade := tsResolveQuery{mediaType: "movie", title: "Charade", year: 1963}
+	s.storeSource(tsResolveKey(charade), tsResolveResult{Hash: hx('c'), Magnet: "magnet:?xt=urn:btih:" + hx('c'), Quality: "1080p"})
+	w := s.holdWarm(tsResolveKey(charade))
+	s.playBegin(hx('a'))
+	if s.warmYield(w) == "" {
+		t.Fatal("no yield during playback")
+	}
+	s.deferPrefetch(w, charade)
+	s.playEnd(hx('a'))
+	time.Sleep(40 * time.Millisecond)
+	s.priorityTick(time.Now())
+	waitSource(w, hx('c'))
+
+	// (b) paused and resumed, then its resolve failed and put the prefetch off again
+	vertigo := tsResolveQuery{mediaType: "movie", title: "Vertigo", year: 1958}
+	s.storeSource(tsResolveKey(vertigo), tsResolveResult{Hash: hx('d'), Magnet: "magnet:?xt=urn:btih:" + hx('d'), Quality: "1080p"})
+	v := s.holdWarm(tsResolveKey(vertigo))
+	s.playBegin(hx('a'))
+	s.priorityTick(time.Now())
+	if !pausedOf(s, v) {
+		t.Fatal("not paused during playback")
+	}
+	s.playEnd(hx('a'))
+	time.Sleep(40 * time.Millisecond)
+	s.priorityTick(time.Now())
+	if pausedOf(s, v) {
+		t.Fatal("not resumed")
+	}
+	s.deferPrefetch(v, vertigo)
+	s.priorityTick(time.Now())
+	waitSource(v, hx('d'))
+}
+
 func TestTitleGroup(t *testing.T) {
 	a := tsResolveKey(tsResolveQuery{mediaType: "tv", title: "Pioneer One", year: 2010, season: 1, episode: 1, hevc: true})
 	b := tsResolveKey(tsResolveQuery{mediaType: "tv", title: "Pioneer One", year: 2010, season: 2, episode: 5, maxQ: 720})

@@ -46,25 +46,29 @@ var tsTuningBool = map[string]bool{
 
 var tuneOnce sync.Once
 
+// tsTuneRetryStep: the wait after tuning attempt n is n times this.
+var tsTuneRetryStep = 5 * time.Second
+
 // startTorrServerTuning applies tsTuningMin in the background once per process.
 // TorrServer may still be starting, so it retries for a while and only logs failures.
 func (s *Service) startTorrServerTuning() {
-	tuneOnce.Do(func() {
-		go func() {
-			for attempt := 1; attempt <= 8; attempt++ {
-				changed, err := s.tuneTorrServer(context.Background())
-				if err == nil {
-					if changed {
-						log.Printf("torrserver: streaming settings applied %v %v %v", tsTuningMin, tsTuningExact, tsTuningBool)
-					}
-					s.startDBPrune()
-					return
-				}
-				log.Printf("torrserver tuning (attempt %d): %v", attempt, err)
-				time.Sleep(time.Duration(attempt*5) * time.Second)
+	tuneOnce.Do(func() { go s.tuneTorrServerRetrying() })
+}
+
+// tuneTorrServerRetrying tries the tuning up to 8 times, then starts the DB prune either way.
+func (s *Service) tuneTorrServerRetrying() {
+	defer s.startDBPrune()
+	for attempt := 1; attempt <= 8; attempt++ {
+		changed, err := s.tuneTorrServer(context.Background())
+		if err == nil {
+			if changed {
+				log.Printf("torrserver: streaming settings applied %v %v %v", tsTuningMin, tsTuningExact, tsTuningBool)
 			}
-		}()
-	})
+			return
+		}
+		log.Printf("torrserver tuning (attempt %d): %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * tsTuneRetryStep)
+	}
 }
 
 // tuneTorrServer raises the settings below tsTuningMin. TorrServer replaces the whole

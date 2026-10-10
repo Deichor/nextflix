@@ -104,6 +104,29 @@ func TestPutUnknownProfileAndHook(t *testing.T) {
 	}
 }
 
+func TestDeleteHookWaitsForCommit(t *testing.T) {
+	db := testDB(t)
+	s := NewService(db, nil)
+	if _, err := s.Put(Update{ProfileID: 2, MediaType: "tv", TmdbID: 1, Favorite: boolp(true)}); err != nil {
+		t.Fatal(err)
+	}
+	var changed []uint
+	s.OnChange(func(id uint) { changed = append(changed, id) })
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := s.DeleteByProfile(tx, 2); err != nil {
+			return err
+		}
+		return errors.New("rollback")
+	})
+	if err == nil || len(changed) != 0 {
+		t.Fatalf("hook ran inside the transaction: %v", changed)
+	}
+	s.ProfileDeleted(2)
+	if len(changed) != 1 || changed[0] != 2 {
+		t.Fatalf("hook calls: %v", changed)
+	}
+}
+
 func TestListFiltersAndFavoriteOrder(t *testing.T) {
 	db := testDB(t)
 	s := NewService(db, nil)
@@ -312,6 +335,31 @@ func TestBackfillMarksTriedRows(t *testing.T) {
 	s.Backfill(t.Context())
 	if calls != 0 {
 		t.Fatalf("lookups = %d, want 0", calls)
+	}
+}
+
+func TestBackfillRunsChangeHookOncePerProfile(t *testing.T) {
+	s := NewService(testDB(t), fakeLookup{550: {"Fight Club", "/fc.jpg", ""}, 13: {"Forrest Gump", "/fg.jpg", ""}})
+	for _, u := range []Update{
+		{ProfileID: 1, MediaType: "movie", TmdbID: 550},
+		{ProfileID: 1, MediaType: "movie", TmdbID: 13},
+		{ProfileID: 2, MediaType: "movie", TmdbID: 99},
+	} {
+		u.Favorite = boolp(true)
+		if _, err := s.Put(u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var changed []uint
+	s.OnChange(func(id uint) { changed = append(changed, id) })
+	s.Backfill(t.Context())
+	if len(changed) != 1 || changed[0] != 1 {
+		t.Fatalf("hook calls: %v", changed)
+	}
+	changed = nil
+	s.Backfill(t.Context())
+	if len(changed) != 0 {
+		t.Fatalf("hook ran without filled rows: %v", changed)
 	}
 }
 

@@ -229,6 +229,9 @@ func tsSubAltScanList(ranked []tsCandidate, known map[string]tsSubAltEntry, q ts
 // (see tsSubAltPick), or nil; then it starts a background scan unless one ran for the title
 // within tsSubAltScanEvery or another title's scan runs. scanning reports a running scan.
 func (s *Service) subaltFor(q tsResolveQuery, current string, curQ int, lang string) (res *tsResolveResult, scanning bool) {
+	if lang == "" {
+		return nil, false // no language to look for: a scan could never match
+	}
 	base := tsResolveBaseKey(q)
 	a := s.subAltOf(base, true)
 	now := time.Now()

@@ -272,3 +272,42 @@ func TestReuseTorrentFileChecksPathAndSize(t *testing.T) {
 		t.Fatal("matched without path or size")
 	}
 }
+
+// A saved season pack on TorBox names its files only by number: the pack name gives their
+// season, so the episode is found by name, not by the saved (TorrServer) index.
+func TestReuseCandidateFindsEpisodeInSeasonPack(t *testing.T) {
+	q := tsResolveQuery{mediaType: "tv", title: "Show", season: 1, episode: 2}
+	c := tsReuseCandidate("Show S01 1080p WEB-DL x264-GRP", tbHash, q)
+	if c.kind != 2 || c.ep.season != 1 || c.quality != 1080 {
+		t.Fatalf("candidate kind %d ep %+v quality %d, want a 1080p season 1 pack", c.kind, c.ep, c.quality)
+	}
+	files := []tsFileStat{{ID: 1, Path: "01.mkv", Length: tsGB}, {ID: 2, Path: "02.mkv", Length: tsGB}}
+	if f, ok := tsReuseFile(files, q, tsSaved{hash: tbHash, index: 1}, c, nil); !ok || f.ID != 2 {
+		t.Fatalf("file %+v %v, want 02.mkv", f, ok)
+	}
+}
+
+// A cinema resolve stepped down keeps its cap before |cinema ("...|max1080|cinema"): an
+// uncapped cinema resume still finds the step down and plays the title's own source.
+func TestStepDownAlternativeCinemaKey(t *testing.T) {
+	s := newDebridService(t, newFakeTorBox(t))
+	low := strings.Repeat("e", 40)
+	cached := &tsResolveResult{Hash: tbHash, Index: 1}
+	for _, cinema := range []bool{false, true} {
+		q := tsResolveQuery{mediaType: "movie", title: "Film", year: 2026, cinema: cinema}
+		capped := q
+		capped.maxQ = 1080
+		data, _ := json.Marshal(tsResolveResult{Hash: low, Index: 1})
+		if err := saveSource(s.db, &StreamSource{SourceKey: tsResolveKey(capped), Result: string(data), ResolvedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if alt := s.stepDownAlternative(tsResolveKey(q), q, tsSaved{hash: low, index: 1}, cached); alt != cached {
+			t.Errorf("cinema %v: %s not seen as a step down of %s", cinema, tsResolveKey(capped), tsResolveKey(q))
+		}
+		// Another title's capped key is no step down of this one
+		other := tsResolveQuery{mediaType: "movie", title: "Film 2", year: 2026, cinema: cinema}
+		if alt := s.stepDownAlternative(tsResolveKey(other), other, tsSaved{hash: low, index: 1}, cached); alt != nil {
+			t.Errorf("cinema %v: step down of another title", cinema)
+		}
+	}
+}

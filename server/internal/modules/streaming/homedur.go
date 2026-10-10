@@ -115,7 +115,10 @@ func (s *Service) noteHomeDurations(q tsResolveQuery, cands []tsCandidate, p *ts
 		var de *tsDurationError
 		switch {
 		case i < len(p.errs) && errors.As(p.errs[i], &de):
-			wrong = append(wrong, strings.ToLower(c.hash))
+			// A .torrent link without a hash cannot be rejected (it would reject every hashless one)
+			if c.hash != "" {
+				wrong = append(wrong, strings.ToLower(c.hash))
+			}
 		case i < len(p.results) && p.results[i] != nil && p.results[i].DurationVerified:
 			fits = true
 		}

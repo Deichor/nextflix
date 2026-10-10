@@ -45,7 +45,7 @@ var (
 		10751: true, 14: true, 36: true, 27: true, 10402: true, 9648: true, 10749: true, 878: true, 53: true,
 		10752: true, 37: true}
 	tvGenreIDs = map[int]bool{10759: true, 16: true, 35: true, 80: true, 99: true, 18: true, 10751: true,
-		10762: true, 9648: true, 10764: true, 10765: true, 10768: true, 37: true}
+		10762: true, 10763: true, 9648: true, 10764: true, 10765: true, 10766: true, 10767: true, 10768: true, 37: true}
 )
 
 // Wild cards: acclaimed titles in these original languages (tv: also series) ...

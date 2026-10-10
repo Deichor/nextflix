@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,10 +30,15 @@ func (h handler) play(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "track must be video or audio"})
 		return
 	}
+	start, _ := strconv.ParseFloat(c.DefaultQuery("t", "0"), 64)
+	if math.IsNaN(start) || start > tsThumbMaxT {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("t must be a time in seconds (0-%d)", tsThumbMaxT)})
+		return
+	}
+	h.s.adoptSaved(hash) // a saved TorBox source after a restart plays from TorBox
 	// A playing torrent is never dropped by the warm-up bookkeeping
 	h.s.playBegin(hash)
 	defer h.s.playEnd(hash)
-	start, _ := strconv.ParseFloat(c.DefaultQuery("t", "0"), 64)
 	audio, _ := strconv.Atoi(c.DefaultQuery("audio", "0"))
 	if start < 0 {
 		start = 0

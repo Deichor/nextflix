@@ -294,6 +294,27 @@ func TestProbedTags(t *testing.T) {
 	}
 }
 
+// HDR follows the file both ways: a name that claims HDR on an SDR file loses it.
+func TestMergeProbedHDRFollowsFile(t *testing.T) {
+	name := tsParseTags("X 2160p WEB-DL DDP5.1 DV HDR10+ H265-GRP")
+	if !name.DV || !name.HDR10 || !name.HDR10Plus {
+		t.Fatalf("name tags %+v", name)
+	}
+	sdr, _ := tsProbedTags(probeOf(dvVideo(0, 0, "")))
+	if m := tsMergeProbed(name, sdr); m.DV || m.HDR10 || m.HDR10Plus || m.DVOnly {
+		t.Fatalf("merged with an SDR file: %+v", m)
+	}
+	hdr10, _ := tsProbedTags(probeOf(dvVideo(0, 0, "smpte2084")))
+	if m := tsMergeProbed(name, hdr10); m.DV || !m.HDR10 || !m.HDR10Plus {
+		t.Fatalf("merged with an HDR10 file: %+v", m)
+	}
+	// An audio-only probe says nothing about the video
+	audio, _ := tsProbedTags(probeOf(tsProbeStream{CodecType: "audio", CodecName: "eac3", Channels: 6}))
+	if m := tsMergeProbed(name, audio); !m.DV || !m.HDR10 || !m.HDR10Plus {
+		t.Fatalf("merged with an audio-only probe: %+v", m)
+	}
+}
+
 // The probe corrects a cut-off name: the rank follows and a DV profile 5 file is unfit for
 // a browser, fine for a DV TV.
 func TestApplyProbedFormat(t *testing.T) {

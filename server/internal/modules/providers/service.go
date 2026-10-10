@@ -1,18 +1,23 @@
 package providers
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
+	"strings"
 
 	"nextflix/internal/platform/tmdb"
 )
 
 // SupportedRegions are merged into one availability view.
 var SupportedRegions = []string{"US", "IN", "BD"}
+
+// minRatedVotes keeps shows with a handful of votes out of the vote_average sorts.
+const minRatedVotes = "200"
 
 // DiscoverResult is a TV show from TMDB /discover/tv.
 type DiscoverResult struct {
@@ -49,8 +54,9 @@ func NewService(tm *tmdb.Client) *Service {
 	return &Service{tm: tm}
 }
 
-// DiscoverTV returns a provider's TV shows merged across regions, sorted by popularity, with
-// names and overviews in lang ("en" or "tr"). The result is cached and shared: copy before modifying.
+// DiscoverTV returns a provider's TV shows merged across regions, ordered by sortBy, with
+// names and overviews in lang ("en" or "tr"). Page n merges page n of every region, so later
+// pages may repeat shows of earlier ones. The result is cached and shared: copy before modifying.
 func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (*ContentResponse, error) {
 	tm := s.tm.WithLang(lang)
 	if sortBy == "" {
@@ -71,6 +77,9 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 				"page":                 {strconv.Itoa(page)},
 				"sort_by":              {sortBy},
 				"language":             {tm.Language()},
+			}
+			if strings.HasPrefix(sortBy, "vote_average.") {
+				params.Set("vote_count.gte", minRatedVotes)
 			}
 			var res struct {
 				TotalPages   int              `json:"total_pages"`
@@ -99,10 +108,10 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 		for _, r := range byID {
 			results = append(results, r)
 		}
-		sort.Slice(results, func(i, j int) bool { return results[i].Popularity > results[j].Popularity })
 		if tm.Lang() != tmdb.LangEN {
 			s.fillFromEnglish(tm.Lang(), results, providerID, page, sortBy)
 		}
+		sortResults(results, sortBy)
 
 		resp := &ContentResponse{
 			ProviderID:   providerID,
@@ -117,6 +126,33 @@ func (s *Service) DiscoverTV(lang string, providerID, page int, sortBy string) (
 			return resp, tmdb.ErrPartial
 		}
 		return resp, nil
+	})
+}
+
+// sortResults orders the merged regions like TMDB's sort_by (ties: popularity, then id).
+func sortResults(results []DiscoverResult, sortBy string) {
+	field, dir, _ := strings.Cut(sortBy, ".")
+	byField := func(a, b DiscoverResult) int {
+		switch field {
+		case "vote_average":
+			return cmp.Compare(a.VoteAverage, b.VoteAverage)
+		case "vote_count":
+			return cmp.Compare(a.VoteCount, b.VoteCount)
+		case "first_air_date":
+			return cmp.Compare(a.FirstAirDate, b.FirstAirDate)
+		case "name":
+			return cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+		case "original_name":
+			return cmp.Compare(strings.ToLower(a.OriginalName), strings.ToLower(b.OriginalName))
+		}
+		return cmp.Compare(a.Popularity, b.Popularity)
+	}
+	slices.SortFunc(results, func(a, b DiscoverResult) int {
+		c := byField(a, b)
+		if dir != "asc" {
+			c = -c
+		}
+		return cmp.Or(c, cmp.Compare(b.Popularity, a.Popularity), cmp.Compare(a.ID, b.ID))
 	})
 }
 

@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -164,5 +165,89 @@ func TestDebridParseRange(t *testing.T) {
 		if first != c.first || last != c.last || suffix != c.suffix || ok != c.ok {
 			t.Errorf("%q: %d %d %d %v", c.in, first, last, suffix, ok)
 		}
+	}
+}
+
+func TestDebridParseContentRange(t *testing.T) {
+	for _, c := range []struct {
+		in                 string
+		start, last, total int64
+		ok                 bool
+	}{
+		{"bytes 0-99/1000", 0, 99, 1000, true},
+		{"bytes */1000", 0, -1, 1000, true},
+		// Unknown total: the size stays unknown, not the end of this range
+		{"bytes 0-4194303/*", 0, 4194303, 0, true},
+		{"bytes 9-1/10", 9, 1, 10, false},
+		{"", 0, 0, 0, false},
+	} {
+		start, last, total, ok := tsParseContentRange(c.in)
+		if start != c.start || last != c.last || total != c.total || ok != c.ok {
+			t.Errorf("%q: %d %d %d %v", c.in, start, last, total, ok)
+		}
+	}
+}
+
+// TorBox lists the file a little larger than the CDN serves: a read past the real end is
+// answered 416 with the real size, and the file is not sent to the swarm.
+func TestDebridProxyShorterFileIsNotBroken(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	if it := s.debrid.item(t.Context(), tbHash); it == nil {
+		t.Fatal("not cached")
+	}
+	size := len(f.content)
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 1, path: tbVideo, size: int64(size + 1000), title: "Movie (2020)"})
+	u := s.fileURL(tbHash, 1)
+	resp, _ := proxyGet(t, u, fmt.Sprintf("bytes=%d-", size+500))
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable || resp.Header.Get("Content-Range") != fmt.Sprintf("bytes */%d", size) {
+		t.Fatalf("past the real end: %d %q", resp.StatusCode, resp.Header.Get("Content-Range"))
+	}
+	if s.debrid.isBroken(tbHash, 1) {
+		t.Fatal("a file shorter than listed is marked broken")
+	}
+	resp, got := proxyGet(t, u, "bytes=100-199")
+	if resp.StatusCode != 206 || !bytes.Equal(got, f.content[100:200]) {
+		t.Fatalf("range after: %d %d bytes", resp.StatusCode, len(got))
+	}
+}
+
+// Suffix ranges of a file whose size the first fetch is still learning (run with -race).
+func TestDebridProxySuffixWhileSizeIsLearned(t *testing.T) {
+	f := newFakeTorBox(t)
+	f.mu.Lock()
+	f.delay = 20 * time.Millisecond
+	f.mu.Unlock()
+	s := newDebridService(t, f)
+	if it := s.debrid.item(t.Context(), tbHash); it == nil {
+		t.Fatal("not cached")
+	}
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 1, path: tbVideo, title: "Movie (2020)"}) // size unknown
+	u := s.fileURL(tbHash, 1)
+	size := len(f.content)
+	var wg sync.WaitGroup
+	errs := make(chan string, 8)
+	for range 8 {
+		wg.Go(func() {
+			req, _ := http.NewRequest(http.MethodGet, u, nil)
+			req.Header.Set("Range", "bytes=-100")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				errs <- err.Error()
+				return
+			}
+			got, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			whole := resp.StatusCode == 200 && bytes.Equal(got, f.content)
+			tail := resp.StatusCode == 206 && bytes.Equal(got, f.content[size-100:])
+			if !whole && !tail {
+				errs <- fmt.Sprintf("status %d, %d bytes", resp.StatusCode, len(got))
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
 	}
 }

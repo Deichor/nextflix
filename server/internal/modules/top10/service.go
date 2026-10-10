@@ -276,11 +276,23 @@ func (s *Service) downloadOne(ctx context.Context, u string, parse func(io.Reade
 	return parse(resp.Body)
 }
 
-// publish maps entries to TMDB and stores the list when at least one title matched.
+// publish maps entries to TMDB and stores the list when at least one title matched. A week
+// older than the stored list (an old archived copy) keeps the stored one.
 func (s *Service) publish(ctx context.Context, region, mediaType, week string, entries []entry) error {
-	items := s.mapEntries(ctx, mediaType, entries)
+	if old, ok := s.Get(region, mediaType); ok && week < old.Week {
+		log.Printf("top10: %s %s: week %s is older than the stored %s, kept", region, mediaType, week, old.Week)
+		return nil
+	}
+	items, searchErr := s.mapEntries(ctx, mediaType, entries)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(items) == 0 {
-		return fmt.Errorf("%s %s %s: no titles matched", region, mediaType, week)
+		if searchErr != nil {
+			return fmt.Errorf("%s %s %s: no titles matched: %w", region, mediaType, week, searchErr)
+		}
+		log.Printf("top10: %s %s %s: no titles matched", region, mediaType, week)
+		return nil
 	}
 	raw, err := json.Marshal(items)
 	if err != nil {
@@ -297,36 +309,41 @@ func (s *Service) publish(ctx context.Context, region, mediaType, week string, e
 }
 
 // mapEntries resolves the top entries to TMDB in rank order; unmatched titles are skipped and
-// a show listed with several seasons appears once, at its best rank.
-func (s *Service) mapEntries(ctx context.Context, mediaType string, entries []entry) []Item {
-	items := make([]Item, 0, listSize)
+// a show listed with several seasons appears once, at its best rank. err is the first failed
+// TMDB search.
+func (s *Service) mapEntries(ctx context.Context, mediaType string, entries []entry) (items []Item, err error) {
+	items = make([]Item, 0, listSize)
 	seen := map[int]bool{}
 	for _, e := range entries {
 		if ctx.Err() != nil || len(items) == listSize {
 			break
 		}
-		m, ok := s.resolve(mediaType, e)
+		m, ok, serr := s.resolve(mediaType, e)
+		if serr != nil && err == nil {
+			err = serr
+		}
 		if !ok || seen[m.TmdbID] {
 			continue
 		}
 		seen[m.TmdbID] = true
 		items = append(items, m.item(e.Rank))
 	}
-	return items
+	return items, err
 }
 
 // resolve returns the cached TMDB match of a title, searching TMDB when the cache has none.
-func (s *Service) resolve(mediaType string, e entry) (mappedTitle, bool) {
+// err is set when the search failed and no cached match was left to fall back on.
+func (s *Service) resolve(mediaType string, e entry) (mappedTitle, bool, error) {
 	key := normTitle(e.Title)
 	var cached mappedTitle
 	err := s.db.Where("media_type = ? AND query = ?", mediaType, key).First(&cached).Error
 	if err == nil {
 		age := time.Since(cached.UpdatedAt)
 		if cached.TmdbID > 0 && age < matchMaxAge {
-			return cached, true
+			return cached, true, nil
 		}
 		if cached.TmdbID == 0 && age < noMatchRetry {
-			return cached, false
+			return cached, false, nil
 		}
 	}
 
@@ -334,9 +351,9 @@ func (s *Service) resolve(mediaType string, e entry) (mappedTitle, bool) {
 	if err != nil {
 		log.Printf("top10: search %q: %v", e.Title, err)
 		if cached.TmdbID > 0 {
-			return cached, true
+			return cached, true, nil
 		}
-		return mappedTitle{}, false
+		return mappedTitle{}, false, err
 	}
 	row := mappedTitle{MediaType: mediaType, Query: key, NetflixTitle: e.Title, UpdatedAt: time.Now()}
 	if found {
@@ -351,7 +368,7 @@ func (s *Service) resolve(mediaType string, e entry) (mappedTitle, bool) {
 	if err != nil {
 		log.Printf("top10: save match %q: %v", e.Title, err)
 	}
-	return row, found
+	return row, found, nil
 }
 
 // searchTitle answers with the first query that has usable results (exact match preferred).

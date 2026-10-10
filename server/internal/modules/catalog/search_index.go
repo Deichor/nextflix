@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,26 +84,29 @@ type indexName struct {
 // indexData is immutable once built. Lookups use sorted slices instead of maps to keep the
 // index small (about 200k titles).
 type indexData struct {
-	titles []IndexTitle
-	names  []indexName
-	grams  map[uint64][]int32 // trigram -> names (slices of one arena)
-	byPhon []int32            // names ordered by phonetic hash
-	sorted []int32            // names ordered by bare text (prefix search)
-	vocab  []string           // every word of every name, sorted
-	keys   []int64            // kind<<32|id of titles, sorted
-	keyIdx []int32            // title index of keys[i]
-	built  time.Time
-	counts sync.Pool // []uint16 per name, reused by candidates
+	titles  []IndexTitle
+	names   []indexName
+	grams   map[uint64][]int32 // trigram -> names (slices of one arena, cap = len)
+	byPhon  []int32            // names ordered by phonetic hash
+	sorted  []int32            // names ordered by bare text (prefix search)
+	vocab   []string           // every word of every name, sorted
+	keys    []int64            // kind<<32|id of titles, sorted
+	keyIdx  []int32            // title index of keys[i]
+	dropped map[uint64]bool    // trigrams in too many names (never scanned)
+	built   time.Time
+	counts  sync.Pool // []uint16 per name, reused by candidates
 }
 
 // TitleIndex is safe for concurrent use; a rebuild swaps the data atomically.
 type TitleIndex struct {
-	data atomic.Pointer[indexData]
+	data    atomic.Pointer[indexData]
+	buildMu sync.Mutex // one build at a time
 
 	mu      sync.Mutex
 	aliases map[aliasKey]string // localized titles learned from TMDB answers
 	dirty   bool
-	pending bool // aliases changed since the last rebuild of the data
+	added   map[aliasKey]string // learned since the last build of the data
+	changed bool                // an alias in the data changed: the next build is a full one
 }
 
 type aliasKey struct {
@@ -155,32 +160,47 @@ func phonHash(n string) uint32 {
 	return h
 }
 
-func buildIndexData(titles []IndexTitle, aliases map[aliasKey]string) *indexData {
-	d := &indexData{titles: titles, grams: make(map[uint64][]int32, 1<<16), built: time.Now()}
-	words := map[string]struct{}{}
-	add := func(entry int32, lang, text string) {
-		n := normalize(text)
-		if !hasLatin(n) {
-			return
-		}
-		bare := stripArticle(n)
-		idx := int32(len(d.names))
-		name := indexName{entry: entry, lang: lang, bare: bare, phon: phonHash(bare)}
-		if lang != "" {
-			name.text = text
-		}
-		name.grams = int16(min(trigrams(bare, func(g uint64) { d.grams[g] = append(d.grams[g], idx) }), math.MaxInt16))
-		d.names = append(d.names, name)
-		for _, w := range strings.Fields(n) {
-			words[w] = struct{}{}
-		}
+// addName adds a searchable name of title entry (lang "" = its original title).
+func (d *indexData) addName(entry int32, lang, text string, words map[string]struct{}) {
+	n := normalize(text)
+	if !hasLatin(n) {
+		return
 	}
+	bare := stripArticle(n)
+	idx := int32(len(d.names))
+	name := indexName{entry: entry, lang: lang, bare: bare, phon: phonHash(bare)}
+	if lang != "" {
+		name.text = text
+	}
+	name.grams = int16(min(trigrams(bare, func(g uint64) {
+		if !d.dropped[g] {
+			d.grams[g] = append(d.grams[g], idx)
+		}
+	}), math.MaxInt16))
+	d.names = append(d.names, name)
+	for _, w := range strings.Fields(n) {
+		words[w] = struct{}{}
+	}
+}
+
+// addAlias adds a localized name of an indexed title that differs from its original title.
+func (d *indexData) addAlias(k aliasKey, text string, words map[string]struct{}) {
+	i, ok := d.title(k.kind, k.id)
+	if !ok || strings.EqualFold(text, d.titles[i].Title) {
+		return
+	}
+	d.addName(i, k.lang, text, words)
+}
+
+func buildIndexData(titles []IndexTitle, aliases map[aliasKey]string) *indexData {
+	d := &indexData{titles: titles, grams: make(map[uint64][]int32, 1<<16), dropped: map[uint64]bool{}, built: time.Now()}
+	words := map[string]struct{}{}
 
 	d.keys = make([]int64, len(titles))
 	order := make([]int32, len(titles))
 	for i, t := range titles {
 		order[i] = int32(i)
-		add(int32(i), "", t.Title)
+		d.addName(int32(i), "", t.Title, words)
 	}
 	sort.Slice(order, func(a, b int) bool {
 		return titleKey(titles[order[a]].Kind, titles[order[a]].ID) < titleKey(titles[order[b]].Kind, titles[order[b]].ID)
@@ -190,11 +210,7 @@ func buildIndexData(titles []IndexTitle, aliases map[aliasKey]string) *indexData
 	}
 	d.keyIdx = order
 	for k, text := range aliases {
-		i, ok := d.title(k.kind, k.id)
-		if !ok || strings.EqualFold(text, titles[i].Title) {
-			continue
-		}
-		add(i, k.lang, text)
+		d.addAlias(k, text, words)
 	}
 
 	// One arena for every posting list (append growth would waste about half)
@@ -207,7 +223,8 @@ func buildIndexData(titles []IndexTitle, aliases map[aliasKey]string) *indexData
 	arena := make([]int32, 0, total)
 	for g, p := range d.grams {
 		if len(p) > maxPostingsScan {
-			delete(d.grams, g) // never scanned
+			delete(d.grams, g)
+			d.dropped[g] = true
 			continue
 		}
 		start := len(arena)
@@ -255,6 +272,58 @@ func (d *indexData) samePhonetic(h uint32) []int32 {
 	return d.byPhon[lo:hi]
 }
 
+// withAliases returns a copy of d with more alias names; the names of the titles are reused,
+// not rebuilt. d itself is not changed.
+func (d *indexData) withAliases(aliases map[aliasKey]string) *indexData {
+	nd := &indexData{titles: d.titles, names: slices.Clip(d.names), grams: maps.Clone(d.grams),
+		keys: d.keys, keyIdx: d.keyIdx, dropped: maps.Clone(d.dropped), built: d.built}
+	if nd.dropped == nil {
+		nd.dropped = map[uint64]bool{}
+	}
+	words := map[string]struct{}{}
+	for k, text := range aliases {
+		nd.addAlias(k, text, words)
+	}
+	added := make([]int32, 0, len(nd.names)-len(d.names))
+	for i := len(d.names); i < len(nd.names); i++ {
+		added = append(added, int32(i))
+		trigrams(nd.names[i].bare, func(g uint64) {
+			if len(nd.grams[g]) > maxPostingsScan {
+				delete(nd.grams, g)
+				nd.dropped[g] = true
+			}
+		})
+	}
+	var newWords []string
+	for w := range words {
+		if !d.knownWord(w) {
+			newWords = append(newWords, w)
+		}
+	}
+	nd.vocab = mergeSorted(d.vocab, newWords, func(a, b string) bool { return a < b })
+	nd.sorted = mergeSorted(d.sorted, added, func(a, b int32) bool { return nd.names[a].bare < nd.names[b].bare })
+	nd.byPhon = mergeSorted(d.byPhon, slices.Clone(added), func(a, b int32) bool { return nd.names[a].phon < nd.names[b].phon })
+	return nd
+}
+
+// mergeSorted returns the sorted a with b (sorted here, in place) merged in.
+func mergeSorted[T any](a, b []T, less func(x, y T) bool) []T {
+	sort.Slice(b, func(i, j int) bool { return less(b[i], b[j]) })
+	out := make([]T, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if less(b[j], a[i]) {
+			out = append(out, b[j])
+			j++
+		} else {
+			out = append(out, a[i])
+			i++
+		}
+	}
+	out = append(out, a[i:]...)
+	return append(out, b[j:]...)
+}
+
 // Learn remembers a localized title of an indexed title (from a TMDB search answer). The
 // names become searchable with the next rebuild (at most every 10 minutes).
 func (ix *TitleIndex) Learn(mediaType string, id int, lang, title string) {
@@ -264,7 +333,8 @@ func (ix *TitleIndex) Learn(mediaType string, id int, lang, title string) {
 	k := aliasKey{kindOf(mediaType), int32(id), lang}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	if ix.aliases[k] == title || len(ix.aliases) >= aliasMax {
+	old, exists := ix.aliases[k]
+	if old == title || (!exists && len(ix.aliases) >= aliasMax) {
 		return
 	}
 	if d := ix.data.Load(); d != nil {
@@ -274,7 +344,15 @@ func (ix *TitleIndex) Learn(mediaType string, id int, lang, title string) {
 		}
 	}
 	ix.aliases[k] = title
-	ix.dirty, ix.pending = true, true
+	ix.dirty = true
+	if _, unbuilt := ix.added[k]; exists && !unbuilt {
+		ix.changed = true
+		return
+	}
+	if ix.added == nil {
+		ix.added = map[aliasKey]string{}
+	}
+	ix.added[k] = title
 }
 
 // Hit is a title the index found for a query.
@@ -675,25 +753,55 @@ func (l *IndexLoader) download(ctx context.Context, kind uint8) ([]IndexTitle, e
 	return nil, lastErr
 }
 
-// replace swaps in new titles (the learned aliases are kept).
+// replace swaps in new titles. The learned aliases are kept, except those of titles that are
+// no longer indexed.
 func (ix *TitleIndex) replace(titles []IndexTitle) {
-	ix.mu.Lock()
-	aliases := make(map[aliasKey]string, len(ix.aliases))
-	for k, v := range ix.aliases {
-		aliases[k] = v
-	}
-	ix.pending = false
-	ix.mu.Unlock()
-	ix.data.Store(buildIndexData(titles, aliases))
+	ix.buildMu.Lock()
+	defer ix.buildMu.Unlock()
+	ix.build(titles)
 }
 
-// rebuildAliases makes the aliases learned since the last build searchable.
-func (ix *TitleIndex) rebuildAliases() {
+func (ix *TitleIndex) build(titles []IndexTitle) {
 	ix.mu.Lock()
-	pending := ix.pending
+	aliases := maps.Clone(ix.aliases)
+	ix.added, ix.changed = nil, false
 	ix.mu.Unlock()
-	if d := ix.data.Load(); pending && d != nil {
-		ix.replace(d.titles)
+	d := buildIndexData(titles, aliases)
+	ix.data.Store(d)
+	if len(titles) == 0 {
+		return
+	}
+	ix.mu.Lock()
+	for k := range ix.aliases {
+		if _, ok := d.title(k.kind, k.id); !ok {
+			delete(ix.aliases, k)
+			delete(ix.added, k)
+			ix.dirty = true
+		}
+	}
+	ix.mu.Unlock()
+}
+
+// rebuildAliases makes the aliases learned since the last build searchable. New aliases are
+// added to the current data; a changed one rebuilds it.
+func (ix *TitleIndex) rebuildAliases() {
+	ix.buildMu.Lock()
+	defer ix.buildMu.Unlock()
+	d := ix.data.Load()
+	if d == nil {
+		return
+	}
+	ix.mu.Lock()
+	added, changed := ix.added, ix.changed
+	if !changed {
+		ix.added = nil
+	}
+	ix.mu.Unlock()
+	switch {
+	case changed:
+		ix.build(d.titles)
+	case len(added) > 0:
+		ix.data.Store(d.withAliases(added))
 	}
 }
 

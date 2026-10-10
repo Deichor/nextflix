@@ -320,3 +320,65 @@ func TestCheckRedirectOption(t *testing.T) {
 		t.Fatalf("err = %v, want the CheckRedirect error", err)
 	}
 }
+
+// A real 429 / 503 must not be hidden by a later reset or the budget running out.
+func TestKeepsLastStatusOverLaterFailures(t *testing.T) {
+	srv, _, _ := server(t, func(n int32, w http.ResponseWriter, _ *http.Request) {
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		reset(t, w)
+	})
+	resp, err := New(Options{Attempts: 2}).Get(context.Background(), srv.URL, nil)
+	if err != nil || resp.Status != http.StatusServiceUnavailable {
+		t.Fatalf("503 then reset: resp=%v err=%v", resp, err)
+	}
+
+	slow, _, _ := server(t, func(n int32, w http.ResponseWriter, r *http.Request) {
+		if n == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+	resp, err = New(Options{Budget: 500 * time.Millisecond}).Get(context.Background(), slow.URL, nil)
+	if err != nil || resp.Status != http.StatusTooManyRequests || resp.Header.Get("Retry-After") != "0" {
+		t.Fatalf("429 then budget: resp=%v err=%v", resp, err)
+	}
+}
+
+func TestHonorsRetryAfter(t *testing.T) {
+	srv, reqs, _ := server(t, func(n int32, w http.ResponseWriter, r *http.Request) {
+		if n == 1 {
+			w.Header().Set("Retry-After", r.URL.Query().Get("ra"))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		ok(w)
+	})
+	c := New(Options{Budget: 3 * time.Second})
+	start := time.Now()
+	resp, err := c.Get(context.Background(), srv.URL+"?ra=1", nil)
+	if err != nil || resp.Status != 200 || reqs.Load() != 2 {
+		t.Fatalf("resp=%v err=%v requests=%d", resp, err, reqs.Load())
+	}
+	if d := time.Since(start); d < time.Second {
+		t.Fatalf("retried after %s, Retry-After was 1s", d)
+	}
+
+	// Longer than the budget: the 429 comes back at once instead of a doomed wait
+	reqs.Store(0)
+	start = time.Now()
+	resp, err = c.Get(context.Background(), srv.URL+"?ra=30", nil)
+	if err != nil || resp.Status != http.StatusTooManyRequests || reqs.Load() != 1 {
+		t.Fatalf("resp=%v err=%v requests=%d", resp, err, reqs.Load())
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("took %s", d)
+	}
+}

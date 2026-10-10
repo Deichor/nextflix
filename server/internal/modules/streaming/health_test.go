@@ -193,6 +193,25 @@ func TestMeasureHealth(t *testing.T) {
 	}
 }
 
+// A read that ends (EOF) before the verdict window could judge it is judged by the rate of
+// the whole read: a fast source finishes the rest of a short episode in a few seconds.
+func TestMeasureHealthShortFastRead(t *testing.T) {
+	fastWarm(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["stat"]; ok {
+			fmt.Fprint(w, `{"download_speed":0,"active_peers":3,"connected_seeders":2}`)
+			return
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(make([]byte, 4<<20))
+	}))
+	defer ts.Close()
+	h := NewService(nil, Config{TorrServerURL: ts.URL}).measureHealth(context.Background(), strings.Repeat("a", 40), 1, int64(tsMB), 3*time.Second)
+	if h == nil || !h.KeepsUp || h.partial || h.Rate < 2*int64(tsMB) {
+		t.Fatalf("short fast read: %v", h)
+	}
+}
+
 // Plan 9 from Outer Space: at the cap a BDRemux whose probe still ran (unknown length) won
 // over the YTS release of verified length on a better rate / need, and the player waited
 // ~11 s for that probe. A verified source that plays with some buffering (x0.5) wins; one

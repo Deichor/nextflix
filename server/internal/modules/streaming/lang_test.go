@@ -1,8 +1,13 @@
 package streaming
 
 import (
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"nextflix/internal/platform/tmdb"
 )
 
 func TestLangCode(t *testing.T) {
@@ -126,5 +131,48 @@ func TestProbedLanguageDemotes(t *testing.T) {
 	q.lang = "tr"
 	if s.applyProbedLanguage(tr, q) {
 		t.Fatal("Turkish dub marked for a Turkish profile")
+	}
+}
+
+// slowLangTMDB answers movie details once release is closed.
+type slowLangTMDB struct {
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (f *slowLangTMDB) GetMovieDetails(id int) (*tmdb.MovieDetails, error) {
+	f.calls.Add(1)
+	<-f.release
+	return &tmdb.MovieDetails{Movie: tmdb.Movie{ID: id, OriginalLanguage: "JA"}}, nil
+}
+
+func (f *slowLangTMDB) GetTVDetails(int) (*tmdb.TVDetails, error) { return nil, errors.New("no tv") }
+
+func (f *slowLangTMDB) GetSeasonDetails(int, int) (*tmdb.Season, error) {
+	return nil, errors.New("no tv")
+}
+
+// With a slow TMDB the checks of a title share one lookup and its wait: the candidates after
+// the first never stall again.
+func TestOriginalLanguageSharedLookup(t *testing.T) {
+	old := tsOrigLangWait
+	tsOrigLangWait = 100 * time.Millisecond
+	t.Cleanup(func() { tsOrigLangWait = old })
+	f := &slowLangTMDB{release: make(chan struct{})}
+	s := NewService(nil, Config{TMDB: f})
+	q := tsResolveQuery{mediaType: "movie", title: "Shogun", tmdbID: 7}
+	start := time.Now()
+	for range 3 {
+		if got := s.originalLanguage(q); got != "" {
+			t.Fatalf("got %q before TMDB answered", got)
+		}
+	}
+	if took := time.Since(start); took > 250*time.Millisecond || f.calls.Load() != 1 {
+		t.Fatalf("3 checks took %s with %d lookups, want one shared wait", took, f.calls.Load())
+	}
+	close(f.release)
+	waitFor(t, func() bool { return s.originalLanguage(q) == "ja" })
+	if n := f.calls.Load(); n != 1 {
+		t.Fatalf("%d lookups, want the answer reused", n)
 	}
 }

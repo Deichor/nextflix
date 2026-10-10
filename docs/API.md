@@ -340,7 +340,7 @@ GET /api/availability?media_type=movie&tmdb_id=27205                       (Ince
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/providers/:id/tv` | TV shows on one streaming provider (TMDB discover, merged across US/IN/BD); `sort_by` (default `popularity.desc`), `page`. Used by the TV Shows page rows |
+| GET | `/api/providers/:id/tv` | TV shows on one streaming provider (TMDB discover, merged across US/IN/BD); `sort_by` (default `popularity.desc`; the merged list keeps that order, `vote_average.*` only counts shows with 200+ votes), `page` (pages may repeat shows of earlier ones). Used by the TV Shows page rows |
 
 ## Notifications (`modules/notifications`)
 

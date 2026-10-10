@@ -172,6 +172,11 @@ func (f *fakeTorBox) cdn(w http.ResponseWriter, r *http.Request) {
 		spec := strings.TrimPrefix(rg, "bytes=")
 		a, b, _ := strings.Cut(spec, "-")
 		start, _ = strconv.ParseInt(a, 10, 64)
+		if start >= size {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
 		if b != "" {
 			end, _ = strconv.ParseInt(b, 10, 64)
 		}
@@ -289,8 +294,9 @@ func TestDebridFallsBackWhenTorBoxFails(t *testing.T) {
 	f.mu.Lock()
 	f.failAPI = http.StatusForbidden // key revoked / plan expired
 	f.mu.Unlock()
+	// TorrServer is unreachable too, so the file's TorrServer id is unknown
 	u := s.fileURL(tbHash, 1)
-	if !strings.HasPrefix(u, "http://127.0.0.1:1/stream?link="+tbHash+"&index=1&play") {
+	if !strings.HasPrefix(u, "http://127.0.0.1:1/stream?link="+tbHash+"&index=-1&play") {
 		t.Fatalf("fileURL %q, want TorrServer", u)
 	}
 	if s.debrid.usable() {
@@ -641,5 +647,54 @@ func TestDebridPruneForgetsIdleState(t *testing.T) {
 	}
 	if _, ok := d.torrents[other]; !ok || len(d.torrents) != 1 {
 		t.Fatalf("torrents %v: want only the registered hash", d.torrents)
+	}
+}
+
+// TorrServer cannot list the torrent: the file id is unknown (-1), never TorBox's list
+// position, and TorrServer is not asked again on the next read.
+func TestDebridOffUnknownIndexIsNotGuessed(t *testing.T) {
+	f := newFakeTorBox(t)
+	var hits atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(ts.Close)
+	s := reuseSetup(t, f, ts.URL, false)
+	s.debrid.register(tsDebridSource{hash: tbHash, index: 1, path: tbVideo, size: 3 << 20, title: "Movie (2020)"})
+	want := ts.URL + "/stream?link=" + tbHash + "&index=-1&play"
+	for range 2 {
+		if u := s.fileURL(tbHash, 1); u != want {
+			t.Fatalf("fileURL %q, want %q", u, want)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("TorrServer asked %d times, want 1", hits.Load())
+	}
+}
+
+// Nothing fits the caps by name: with "prefer TorBox" the candidates keep the fallback order
+// (cheapest first) and leave out the avoided torrents.
+func TestDebridOverCapKeepsTheFallbackOrder(t *testing.T) {
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	avoided, other := strings.Repeat("c", 40), strings.Repeat("b", 40)
+	q := tsResolveQuery{mediaType: "movie", title: "Movie", year: 2020, runtime: 90, maxQ: 720, avoid: []string{avoided}}
+	rel := func(name, hash string, size int64) JackettResult {
+		return JackettResult{Title: name, Seeders: 40, Size: size, MagnetUri: "magnet:?xt=urn:btih:" + hash}
+	}
+	raw := []JackettResult{
+		rel("Movie.2020.2160p.WEB-DL.x264", tbHash, 8*tsGB),
+		rel("Movie.2020.1080p.WEB-DL.x264", other, 4*tsGB),
+		rel("Movie.2020.1080p.BluRay.x264", avoided, 6*tsGB),
+	}
+	cands := s.fallbackCandidates(q, raw, nil, nil)
+	q.overCap = true
+	got, items := s.debridCandidates(context.Background(), q, raw, cands)
+	if items[tbHash] == nil {
+		t.Fatal("the 2160p one is not cached")
+	}
+	if len(got) != 2 || got[0].hash != other || got[1].hash != tbHash {
+		t.Fatalf("candidates %q", titles(got))
 	}
 }

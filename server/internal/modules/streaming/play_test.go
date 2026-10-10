@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -84,5 +85,60 @@ func TestPlayAnswers503WhenTranscodesAreFull(t *testing.T) {
 	s.warmMu.Unlock()
 	if n != 0 {
 		t.Fatalf("refused stream still counted as playing (%d)", n)
+	}
+}
+
+// ?t= that is no usable time is refused before ffmpeg or the play bookkeeping start.
+func TestPlayRejectsBadTimes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := NewService(nil, Config{TorrServerURL: "http://127.0.0.1:1"})
+	s.probeFn = func(ctx context.Context, hash string, index int) (*tsProbe, error) {
+		t.Fatal("probed a refused request")
+		return nil, nil
+	}
+	r := gin.New()
+	r.GET("/play", newHandler(s).play)
+	for _, v := range []string{"NaN", "Inf", "1e300"} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/play?hash="+hx('a')+"&index=0&t="+v, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("t=%s: %d %s", v, w.Code, w.Body)
+		}
+	}
+}
+
+// savedTorBoxService is a fresh process (nothing registered yet) whose source cache names
+// tbHash:1 as a TorBox source.
+func savedTorBoxService(t *testing.T) *Service {
+	t.Helper()
+	f := newFakeTorBox(t)
+	s := newDebridService(t, f)
+	res := tsResolveResult{Magnet: tsBuildMagnet(tbHash, "Movie (2020)", nil), Hash: tbHash, Index: 1, FileName: "Movie.2020.1080p.mkv",
+		TorrentTitle: "Movie (2020)", Size: 3 << 20, Source: tsSourceTorBox, Debrid: true}
+	data, _ := json.Marshal(res)
+	if err := saveSource(s.db, &StreamSource{SourceKey: "v10|movie|movie|2020|0|0|hevc", Result: string(data), ResolvedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	return NewService(s.db, Config{TorBoxURL: f.srv.URL, TorrServerURL: "http://127.0.0.1:1"})
+}
+
+// After a restart a play of a saved TorBox source (no probe call before it) reads the file
+// from TorBox, not TorrServer with TorBox's list position as the file id.
+func TestPlayAdoptsSavedTorBoxSource(t *testing.T) {
+	withTranscodes(t, 1, 20*time.Millisecond)
+	tsTranscodes <- struct{}{} // re-encode refused: the play ends after the probe
+	s := savedTorBoxService(t)
+	var probed string
+	s.probeFn = func(ctx context.Context, hash string, index int) (*tsProbe, error) {
+		probed = s.fileURL(hash, index)
+		return &tsProbe{Streams: []tsProbeStream{{CodecType: "video", CodecName: "hevc", PixFmt: "yuv420p10le"}}}, nil
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/play", newHandler(s).play)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/play?hash="+tbHash+"&index=1", nil))
+	if !strings.Contains(probed, "/f/"+tbHash+"/1") {
+		t.Fatalf("play read %q, want the TorBox proxy", probed)
 	}
 }

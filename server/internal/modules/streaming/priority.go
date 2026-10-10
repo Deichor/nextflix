@@ -138,7 +138,8 @@ func (s *Service) warmYield(w *tsWarm) string {
 	return s.yieldLocked(w, time.Now())
 }
 
-// deferPrefetch remembers a prefetch of a paused title; it starts when the title resumes.
+// deferPrefetch remembers a prefetch of a paused title; priorityTick starts it once the
+// title is neither paused nor has to give way.
 func (s *Service) deferPrefetch(w *tsWarm, q tsResolveQuery) {
 	s.warmMu.Lock()
 	w.deferred = &q
@@ -188,7 +189,11 @@ func (s *Service) priorityTick(now time.Time) {
 	var saves, drops []tsPauseWork
 	var paused, resumed []*tsWarm
 	var readd [][]string
-	var start []*tsResolveQuery
+	type deferred struct {
+		w *tsWarm
+		q tsResolveQuery
+	}
+	var start []deferred
 	reason := map[*tsWarm]string{}
 	s.warmMu.Lock()
 	for _, w := range s.warms {
@@ -213,7 +218,11 @@ func (s *Service) priorityTick(now time.Time) {
 			w.paused, w.pauseState = false, nil
 			resumed = append(resumed, w)
 			readd = append(readd, back)
-			start = append(start, w.deferred)
+		}
+		// Also one put off without a pause (playback ended before this tick) or by a resolve
+		// that ran out of time after a resume; the job that deferred it has to end first
+		if other == "" && w.deferred != nil && !s.flights.running(w.key) {
+			start = append(start, deferred{w, *w.deferred})
 			w.deferred = nil
 		}
 		if !w.paused || now.Sub(w.pausedAt) < s.pauseSettle {
@@ -255,9 +264,9 @@ func (s *Service) priorityTick(now time.Time) {
 		for _, h := range readd[i] {
 			go s.pingTorrent(h) // the stat adds it again, from TorrServer's DB
 		}
-		if q := start[i]; q != nil {
-			go s.startDeferred(w, *q)
-		}
+	}
+	for _, d := range start {
+		go s.startDeferred(d.w, d.q)
 	}
 }
 

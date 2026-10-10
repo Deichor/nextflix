@@ -132,3 +132,27 @@ func TestHomeVerdictNeedsSeveralWrongLengths(t *testing.T) {
 		t.Fatal("tsHomeMislabeled")
 	}
 }
+
+// A .torrent-link-only home release (no hash) of the wrong length neither counts toward the
+// verdict nor rejects every hashless release of the movie.
+func TestHomeDurationsSkipHashless(t *testing.T) {
+	s := NewService(nil, Config{})
+	const id = 42
+	s.home.cache[id] = tsHomeVerdict{found: true, expires: time.Now().Add(time.Hour)}
+	q := tsResolveQuery{mediaType: "movie", title: "Sintel", tmdbID: id}
+	web := []string{"1080p", "web", "dl"}
+	cands := []tsCandidate{{hash: hx('a'), rest: web}, {rest: web}}
+	wrong := &tsDurationError{verdict: "86m for 173m"}
+	p := &tsPick{errs: []error{wrong, wrong}, results: make([]*tsResolveResult, 2)}
+	if s.noteHomeDurations(q, cands, p) {
+		t.Fatal("a hashless release counted toward the verdict")
+	}
+	cands = append(cands, tsCandidate{hash: hx('b'), rest: web})
+	p = &tsPick{errs: []error{wrong, wrong, wrong}, results: make([]*tsResolveResult, 3)}
+	if !s.noteHomeDurations(q, cands, p) {
+		t.Fatal("two wrong-length releases did not turn the verdict")
+	}
+	if rejected := s.home.rejectedHome(id); rejected[""] || len(rejected) != 2 {
+		t.Fatalf("rejected %v", rejected)
+	}
+}

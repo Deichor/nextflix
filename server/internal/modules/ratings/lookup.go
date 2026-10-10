@@ -53,6 +53,7 @@ const (
 
 // Backfill fills empty titles and artwork from TMDB. Stored values are never overwritten.
 // Every tried row gets backfilled_at, so rows TMDB cannot fill do not block the others.
+// Each profile with filled rows gets one change hook call at the end.
 func (s *Service) Backfill(ctx context.Context) {
 	if s.titles == nil {
 		return
@@ -66,6 +67,12 @@ func (s *Service) Backfill(ctx context.Context) {
 		return
 	}
 	filled, errs := 0, 0
+	changed := map[uint]bool{}
+	defer func() {
+		for id := range changed {
+			s.changed(id)
+		}
+	}()
 	for _, r := range rows {
 		if ctx.Err() != nil {
 			return
@@ -93,6 +100,7 @@ func (s *Service) Backfill(ctx context.Context) {
 		}
 		if err := s.db.Model(&TitleRating{}).Where("id = ?", r.ID).UpdateColumns(updates).Error; err == nil && len(updates) > 1 {
 			filled++
+			changed[r.ProfileID] = true
 		}
 	}
 	if filled > 0 {

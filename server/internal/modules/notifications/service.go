@@ -18,11 +18,16 @@ const (
 	usedMaxAge    = 6 * time.Hour
 )
 
-type Service struct {
-	cache *cache.Cache
-	tm    *tmdb.Client
-	repo  *repository // nil when REDIS_URL is unset: the feed is disabled
+// ProfileChecker reports whether a profile exists (the profiles module, wired in main.go).
+type ProfileChecker func(profileID uint) (bool, error)
 
+type Service struct {
+	cache    *cache.Cache
+	tm       *tmdb.Client
+	repo     *repository    // nil when REDIS_URL is unset: the feed is disabled
+	profiles ProfileChecker // nil = every id gets its own read state
+
+	addMu  sync.Mutex // serializes add so concurrent generators cannot store the same title twice
 	usedMu sync.Mutex
 	used   map[int]time.Time // TMDB id -> last time it was featured
 
@@ -39,6 +44,23 @@ func NewService(c *cache.Cache, tm *tmdb.Client) *Service {
 }
 
 func (s *Service) enabled() bool { return s.repo != nil }
+
+// SetProfiles makes ids of profiles that do not exist share one read state. Called once at startup.
+func (s *Service) SetProfiles(check ProfileChecker) { s.profiles = check }
+
+// owner is the redis key suffix for a profile's read state, so unknown ids cannot create keys.
+func (s *Service) owner(profile uint) (string, error) {
+	if profile != 0 && s.profiles != nil {
+		ok, err := s.profiles(profile)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			profile = 0
+		}
+	}
+	return stateOwner(profile), nil
+}
 
 // Start runs the background generation loop until ctx is cancelled or Close is called.
 func (s *Service) Start(ctx context.Context) {
@@ -149,7 +171,10 @@ func (s *Service) feed(ctx context.Context, profile uint) ([]Notification, Count
 	if !s.enabled() {
 		return []Notification{}, Counts{}, nil
 	}
-	owner := stateOwner(profile)
+	owner, err := s.owner(profile)
+	if err != nil {
+		return nil, Counts{}, err
+	}
 	all, err := s.repo.latest(ctx, maxNotifications)
 	if err != nil {
 		return nil, Counts{}, fmt.Errorf("failed to fetch notifications from Redis: %w", err)
@@ -199,17 +224,35 @@ func (s *Service) Count(ctx context.Context, profile uint) (Counts, error) {
 	return c, err
 }
 
+// MarkAsRead marks one notification read; ids that are not in the feed are ignored.
 func (s *Service) MarkAsRead(ctx context.Context, profile uint, id string) error {
 	if !s.enabled() {
 		return nil
 	}
-	return s.repo.markRead(ctx, stateOwner(profile), id)
+	owner, err := s.owner(profile)
+	if err != nil {
+		return err
+	}
+	all, err := s.repo.latest(ctx, maxNotifications)
+	if err != nil {
+		return err
+	}
+	for _, n := range all {
+		if n.ID == id {
+			return s.repo.markRead(ctx, owner, id)
+		}
+	}
+	return nil
 }
 
 // MarkAllRead marks every notification in the feed read and seen.
 func (s *Service) MarkAllRead(ctx context.Context, profile uint) error {
 	if !s.enabled() {
 		return nil
+	}
+	owner, err := s.owner(profile)
+	if err != nil {
+		return err
 	}
 	all, err := s.repo.latest(ctx, maxNotifications)
 	if err != nil {
@@ -221,7 +264,6 @@ func (s *Service) MarkAllRead(ctx context.Context, profile uint) error {
 		ids = append(ids, n.ID)
 		newest = max(newest, n.Timestamp)
 	}
-	owner := stateOwner(profile)
 	if err := s.repo.markRead(ctx, owner, ids...); err != nil {
 		return err
 	}
@@ -233,6 +275,10 @@ func (s *Service) MarkSeen(ctx context.Context, profile uint, until int64) error
 	if !s.enabled() {
 		return nil
 	}
+	owner, err := s.owner(profile)
+	if err != nil {
+		return err
+	}
 	newest, err := s.repo.newest(ctx)
 	if err != nil {
 		return err
@@ -240,20 +286,23 @@ func (s *Service) MarkSeen(ctx context.Context, profile uint, until int64) error
 	if until <= 0 || until > newest {
 		until = newest
 	}
-	return s.repo.setSeen(ctx, stateOwner(profile), until)
+	return s.repo.setSeen(ctx, owner, until)
 }
 
 // add stores n unless one of its titles was featured recently or it duplicates a notification from the last hour.
 func (s *Service) add(ctx context.Context, n Notification) error {
+	s.addMu.Lock()
+	defer s.addMu.Unlock()
 	if s.recentlyUsed(n.TMDBIDs) {
 		return nil
 	}
 	recent, err := s.repo.since(ctx, time.Now().Unix()-3600)
-	if err == nil {
-		for _, existing := range recent {
-			if isDuplicate(n, existing) {
-				return nil
-			}
+	if err != nil {
+		return fmt.Errorf("read recent notifications: %w", err)
+	}
+	for _, existing := range recent {
+		if isDuplicate(n, existing) {
+			return nil
 		}
 	}
 	if err := s.repo.add(ctx, n); err != nil {

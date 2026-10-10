@@ -105,6 +105,32 @@ func (d *tsDebrid) proxyFile(hash string, index int) *tsProxyFile {
 	return f
 }
 
+// cachedFrom is how many bytes of hash:index from pos on the proxy holds already.
+func (d *tsDebrid) cachedFrom(hash string, index int, pos int64) int64 {
+	pc := &d.cache
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	f := pc.files[tsDebridKey(strings.ToLower(hash), index)]
+	if f == nil {
+		return 0
+	}
+	at := pos
+	for _, c := range f.chunks {
+		if c.end <= at {
+			continue
+		}
+		have := c.start + int64(c.n)
+		if c.start > at || have <= at {
+			break
+		}
+		at = have
+		if have < c.end {
+			break
+		}
+	}
+	return at - pos
+}
+
 // chunkAtLocked returns the chunk that holds (or is fetching) byte pos, starting a fetch of
 // up to want bytes when there is none.
 func (d *tsDebrid) chunkAtLocked(f *tsProxyFile, pos, want int64) *tsProxyChunk {
@@ -266,14 +292,14 @@ func (d *tsDebrid) fetchChunk(f *tsProxyFile, c *tsProxyChunk) {
 			force = true
 			continue
 		case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
-			// Past the end: the file is shorter than assumed
+			// Past the end: the file is shorter than listed, which does not break it
 			if _, _, total, ok := tsParseContentRange(resp.Header.Get("Content-Range")); ok && total > 0 {
 				pc.mu.Lock()
 				f.size = total
 				pc.mu.Unlock()
 			}
 			resp.Body.Close()
-			fail()
+			giveUp(false)
 			return
 		case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
 			resp.Body.Close()
@@ -384,13 +410,12 @@ func (d *tsDebrid) serveFile(w http.ResponseWriter, r *http.Request) {
 		rangeHdr = "" // multiple ranges: the whole file
 	}
 	first, last, suffix, ranged := tsParseRange(rangeHdr)
-	if suffix > 0 && f.size == 0 {
-		ranged, first, last = false, 0, -1 // a suffix of an unknown size: the whole file
-	}
 
 	// The first bytes decide the answer: 502 when TorBox cannot deliver anything
 	pc.mu.Lock()
-	if suffix > 0 {
+	if suffix > 0 && f.size == 0 {
+		ranged, first, last = false, 0, -1 // a suffix of an unknown size: the whole file
+	} else if suffix > 0 {
 		first, last = max(0, f.size-suffix), f.size-1
 	}
 	if f.size > 0 && first >= f.size {
@@ -585,7 +610,7 @@ func tsParseContentRange(cr string) (start, last, total int64, ok bool) {
 	}
 	total, err := strconv.ParseInt(t, 10, 64)
 	if err != nil {
-		total = last + 1 // "*": unknown size
+		total = 0 // "*": unknown size
 	}
 	return start, last, total, last >= start
 }

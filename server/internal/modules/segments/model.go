@@ -15,6 +15,7 @@ type SkipSegment struct {
 	IntroEnd     float64
 	CreditsStart float64
 	CreditsEnd   float64
+	Incomplete   bool      // a segment is missing because a database failed (asked again after missingTTL)
 	FetchedAt    time.Time `gorm:"index"`
 }
 
