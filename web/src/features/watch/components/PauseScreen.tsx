@@ -10,14 +10,15 @@ export default function PauseScreen({ meta, title, shown }: { meta?: StreamMeta;
   const t = useT();
   const f = useFormat();
   const locale = useLocale();
-  const [info, setInfo] = useState<PauseInfo | null>(null);
   const key = meta ? `${meta.media_type}|${meta.tmdb_id}|${meta.season || 0}|${meta.episode || 0}` : '';
+  // Tagged with what it was loaded for: a stale answer never shows
+  const [loaded, setLoaded] = useState<{ key: string; info: PauseInfo | null } | null>(null);
+  const info = loaded && loaded.key === `${key}|${locale}` ? loaded.info : null;
 
   useEffect(() => {
-    setInfo(null);
     if (!meta) return;
     let cancelled = false;
-    getPauseInfo(meta).then(i => { if (!cancelled) setInfo(i); });
+    getPauseInfo(meta).then(i => { if (!cancelled) setLoaded({ key: `${key}|${locale}`, info: i }); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, locale]);

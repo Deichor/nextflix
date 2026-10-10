@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useSyncExternalStore } from 'react';
 import { getApiUrl } from '@/shared/lib/api';
 
 // Instant-play hints: does a title have a release TorBox has cached? Cards ask through
@@ -114,26 +114,32 @@ async function send(items: InstantItem[]) {
   });
 }
 
+const serverVerdict = () => null;
+
 /** The instant-play verdict of a title; asks only while `enabled` (e.g. once the card is near the viewport). */
 export function useInstant(item: InstantItem | null, enabled = true): InstantVerdict {
   const key = item ? instantKey(item.type, item.tmdb_id) : '';
-  const [v, setV] = useState<InstantVerdict>(() => (key ? answers.get(key)?.v ?? null : null));
-  const itemRef = useRef(item);
-  itemRef.current = item;
+  const active = !!key && enabled && !!item && item.tmdb_id > 0;
+  // Latest item without re-asking when the caller passes a new object for the same title
+  const currentItem = useEffectEvent(() => item);
 
-  useEffect(() => {
-    const it = itemRef.current;
-    if (!key || !enabled || !it || !(it.tmdb_id > 0)) return;
+  // A listener marks the title as still shown (see scheduleRetry)
+  const subscribe = useCallback((onChange: () => void) => {
+    if (!active) return () => {};
     let set = listeners.get(key);
     if (!set) listeners.set(key, (set = new Set()));
-    set.add(setV);
-    setV(answers.get(key)?.v ?? null);
-    ask(it);
+    set.add(onChange);
     return () => {
-      set?.delete(setV);
-      if (set && set.size === 0) listeners.delete(key);
+      set.delete(onChange);
+      if (set.size === 0) listeners.delete(key);
     };
-  }, [key, enabled]);
+  }, [key, active]);
+  const v = useSyncExternalStore(subscribe, () => (key ? answers.get(key)?.v ?? null : null), serverVerdict);
 
-  return key ? v : null;
+  useEffect(() => {
+    const it = currentItem();
+    if (active && it) ask(it);
+  }, [key, active]);
+
+  return v;
 }

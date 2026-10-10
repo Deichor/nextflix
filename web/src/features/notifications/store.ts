@@ -145,11 +145,24 @@ async function post(path: string, body?: unknown): Promise<boolean> {
   }
 }
 
+// Undoes an optimistic "read" on the current items (not a stale snapshot). Fresher server
+// data wins: a list or count refresh that landed meanwhile is left alone.
+function rollbackRead(ids: Set<string>, listStamp: number, countStamp: number, countsBefore: Partial<NotificationCounts>) {
+  const patch: Partial<NotificationsState> = {};
+  if (listAt === listStamp && ids.size) {
+    patch.items = state.items.map(n => (ids.has(n.id) && n.read ? { ...n, read: false } : n));
+  }
+  if (countAt === countStamp) Object.assign(patch, countsBefore);
+  if (Object.keys(patch).length) set(patch);
+}
+
 export async function markNotificationRead(id: string): Promise<void> {
-  syncOwner();
+  const me = syncOwner();
   const item = state.items.find(n => n.id === id);
   if (item?.read) return;
-  const prev = state;
+  const listStamp = listAt;
+  const countStamp = countAt;
+  const before = { unread: state.unread };
   if (item) {
     set({
       items: state.items.map(n => (n.id === id ? { ...n, read: true } : n)),
@@ -157,16 +170,27 @@ export async function markNotificationRead(id: string): Promise<void> {
     });
   }
   const ok = await post(`/${encodeURIComponent(id)}/read`);
-  if (!ok && owner === currentOwner()) set({ items: prev.items, unread: prev.unread });
+  if (!ok && me === currentOwner() && me === owner) {
+    rollbackRead(new Set(item ? [id] : []), listStamp, countStamp, before);
+  }
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
-  syncOwner();
-  const prev = state;
+  const me = syncOwner();
+  const listStamp = listAt;
+  const countStamp = countAt;
+  const before = { unseen: state.unseen, unread: state.unread };
+  const prevSeenUntil = seenUntil;
+  const flipped = new Set(state.items.filter(n => !n.read).map(n => n.id));
   seenUntil = Math.max(seenUntil, ...state.items.map(n => n.timestamp || 0));
+  const markedUntil = seenUntil;
   set({ items: state.items.map(n => (n.read ? n : { ...n, read: true })), unseen: 0, unread: 0 });
   const ok = await post('/read-all');
-  if (!ok && owner === currentOwner()) set({ items: prev.items, unseen: prev.unseen, unread: prev.unread });
+  if (!ok && me === currentOwner() && me === owner) {
+    // Let markNotificationsSeen post /seen again later
+    if (seenUntil === markedUntil) seenUntil = prevSeenUntil;
+    rollbackRead(flipped, listStamp, countStamp, before);
+  }
 }
 
 // Clears the badge up to the newest notification the user has been shown.

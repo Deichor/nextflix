@@ -27,6 +27,8 @@ interface Row {
   variant?: 'poster' | 'backdrop';
 }
 
+const NO_ROWS: Row[] = [];
+
 // Genre rows shown on the default Movies page
 const GENRE_ROWS = [28, 35, 878, 27, 10749, 16, 53, 99];
 
@@ -84,18 +86,21 @@ function MoviesContent() {
   const genreParam = searchParams?.get('genre') || '';
   const genre = MOVIE_GENRES.find(g => String(g.id) === genreParam) || null;
 
-  const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
+  const genreId = genre?.id ?? null;
+  // Rows of the genre they were loaded for; a different genre means still loading
+  const [loaded, setLoaded] = useState<{ genreId: number | null; rows: Row[] } | null>(null);
+  const loading = loaded?.genreId !== genreId;
+  const rows = loading ? NO_ROWS : loaded.rows;
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setRows([]);
-    (genre ? loadGenreRows(genre.id) : loadDefaultRows())
-      .then(r => { if (!cancelled) setRows(r); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+    (genreId !== null ? loadGenreRows(genreId) : loadDefaultRows())
+      .then(
+        r => { if (!cancelled) setLoaded({ genreId, rows: r }); },
+        () => { if (!cancelled) setLoaded({ genreId, rows: [] }); },
+      );
     return () => { cancelled = true; };
-  }, [genre?.id]);
+  }, [genreId]);
 
   const billboard = useMemo(() => pickBillboard(rows.flatMap(r => r.items).slice(0, 40)), [rows]);
 

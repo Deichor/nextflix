@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Bell, ChevronDown, Film, Search, Tv, X } from "lucide-react";
 import { usePathname } from "next/navigation";
 import NavigationLink from "@/shared/navigation/NavigationLink";
+import { isCurrentUrl } from "@/shared/navigation/isCurrentUrl";
 import NotificationDropdown from "@/features/notifications/components/NotificationDropdown";
 import ProfileMenu from "@/features/profiles/components/ProfileMenu";
 import BottomTabBar from "@/features/shell/BottomTabBar";
@@ -89,10 +90,13 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  useEffect(() => {
+  // Navigating closes the popovers (state adjusted during render)
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
     setIsBrowseOpen(false);
     setIsNotificationOpen(false);
-  }, [pathname]);
+  }
 
   const closeBrowse = useCallback(() => setIsBrowseOpen(false), []);
   const closeNotifications = useCallback(() => setIsNotificationOpen(false), []);
@@ -111,12 +115,17 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
   useOutsideClose(searchRef, isSearchOpen, closeSearchIfEmpty);
 
   // Debounced TMDB suggestions
+  // Too short to suggest: drop the old list
+  const shortQuery = searchQuery.trim().length < 2;
+  const [wasShort, setWasShort] = useState(shortQuery);
+  if (shortQuery !== wasShort) {
+    setWasShort(shortQuery);
+    if (shortQuery) setSuggestions([]);
+  }
+
   useEffect(() => {
     const q = searchQuery.trim();
-    if (q.length < 2) {
-      setSuggestions([]);
-      return;
-    }
+    if (q.length < 2) return;
     const ctrl = new AbortController();
     const timer = setTimeout(async () => {
       setIsLoadingSuggestions(true);
@@ -157,9 +166,9 @@ const Navbar: React.FC<NavbarProps> = ({ onSearch }) => {
     closeSearch();
   };
 
-  // Re-clicking the current page only scrolls up (a same-path push would leave the route loader spinning)
+  // Re-clicking the current page (same path and query) only scrolls up
   const linkClick = (href: string, after?: () => void) => (e: React.MouseEvent<HTMLDivElement>) => {
-    if (pathname === href) {
+    if (isCurrentUrl(href)) {
       e.preventDefault();
       window.scrollTo({ top: 0, behavior: "smooth" });
     }

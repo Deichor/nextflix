@@ -69,9 +69,8 @@ export function useLocale(): Locale {
 export function useT(): TFunction {
   const locale = useLocale();
   return useMemo(() => {
-    const t = ((key: MessageKey, vars?: Vars) => translate(locale, key, vars)) as TFunction;
-    t.rich = (key, vars) => translateParts<ReactNode>(locale, key, vars);
-    return t;
+    const rich: TFunction['rich'] = (key, vars) => translateParts<ReactNode>(locale, key, vars);
+    return Object.assign((key: MessageKey, vars?: Vars) => translate(locale, key, vars), { rich });
   }, [locale]);
 }
 

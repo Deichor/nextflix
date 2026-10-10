@@ -15,8 +15,17 @@ const AVATAR_SIZE = 'var(--nf-avatar)';
 
 // Only allow same-origin paths and never bounce back to the picker
 function safeNext(next: string | null): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//') || next.startsWith('/profiles')) return '/';
-  return next;
+  // Browsers treat "\" like "/", so "/\evil.com" would leave the site; the URL check
+  // below also catches tricks like "/\t/evil.com" (tabs/newlines are stripped)
+  if (!next || !next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
+  if (typeof window === 'undefined') return '/';
+  try {
+    const url = new URL(next, window.location.origin);
+    if (url.origin !== window.location.origin || url.pathname.startsWith('/profiles')) return '/';
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return '/';
+  }
 }
 
 function ProfilesPicker() {
@@ -31,18 +40,17 @@ function ProfilesPicker() {
   // undefined = closed, null = new profile
   const [editing, setEditing] = useState<Profile | null | undefined>(undefined);
 
-  const load = useCallback(async () => {
+  const showError = useCallback((e: unknown) => setError(e instanceof Error ? e.message : ''), []);
+
+  // Retry and editor changes; the first load starts with error already null
+  const load = useCallback(() => {
     setError(null);
-    try {
-      setProfiles(await listProfiles());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '');
-    }
-  }, []);
+    return listProfiles().then(setProfiles, showError);
+  }, [showError]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    listProfiles().then(setProfiles, showError);
+  }, [showError]);
 
   const select = (profile: Profile) => {
     if (manage) {

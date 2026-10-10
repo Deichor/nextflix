@@ -1,6 +1,7 @@
 "use client";
 
 import React from 'react';
+import { useT } from '@/shared/i18n';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -29,23 +30,31 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   render() {
     if (this.state.hasError) {
       return this.props.fallback || (
-        <div className="w-full p-4 bg-red-900/20 rounded-lg">
-          <h2 className="text-red-400 text-lg font-semibold mb-2">Something went wrong</h2>
-          <p className="text-red-300 text-sm">
-            {this.state.error?.message || 'An unexpected error occurred'}
-          </p>
-          <button 
-            onClick={() => this.setState({ hasError: false })}
-            className="mt-2 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
-          >
-            Try Again
-          </button>
-        </div>
+        <ErrorFallback error={this.state.error} onReset={() => this.setState({ hasError: false })} />
       );
     }
 
     return this.props.children;
   }
+}
+
+// Function component so the default fallback can use translations
+function ErrorFallback({ error, onReset }: { error?: Error; onReset: () => void }) {
+  const t = useT();
+  return (
+    <div className="w-full p-4 bg-red-900/20 rounded-lg">
+      <h2 className="text-red-400 text-lg font-semibold mb-2">{t('error.title')}</h2>
+      <p className="text-red-300 text-sm">
+        {error?.message || t('error.unexpected')}
+      </p>
+      <button
+        onClick={onReset}
+        className="mt-2 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+      >
+        {t('error.tryAgain')}
+      </button>
+    </div>
+  );
 }
 
 export default ErrorBoundary;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 
 export interface Profile {
   id: number;
@@ -53,17 +53,37 @@ export function profileUserId(): string {
   return String(getActiveProfileId() ?? 1);
 }
 
+function subscribeProfile(onChange: () => void) {
+  window.addEventListener(PROFILE_EVENT, onChange);
+  window.addEventListener('storage', onChange);
+  return () => {
+    window.removeEventListener(PROFILE_EVENT, onChange);
+    window.removeEventListener('storage', onChange);
+  };
+}
+
+// useSyncExternalStore needs a stable snapshot: parse again only when the stored JSON changes
+let snapshotRaw: string | null = null;
+let snapshot: Profile | null = null;
+
+function profileSnapshot(): Profile | null {
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  if (raw !== snapshotRaw) {
+    snapshotRaw = raw;
+    snapshot = getActiveProfile();
+  }
+  return snapshot;
+}
+
+// The server and the hydration pass render without a profile
+const serverProfile = () => null;
+
+/** The active profile; null on the server and during hydration. */
 export function useActiveProfile(): Profile | null {
-  const [profile, setProfile] = useState<Profile | null>(null);
-  useEffect(() => {
-    const sync = () => setProfile(getActiveProfile());
-    sync();
-    window.addEventListener(PROFILE_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(PROFILE_EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-  return profile;
+  return useSyncExternalStore(subscribeProfile, profileSnapshot, serverProfile);
 }

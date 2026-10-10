@@ -27,30 +27,35 @@ interface SeasonEpisodesProps {
   onPlay: (season: number, episode: EpisodeInfo, progress: StreamProgress | null) => void;
 }
 
+const NO_EPISODES: EpisodeInfo[] = [];
+const NO_PROGRESS: Record<number, StreamProgress> = {};
+
 // Netflix-style season selector + episode list with per-episode progress
 export default function SeasonEpisodes({ tmdbId, seasons, initialSeason, fallbackImage, refreshKey = 0, onPlay }: SeasonEpisodesProps) {
   const t = useT();
   const f = useFormat();
   const [season, setSeason] = useState<number>(initialSeason || seasons[0]?.season_number || 1);
-  const [episodes, setEpisodes] = useState<EpisodeInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [progress, setProgress] = useState<Record<number, StreamProgress>>({});
-
-  useEffect(() => {
+  // A new initialSeason (e.g. the one being watched changed) selects it
+  const [prevInitial, setPrevInitial] = useState(initialSeason);
+  if (initialSeason !== prevInitial) {
+    setPrevInitial(initialSeason);
     if (initialSeason) setSeason(initialSeason);
-  }, [initialSeason]);
+  }
 
   const episodeCount = seasons.find(s => s.season_number === season)?.episode_count ?? 0;
+  const listKey = `${tmdbId}:${season}:${episodeCount}`;
+  // Loaded lists are tagged with what they were loaded for; anything else is still loading
+  const [loaded, setLoaded] = useState<{ key: string; episodes: EpisodeInfo[] } | null>(null);
+  const loading = !loaded || loaded.key !== listKey;
+  const episodes = loading ? NO_EPISODES : loaded.episodes;
+  const [progressFor, setProgressFor] = useState<{ episodes: EpisodeInfo[]; map: Record<number, StreamProgress> } | null>(null);
+  const progress = progressFor && progressFor.episodes === episodes ? progressFor.map : NO_PROGRESS;
 
   useEffect(() => {
     if (episodeCount <= 0) return;
     let cancelled = false;
-    setLoading(true);
-    setEpisodes([]);
     getSeasonEpisodes(tmdbId, { season_number: season, episode_count: episodeCount }).then(eps => {
-      if (cancelled) return;
-      setEpisodes(eps);
-      setLoading(false);
+      if (!cancelled) setLoaded({ key: `${tmdbId}:${season}:${episodeCount}`, episodes: eps });
     });
     return () => { cancelled = true; };
   }, [tmdbId, season, episodeCount]);
@@ -58,13 +63,13 @@ export default function SeasonEpisodes({ tmdbId, seasons, initialSeason, fallbac
   // One request for the whole title, then keep this season's episodes
   useEffect(() => {
     const pid = getActiveProfileId();
-    if (!pid || episodes.length === 0) { setProgress({}); return; }
+    if (!pid || episodes.length === 0) return;
     let cancelled = false;
     getTitleProgress(pid, 'tv', tmdbId).then(list => {
       if (cancelled) return;
       const map: Record<number, StreamProgress> = {};
       list.forEach(p => { if (p.season === season && !map[p.episode]) map[p.episode] = p; });
-      setProgress(map);
+      setProgressFor({ episodes, map });
     });
     return () => { cancelled = true; };
   }, [tmdbId, season, episodes, refreshKey]);

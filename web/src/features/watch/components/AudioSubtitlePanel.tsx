@@ -138,12 +138,20 @@ export default function AudioSubtitlePanel({
   const original = normLang(originalLang);
   // Simple view lists one row per language (its best subtitle); versions and timing live in the details view
   const [details, setDetails] = useState(false);
-  useEffect(() => { if (!open) setDetails(false); }, [open]);
   // Bottom sheet drag (handle)
   const [dragY, setDragY] = useState(0);
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ id: number; y: number; at: number; moved: boolean } | null>(null);
-  useEffect(() => { if (!open) { setDragY(0); setDragging(false); } }, [open]);
+  // Closing resets the view and the drag
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (!open) {
+      setDetails(false);
+      setDragY(0);
+      setDragging(false);
+    }
+  }
   // A subtitle that cannot be downloaded now (quota used up, failed) is the language's row only when nothing else is left
   const unusable = (s: SubtitleItem) => !!s.quota || !!failedSubtitles?.has(s.id);
   const bestPerLanguage = useMemo(() => {

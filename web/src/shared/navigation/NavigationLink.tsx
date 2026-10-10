@@ -37,7 +37,7 @@ const NavigationLink: React.FC<NavigationLinkProps> = ({
 
     // Only trigger loading for internal navigation
     if (!href.startsWith('http') && !href.startsWith('mailto:') && !href.startsWith('tel:')) {
-      startLoading();
+      startLoading(href);
       router.push(href);
     } else {
       // For external links, open properly

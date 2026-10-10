@@ -19,6 +19,10 @@ export const tr: Messages = {
   'common.scrollLeft': 'Sola kaydır',
   'common.scrollRight': 'Sağa kaydır',
 
+  'error.title': 'Bir şeyler ters gitti',
+  'error.unexpected': 'Beklenmeyen bir hata oluştu',
+  'error.tryAgain': 'Tekrar Dene',
+
   'language.en': 'English',
   'language.tr': 'Türkçe',
 

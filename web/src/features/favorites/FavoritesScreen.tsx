@@ -57,20 +57,22 @@ export default function FavoritesScreen() {
   const profile = useActiveProfile();
   const { list, loaded } = useRatings();
   // Server order: most recently favorited first (rating a favorite later does not move it)
-  const [order, setOrder] = useState<string[] | null>(null);
+  // Kept with the profile it belongs to; another profile's order counts as not loaded
+  const [fetchedOrder, setFetchedOrder] = useState<{ profileId: number; keys: string[] } | null>(null);
   const [details, setDetails] = useState<Record<string, NfTitle | null>>({});
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [sortBy, setSortBy] = useState<SortBy>('added');
 
   const profileId = profile?.id ?? null;
+  const order = fetchedOrder && fetchedOrder.profileId === profileId ? fetchedOrder.keys : null;
   useEffect(() => {
     if (!profileId) return;
     let cancelled = false;
-    setOrder(null);
+    const done = (keys: string[]) => { if (!cancelled) setFetchedOrder({ profileId, keys }); };
     fetch(`${getApiUrl()}/api/favorites?profile_id=${profileId}`, { headers: profileHeaders(), cache: 'no-store' })
       .then(res => (res.ok ? res.json() : []))
-      .then((rows: Rating[]) => { if (!cancelled) setOrder(Array.isArray(rows) ? rows.map(keyOf) : []); })
-      .catch(() => { if (!cancelled) setOrder([]); });
+      .then((rows: Rating[]) => done(Array.isArray(rows) ? rows.map(keyOf) : []))
+      .catch(() => done([]));
     return () => { cancelled = true; };
   }, [profileId]);
 

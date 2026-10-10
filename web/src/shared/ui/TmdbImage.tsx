@@ -1,12 +1,14 @@
 "use client";
 
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ImageKind, tmdbDefaultSrc, tmdbPath, tmdbPlaceholder, tmdbSrcSet } from '@/shared/lib/image';
 
 // Start loading well before an image scrolls into view
 const VIEWPORT_MARGIN = '150% 0px';
 const ROW_MARGIN = '0px 150%';
 const BLUR_DROP_MS = 400;
+// Old browsers without IntersectionObserver load everything right away
+const NO_OBSERVER = typeof window !== 'undefined' && typeof IntersectionObserver === 'undefined';
 
 interface RowGate {
   /** The row is within VIEWPORT_MARGIN of the viewport */
@@ -26,8 +28,7 @@ export function useNearViewport(
 ): boolean {
   const [near, setNear] = useState(false);
   useEffect(() => {
-    if (!enabled || near || !el) return;
-    if (typeof IntersectionObserver === 'undefined') { setNear(true); return; }
+    if (!enabled || near || !el || NO_OBSERVER) return;
     const io = new IntersectionObserver(entries => {
       if (entries.some(e => e.isIntersecting)) {
         setNear(true);
@@ -37,7 +38,8 @@ export function useNearViewport(
     io.observe(el);
     return () => io.disconnect();
   }, [el, enabled, near, margin, root]);
-  return near;
+  // el is only set after mount, so the server and hydration pass still render "not near"
+  return near || (NO_OBSERVER && enabled && !!el);
 }
 
 /**
@@ -116,13 +118,18 @@ export default function TmdbImage({
   const [blurReady, setBlurReady] = useState(false);
   const [blurGone, setBlurGone] = useState(false);
   const onLoadRef = useRef(onLoad);
-  onLoadRef.current = onLoad;
+  useLayoutEffect(() => {
+    onLoadRef.current = onLoad;
+  });
 
-  useEffect(() => {
+  // A new image starts over (state adjusted during render)
+  const [prevMain, setPrevMain] = useState(main);
+  if (main !== prevMain) {
+    setPrevMain(main);
     setLoaded(false);
     setBlurReady(false);
     setBlurGone(false);
-  }, [main]);
+  }
 
   const reveal = useCallback((img: HTMLImageElement) => {
     let alive = true;

@@ -58,12 +58,33 @@ function SearchContent() {
   const inputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const loadingMore = useRef(false);
+  // Bumped on every new search so late "load more" pages of old filters are dropped
+  const searchId = useRef(0);
 
   const syncedQuery = useRef(urlQuery);
   const q = query.trim();
   const filtered = hasFilters(filters);
   // Filters alone browse TMDB discover page by page; with a query they narrow the search results
   const browsing = !q && filtered;
+  const idle = !q && !filtered;
+
+  // Nothing to search any more: drop the old results (state adjusted during render)
+  const [wasIdle, setWasIdle] = useState(idle);
+  if (idle !== wasIdle) {
+    setWasIdle(idle);
+    if (idle) {
+      setResults([]);
+      setDidYouMean('');
+      setSearched(false);
+    }
+  }
+  // Too short to complete: close the list
+  const short = q.length < 2;
+  const [wasShort, setWasShort] = useState(short);
+  if (short !== wasShort) {
+    setWasShort(short);
+    if (short) setCompletions([]);
+  }
 
   // Navbar searches land here as ?q= (ignore our own URL updates)
   useEffect(() => {
@@ -94,12 +115,9 @@ function SearchContent() {
   }, [q, filters, router]);
 
   useEffect(() => {
-    if (!q && !filtered) {
-      setResults([]);
-      setDidYouMean('');
-      setSearched(false);
-      return;
-    }
+    searchId.current += 1;
+    loadingMore.current = false;
+    if (!q && !filtered) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
       setLoading(true);
@@ -117,6 +135,9 @@ function SearchContent() {
         corrected = res?.didYouMean || '';
       }
       if (cancelled) return;
+      // Pages loaded before this first page landed belong to the old list
+      searchId.current += 1;
+      loadingMore.current = false;
       setResults(items);
       setDidYouMean(corrected);
       setPage(1);
@@ -129,10 +150,7 @@ function SearchContent() {
 
   // Title completions while typing (server typo index, debounced 150 ms)
   useEffect(() => {
-    if (q.length < 2) {
-      setCompletions([]);
-      return;
-    }
+    if (short) return;
     const ctrl = new AbortController();
     const timer = setTimeout(async () => {
       const list = await suggestTitles(q, ctrl.signal);
@@ -142,7 +160,7 @@ function SearchContent() {
       setActiveCompletion(-1);
     }, 150);
     return () => { clearTimeout(timer); ctrl.abort(); };
-  }, [q]);
+  }, [q, short]);
 
   const pickQuery = (text: string) => {
     setQuery(text);
@@ -174,8 +192,10 @@ function SearchContent() {
     const io = new IntersectionObserver(async entries => {
       if (!entries.some(e => e.isIntersecting) || loadingMore.current) return;
       loadingMore.current = true;
+      const id = searchId.current;
       const next = page + 1;
       const res = await discover(filters, '', next);
+      if (id !== searchId.current) return;
       loadingMore.current = false;
       if (!res) return;
       setResults(prev => {
@@ -224,6 +244,7 @@ function SearchContent() {
               onBlur={() => setTimeout(() => setInputFocused(false), 150)}
               placeholder={t('nav.searchPlaceholder')}
               aria-label={t('nav.search')}
+              role="combobox"
               aria-autocomplete="list"
               aria-expanded={showCompletions}
               aria-controls="search-completions"

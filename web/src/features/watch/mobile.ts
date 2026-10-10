@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
 
 // Phone / tablet helpers for the player. Everything here is a no-op on desktop (fine pointer).
 
@@ -87,6 +87,9 @@ export const fullscreenSupported = () =>
   typeof document !== 'undefined' && !!(document.fullscreenEnabled || (document as FsDocument).webkitFullscreenEnabled);
 
 const orientation = () => (typeof screen !== 'undefined' ? (screen.orientation as LockableOrientation | undefined) : undefined);
+const orientationLockable = () => !!orientation()?.lock;
+const noSubscribe = () => () => {};
+const serverFalse = () => false;
 
 async function requestFs(el: FsElement): Promise<boolean> {
   try {
@@ -126,14 +129,11 @@ async function lockTo(o: 'landscape' | 'portrait'): Promise<boolean> {
  * full-viewport container is the fullscreen. Landscape is locked where the browser allows it.
  */
 export function useMobileFullscreen(ref: RefObject<HTMLElement | null>, touchUi: boolean) {
-  const [supported, setSupported] = useState(false);
-  const [canRotate, setCanRotate] = useState(false);
-
-  useEffect(() => {
-    const ok = fullscreenSupported();
-    setSupported(ok);
-    setCanRotate(ok && !!orientation()?.lock);
-  }, []);
+  // Browser capabilities: false on the server and in the hydration render, read on the client after
+  const supported = useSyncExternalStore(noSubscribe, fullscreenSupported, serverFalse);
+  const lockable = useSyncExternalStore(noSubscribe, orientationLockable, serverFalse);
+  const [lockFailed, setLockFailed] = useState(false);
+  const canRotate = supported && lockable && !lockFailed;
 
   const enter = useCallback(async () => {
     const el = ref.current as FsElement | null;
@@ -158,7 +158,7 @@ export function useMobileFullscreen(ref: RefObject<HTMLElement | null>, touchUi:
   const rotate = useCallback(async () => {
     if (!fsElement() && !(await enter())) return;
     const landscapeNow = (orientation()?.type || '').startsWith('landscape') || window.innerWidth > window.innerHeight;
-    if (!(await lockTo(landscapeNow ? 'portrait' : 'landscape'))) setCanRotate(false);
+    if (!(await lockTo(landscapeNow ? 'portrait' : 'landscape'))) setLockFailed(true);
   }, [enter]);
 
   // Opening the player on a phone goes fullscreen (the tap that opened it still counts as a user

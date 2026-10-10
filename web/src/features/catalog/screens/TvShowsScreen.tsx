@@ -77,13 +77,11 @@ function TVShowsContent() {
     () => (genre ? genreItems : uniqueTitles(lists?.trendingWeekly || [], lists?.trendingDaily || [])),
     [genre, genreItems, lists]
   );
-  const [billboard, setBillboard] = useState<NfTitle | null>(null);
-  const hasBillboardSource = billboardSource.length > 0;
   // Pick once per genre (not again on every late provider list)
-  useEffect(() => {
-    setBillboard(pickBillboard(billboardSource));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [genre?.id, hasBillboardSource]);
+  const billboardKey = `${genre?.id ?? ''}:${billboardSource.length > 0}`;
+  const [picked, setPicked] = useState<{ key: string; item: NfTitle | null } | null>(null);
+  if (picked?.key !== billboardKey) setPicked({ key: billboardKey, item: pickBillboard(billboardSource) });
+  const billboard = picked?.key === billboardKey ? picked.item : null;
 
   const genreRows = useMemo(() => GENRE_ROWS.map(id => ({
     id,

@@ -37,12 +37,18 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
   const profileId = profile?.id ?? null;
 
   const load = useCallback(async () => {
-    if (!profileId) { setItems([]); return; }
+    // Without a profile nothing renders (see below)
+    if (!profileId) return;
     const list = await getProgressList(profileId);
     setItems(list);
   }, [profileId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!profileId) return;
+    let cancelled = false;
+    getProgressList(profileId).then(list => { if (!cancelled) setItems(list); });
+    return () => { cancelled = true; };
+  }, [profileId]);
 
   const updateArrows = useCallback(() => {
     const el = scrollRef.current;

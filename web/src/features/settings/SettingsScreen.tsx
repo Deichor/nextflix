@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { ChevronRight, Settings2 } from 'lucide-react';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -11,13 +11,17 @@ import ProfileLanguageSection from '@/features/settings/components/ProfileLangua
 import PlaybackSection from '@/features/settings/components/PlaybackSection';
 import { LoadingLine } from '@/features/settings/components/ui';
 
+// false on the server and while hydrating, true afterwards
+const noSubscribe = () => () => {};
+const onClient = () => true;
+const onServer = () => false;
+
 export default function SettingsScreen() {
   const t = useT();
   usePageTitle(t('settings.title'));
   const profile = useActiveProfile();
-  // useActiveProfile is null until mounted; wait so "no profile" does not flash
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  // useActiveProfile is null while hydrating; wait so "no profile" does not flash
+  const mounted = useSyncExternalStore(noSubscribe, onClient, onServer);
 
   return (
     <PageShell>

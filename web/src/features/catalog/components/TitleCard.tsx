@@ -328,7 +328,7 @@ export default function TitleCard({ item, variant = 'poster', onPlay, progress =
   const [imgFailed, setImgFailed] = useState(false);
   const img = variant === 'poster' ? item.poster || item.backdrop : item.backdrop || item.poster;
 
-  const hover = useHoverPreview();
+  const { anchorRef, anchorProps, preview } = useHoverPreview();
 
   const open = () => navigate.push(item.href);
   const play = () => {
@@ -339,8 +339,8 @@ export default function TitleCard({ item, variant = 'poster', onPlay, progress =
   return (
     <>
       <div
-        ref={hover.anchorRef}
-        {...hover.anchorProps}
+        ref={anchorRef}
+        {...anchorProps}
         role="link"
         tabIndex={0}
         aria-label={item.title}
@@ -374,9 +374,9 @@ export default function TitleCard({ item, variant = 'poster', onPlay, progress =
         </div>
       </div>
 
-      {!!hover.preview && (
+      {!!preview && (
         <HoverPreview
-          state={hover.preview}
+          state={preview}
           variant={variant}
           info={{
             title: item.title,

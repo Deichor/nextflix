@@ -8,6 +8,8 @@ const MAX_FAILS = 2;
 
 // Routes TMDB images (including URLs that come from the backend) through the
 // frontend proxy, and stops onError fallbacks that retry a broken URL forever.
+// Style updates are not observed (they fire on every animation frame); the <head>
+// script in app/layout.tsx already patches the style setters, and new nodes are scanned.
 export default function ImageGuard() {
   useEffect(() => {
     const fails = new Map<string, number>();
@@ -47,7 +49,7 @@ export default function ImageGuard() {
         m.addedNodes.forEach(n => { if (n instanceof Element) scan(n); });
       }
     });
-    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset", "style"] });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset"] });
     window.addEventListener("error", onError, true);
 
     return () => {

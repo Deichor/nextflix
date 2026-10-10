@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useState } from 'react';
 import { getApiUrl } from '@/shared/lib/api';
 import type { StreamMeta } from '@/features/watch/api';
 
@@ -30,8 +30,8 @@ export function skipPhase(segs: SkipSegments | null, position: number, duration:
 /** Fetches the segments of the playing file, once per episode and file (series only). */
 export function useSkipSegments(meta: StreamMeta | undefined, hash: string, index: number | undefined, duration: number): SkipSegments | null {
   const [segs, setSegs] = useState<{ key: string; value: SkipSegments } | null>(null);
-  const durationRef = useRef(duration);
-  durationRef.current = duration;
+  // Duration at request time; a later change does not refetch
+  const durationNow = useEffectEvent(() => duration);
   const tv = meta?.media_type === 'tv' && !!meta.season && !!meta.episode;
   const key = tv && hash && index !== undefined && duration > 0 ? `${meta.tmdb_id}:${meta.season}:${meta.episode}:${hash}:${index}` : '';
 
@@ -40,7 +40,7 @@ export function useSkipSegments(meta: StreamMeta | undefined, hash: string, inde
     const ctl = new AbortController();
     const q = new URLSearchParams({
       tmdb_id: String(meta.tmdb_id), season: String(meta.season), episode: String(meta.episode),
-      hash, index: String(index), duration: durationRef.current.toFixed(1),
+      hash, index: String(index), duration: durationNow().toFixed(1),
     });
     fetch(`${getApiUrl()}/api/skip-segments?${q}`, { signal: ctl.signal })
       .then(r => (r.ok ? r.json() : null))

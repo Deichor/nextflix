@@ -23,19 +23,23 @@ interface TitleActions {
 }
 
 const Ctx = createContext<TitleActions | null>(null);
+const NO_PROGRESS: StreamProgress[] = [];
 
 // Shared Play / More Info actions for the billboard and every row (ratings live in features/favorites).
 // Owns the one torrent player instance of the page.
 export function TitleActionsProvider({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const profile = useActiveProfile();
-  const [progress, setProgress] = useState<StreamProgress[]>([]);
+  const [loaded, setLoaded] = useState<{ profileId: number; list: StreamProgress[] } | null>(null);
   const [request, setRequest] = useState<PlayRequest | null>(null);
 
   const profileId = profile?.id ?? null;
+  // Another profile's (or no profile's) progress counts as empty
+  const progress = loaded && loaded.profileId === profileId ? loaded.list : NO_PROGRESS;
 
-  const loadProgress = useCallback(async () => {
-    setProgress(profileId ? await getProgressList(profileId) : []);
+  const loadProgress = useCallback(() => {
+    if (!profileId) return;
+    getProgressList(profileId).then(list => setLoaded({ profileId, list }));
   }, [profileId]);
 
   useEffect(() => { loadProgress(); }, [loadProgress]);

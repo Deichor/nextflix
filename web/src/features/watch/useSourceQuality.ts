@@ -5,14 +5,15 @@ import { getCachedSource, qualityBadges, ResolveParams } from './api';
 
 // Re-check while a prefetch may still be finding the source
 const CHECK_AT_MS = [0, 3000, 8000, 15000, 30000];
+const NONE: string[] = [];
 
 // Quality badges ("4K", "HDR", "HD") of the source Play would use, once the server has found it.
 export function useSourceQuality(params: ResolveParams | null | undefined): string[] {
   const key = params ? JSON.stringify(params) : '';
-  const [badges, setBadges] = useState<string[]>([]);
+  // Tagged with the params they belong to: other params show none until theirs arrive
+  const [found, setFound] = useState<{ key: string; badges: string[] } | null>(null);
 
   useEffect(() => {
-    setBadges([]);
     if (!params) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -20,7 +21,7 @@ export function useSourceQuality(params: ResolveParams | null | undefined): stri
       const src = await getCachedSource(params);
       if (cancelled) return;
       if (src) {
-        setBadges(qualityBadges(src));
+        setFound({ key, badges: qualityBadges(src) });
       } else if (n + 1 < CHECK_AT_MS.length) {
         timer = setTimeout(() => check(n + 1), CHECK_AT_MS[n + 1] - CHECK_AT_MS[n]);
       }
@@ -33,5 +34,5 @@ export function useSourceQuality(params: ResolveParams | null | undefined): stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  return badges;
+  return found && found.key === key ? found.badges : NONE;
 }

@@ -22,15 +22,16 @@ interface BillboardProps {
 export default function Billboard({ item, loading, onPlay, kicker }: BillboardProps) {
   const t = useT();
   const navigate = useNavigate();
-  const [logo, setLogo] = useState<string | null>(null);
-  const [logoFailed, setLogoFailed] = useState(false);
+  // Logo state belongs to the item it was fetched for, so a new item starts without one
+  const [fetched, setFetched] = useState<{ item: NfTitle; url: string | null } | null>(null);
+  const [failedFor, setFailedFor] = useState<NfTitle | null>(null);
+  const logo = item && fetched?.item === item ? fetched.url : null;
+  const logoFailed = !!item && failedFor === item;
 
   useEffect(() => {
-    setLogo(null);
-    setLogoFailed(false);
     if (!item) return;
     let cancelled = false;
-    fetchLogo(item.id, item.mediaType).then(l => { if (!cancelled) setLogo(l); });
+    fetchLogo(item.id, item.mediaType).then(url => { if (!cancelled) setFetched({ item, url }); });
     return () => { cancelled = true; };
   }, [item]);
 
@@ -63,7 +64,7 @@ export default function Billboard({ item, loading, onPlay, kicker }: BillboardPr
             <img
               src={logo}
               alt={item.title}
-              onError={() => setLogoFailed(true)}
+              onError={() => setFailedFor(item)}
               className="mb-4 max-h-28 w-auto max-w-[80%] object-contain object-left drop-shadow-[0_4px_20px_rgba(0,0,0,0.6)] md:mb-6 md:max-h-40"
             />
           ) : (

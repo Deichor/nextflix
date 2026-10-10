@@ -45,15 +45,15 @@ function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardPro
   const pct = saved ? progressPercent(saved) : 0;
   const year = yearOf(item);
 
-  const hover = useHoverPreview();
+  const { anchorRef, anchorProps, preview } = useHoverPreview();
 
   const coming = !playable && item.date ? f.shortDate(item.date) : '';
 
   return (
     <>
       <div
-        ref={hover.anchorRef}
-        {...hover.anchorProps}
+        ref={anchorRef}
+        {...anchorProps}
         role="button"
         tabIndex={0}
         aria-label={item.title}
@@ -93,9 +93,9 @@ function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardPro
         </div>
       </div>
 
-      {!!hover.preview && (
+      {!!preview && (
         <HoverPreview
-          state={hover.preview}
+          state={preview}
           variant={variant}
           info={{
             title: item.title,

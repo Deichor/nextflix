@@ -634,7 +634,8 @@ export function releaseTorrents(hashes: string[], why?: string): void {
 }
 
 export async function saveProgress(p: StreamProgress, opts: { keepalive?: boolean } = {}): Promise<void> {
-  const { id, updated_at, ...body } = p;
+  // Server-owned fields; JSON.stringify drops undefined ones
+  const body = { ...p, id: undefined, updated_at: undefined };
   try {
     await fetch(`${getApiUrl()}/api/stream-progress`, {
       method: 'PUT',

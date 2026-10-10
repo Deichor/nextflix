@@ -36,7 +36,7 @@ const cardSizes: Record<CardVariant, string> = {
 export default function TitleRow({ title, items, variant = 'poster', loading, ranked, exploreHref, onPlay, className = '' }: TitleRowProps) {
   const t = useT();
   const scroller = useRef<HTMLDivElement>(null);
-  const gate = useImageRowGate(scroller);
+  const { sectionRef, scrollerRef, value: gate } = useImageRowGate(scroller);
   const [canLeft, setCanLeft] = useState(false);
   const [canRight, setCanRight] = useState(false);
 
@@ -63,7 +63,7 @@ export default function TitleRow({ title, items, variant = 'poster', loading, ra
   const list = ranked ? items.slice(0, 10) : items;
 
   return (
-    <section ref={gate.sectionRef} className={`group/row relative ${className}`}>
+    <section ref={sectionRef} className={`group/row relative ${className}`}>
       <div className="mb-1 flex items-baseline gap-3 px-4 md:px-12">
         <h2 className="text-base font-bold text-[#e5e5e5] sm:text-lg md:text-[1.3rem]">{title}</h2>
         {!!exploreHref && (
@@ -78,12 +78,12 @@ export default function TitleRow({ title, items, variant = 'poster', loading, ra
 
       <div className="relative">
         <div
-          ref={gate.scrollerRef}
+          ref={scrollerRef}
           onScroll={update}
           className="nf-card-row scrollbar-hide flex overflow-x-auto scroll-smooth px-4 py-5 md:px-12"
           style={{ scrollbarWidth: 'none' }}
         >
-          <ImageRowGate value={gate.value}>
+          <ImageRowGate value={gate}>
             {loading && items.length === 0
               ? Array.from({ length: 8 }).map((_, i) => (
                   <div

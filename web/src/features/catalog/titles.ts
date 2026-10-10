@@ -246,7 +246,7 @@ export async function fetchProviderTv(providerId: number, sortBy = 'popularity.d
 }
 
 /** "More Like This": the server's matcher (collection first, then ranked matches for the profile). */
-export async function fetchRelated(id: number, type: NfMediaType, limit = 12, _year?: number): Promise<NfTitle[]> {
+export async function fetchRelated(id: number, type: NfMediaType, limit = 12): Promise<NfTitle[]> {
   const pid = getActiveProfileId();
   const d = await getJson<any>(`/api/catalog/${type}/${id}/similar?limit=${limit}${pid ? `&profile_id=${pid}` : ''}`);
   return fromTmdbList(d?.results, type);

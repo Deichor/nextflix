@@ -177,13 +177,19 @@ const TMDBMoviePage: React.FC = () => {
   const typeParam = searchParams?.get('type') || '';
   usePageTitle(mediaDetails?.title || t('detail.moreInfo'));
 
+  // The page component is reused when moving between titles
+  const titleKey = `${movieId}:${typeParam}`;
+  const [shownKey, setShownKey] = useState(titleKey);
+  if (shownKey !== titleKey) {
+    setShownKey(titleKey);
+    setPlayRequest(null);
+    setRelated([]);
+  }
+
   useEffect(() => {
     if (!movieId) return;
     let cancelled = false;
-    // The page component is reused when moving between titles
     autoPlayHandled.current = false;
-    setPlayRequest(null);
-    setRelated([]);
     window.scrollTo({ top: 0 });
     (async () => {
       try {
@@ -206,8 +212,7 @@ const TMDBMoviePage: React.FC = () => {
         setLogoFailed(false);
         fetchLogo(unified.id, unified.media_type).then(l => { if (!cancelled) setLogoUrl(l); });
 
-        const year = unified.release_date ? new Date(unified.release_date).getFullYear() : undefined;
-        fetchRelated(unified.id, unified.media_type, 12, year).then(r => {
+        fetchRelated(unified.id, unified.media_type, 12).then(r => {
           if (!cancelled) setRelated(r.filter(t => t.id !== unified.id));
         });
       } catch (err) {
@@ -254,10 +259,18 @@ const TMDBMoviePage: React.FC = () => {
     };
   }, [movieId]);
 
-  // Saved progress: the movie itself, or the TV episode the profile is in the middle of
+  // Saved progress: the movie itself, or the TV episode the profile is in the middle of.
+  // Cleared as soon as there is no profile or title to load it for.
+  const canLoadProgress = !!mediaDetails && !!activeProfile?.id;
+  const [couldLoadProgress, setCouldLoadProgress] = useState(canLoadProgress);
+  if (couldLoadProgress !== canLoadProgress) {
+    setCouldLoadProgress(canLoadProgress);
+    if (!canLoadProgress) setSavedProgress(null);
+  }
+
   useEffect(() => {
     const pid = activeProfile?.id;
-    if (!mediaDetails || !pid) { setSavedProgress(null); return; }
+    if (!mediaDetails || !pid) return;
     let cancelled = false;
     (async () => {
       const entries = await getTitleProgress(pid, mediaDetails.media_type, mediaDetails.id);

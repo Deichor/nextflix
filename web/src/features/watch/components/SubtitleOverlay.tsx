@@ -59,10 +59,12 @@ function renderCue(text: string, key: number): React.ReactNode {
 // Netflix-style subtitles drawn over the video. The cue for (offset + video time - delay) is
 // looked up every frame, so timing stays right across stream restarts.
 export default function SubtitleOverlay({ videoRef, offsetRef, cues, delay, raised, scale = 1, layout }: SubtitleOverlayProps) {
-  const [shown, setShown] = useState<Cue[]>([]);
+  // Tagged with the cue list it came from: a new or empty list never shows the old lines
+  const [active, setActive] = useState<{ cues: Cue[]; shown: Cue[] } | null>(null);
+  const shown = active && active.cues === cues ? active.shown : [];
 
   useEffect(() => {
-    if (cues.length === 0) { setShown([]); return; }
+    if (cues.length === 0) return;
     let raf = 0;
     let lastKey = '';
     const tick = () => {
@@ -72,7 +74,7 @@ export default function SubtitleOverlay({ videoRef, offsetRef, cues, delay, rais
         const key = now.map(c => c.start).join('|');
         if (key !== lastKey) {
           lastKey = key;
-          setShown(now);
+          setActive({ cues, shown: now });
         }
       }
       raf = requestAnimationFrame(tick);

@@ -4,6 +4,7 @@ import React from "react";
 import { usePathname } from "next/navigation";
 import { Film, Heart, House, Sparkles, Tv, type LucideIcon } from "lucide-react";
 import NavigationLink from "@/shared/navigation/NavigationLink";
+import { isCurrentUrl } from "@/shared/navigation/isCurrentUrl";
 import { useT, type MessageKey } from "@/shared/i18n";
 
 const TABS: { label: MessageKey; href: string; icon: LucideIcon }[] = [
@@ -37,7 +38,7 @@ export default function BottomTabBar() {
                 aria-current={active ? "page" : undefined}
                 onClick={e => {
                   // Re-tapping the current tab scrolls to the top
-                  if (pathname === href) {
+                  if (isCurrentUrl(href)) {
                     e.preventDefault();
                     window.scrollTo({ top: 0, behavior: "smooth" });
                   }

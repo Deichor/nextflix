@@ -22,15 +22,16 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
   const t = useT();
   const locale = useLocale();
   const { play, openInfo, progressFor } = useTitleActions();
-  const [logo, setLogo] = useState('');
-  const [logoFailed, setLogoFailed] = useState(false);
+  // Logo state belongs to the item it was fetched for, so a new item starts without one
+  const [fetched, setFetched] = useState<{ item: TitleItem; path: string } | null>(null);
+  const [failedFor, setFailedFor] = useState<TitleItem | null>(null);
+  const logo = item && fetched?.item === item ? fetched.path : '';
+  const logoFailed = !!item && failedFor === item;
 
   useEffect(() => {
-    setLogo('');
-    setLogoFailed(false);
     if (!item || item.media_type !== 'movie') return;
     const ctrl = new AbortController();
-    fetchMovieLogo(item.id, ctrl.signal).then(path => { if (!ctrl.signal.aborted) setLogo(path); });
+    fetchMovieLogo(item.id, ctrl.signal).then(path => { if (!ctrl.signal.aborted) setFetched({ item, path }); });
     return () => ctrl.abort();
   }, [item]);
 
@@ -87,7 +88,7 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
           <img
             src={img('w500', logo)}
             alt={item.title}
-            onError={() => setLogoFailed(true)}
+            onError={() => setFailedFor(item)}
             className="max-h-[90px] sm:max-h-[120px] md:max-h-[160px] max-w-full w-auto object-contain object-left mb-3 md:mb-5 drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)]"
           />
         ) : (

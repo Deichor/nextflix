@@ -27,6 +27,8 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
   const [color, setColor] = useState(profile?.color ?? PROFILE_COLORS[profileCount % PROFILE_COLORS.length]);
   const [language, setLanguage] = useState<ProfileLanguage>(profile?.language ?? (isNew ? currentLocale : 'en'));
   const [saving, setSaving] = useState(false);
+  // Sync guard: Enter can fire again before the `saving` state re-renders
+  const busyRef = useRef(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -44,10 +46,12 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
   }, [onClose]);
 
   const save = async () => {
+    if (busyRef.current) return;
     if (!trimmed) {
       setError(t('profiles.nameRequired'));
       return;
     }
+    busyRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -63,12 +67,14 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
     } catch (e) {
       setError(e instanceof Error ? e.message : t('profiles.couldNotSave'));
     } finally {
+      busyRef.current = false;
       setSaving(false);
     }
   };
 
   const remove = async () => {
-    if (!profile || !canDelete) return;
+    if (!profile || !canDelete || busyRef.current) return;
+    busyRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -80,6 +86,7 @@ export default function ProfileEditor({ profile, profileCount, onClose, onChange
       setError(e instanceof Error ? e.message : t('profiles.couldNotDelete'));
       setConfirmDelete(false);
     } finally {
+      busyRef.current = false;
       setSaving(false);
     }
   };

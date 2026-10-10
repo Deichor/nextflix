@@ -131,6 +131,8 @@ interface Gpu {
  */
 export class Upscaler {
   private gpu: Gpu | null = null;
+  // The canvas context, also when the GPU setup failed (lost on destroy)
+  private gl: WebGLRenderingContext | null = null;
   private shaders: Shaders | null = null;
   private programs: Anime4KShader[] = [];
   private tier: Tier;
@@ -182,6 +184,9 @@ export class Upscaler {
       for (const tex of [g.input, g.native, g.output]) g.gl.deleteTexture(tex);
     }
     this.gpu = null;
+    // Free the context now instead of at GC (browsers cap live contexts, ~16 in Chrome)
+    this.gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    this.gl = null;
   }
 
   private async init() {
@@ -193,6 +198,7 @@ export class Upscaler {
     }
     if (this.destroyed) return;
     const gl = this.canvas.getContext('webgl', { premultipliedAlpha: false, depth: false, stencil: false, antialias: false });
+    this.gl = gl;
     if (!gl || !enableExtensions(gl)) {
       this.stop('unsupported', gl ? 'extensions' : 'webgl');
       return;

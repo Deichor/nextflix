@@ -27,12 +27,11 @@ export default function SurpriseModal({ onClose, onPlay }: SurpriseModalProps) {
   const ctrlRef = useRef<AbortController | null>(null);
   const playRef = useRef<HTMLButtonElement>(null);
 
-  const next = useCallback(() => {
+  // Callers set loading/failed first (the initial state already says loading)
+  const fetchPick = useCallback(() => {
     ctrlRef.current?.abort();
     const ctrl = new AbortController();
     ctrlRef.current = ctrl;
-    setLoading(true);
-    setFailed(false);
     fetchSurprise(ctrl.signal)
       .then(p => {
         if (ctrl.signal.aborted) return;
@@ -47,10 +46,16 @@ export default function SurpriseModal({ onClose, onPlay }: SurpriseModalProps) {
       .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
   }, []);
 
+  const next = () => {
+    setLoading(true);
+    setFailed(false);
+    fetchPick();
+  };
+
   useEffect(() => {
-    next();
+    fetchPick();
     return () => ctrlRef.current?.abort();
-  }, [next]);
+  }, [fetchPick]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };

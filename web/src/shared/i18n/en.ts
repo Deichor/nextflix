@@ -23,6 +23,11 @@ export const en = {
   'common.scrollLeft': 'Scroll left',
   'common.scrollRight': 'Scroll right',
 
+  // Error boundary fallback
+  'error.title': 'Something went wrong',
+  'error.unexpected': 'An unexpected error occurred',
+  'error.tryAgain': 'Try Again',
+
   // Languages are always shown in their own language
   'language.en': 'English',
   'language.tr': 'Türkçe',

@@ -92,6 +92,8 @@ export default function NotificationsScreen() {
   const navigate = useNavigate();
   const { items, loaded, unread } = useNotifications(true);
   const [filter, setFilter] = useState<Filter>('all');
+  // Day groups are relative to when the page opened
+  const [now] = useState(() => Date.now());
 
   // Viewing the page clears the bell badge for what is listed
   useEffect(() => {
@@ -99,7 +101,6 @@ export default function NotificationsScreen() {
   }, [items]);
 
   const groups = useMemo(() => {
-    const now = Date.now();
     const list = filter === 'unread' ? items.filter(n => !n.read) : items;
     const out: { label: MessageKey; items: Notification[] }[] = [];
     for (const n of list) {
@@ -109,7 +110,7 @@ export default function NotificationsScreen() {
       else out.push({ label, items: [n] });
     }
     return out;
-  }, [items, filter]);
+  }, [items, filter, now]);
 
   const open = (n: Notification, index = 0) => {
     void markNotificationRead(n.id);

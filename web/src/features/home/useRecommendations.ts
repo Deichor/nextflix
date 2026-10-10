@@ -7,6 +7,7 @@ import { RecommendationRow, fetchRecommendations } from '@/features/home/feeds';
 
 // Last rows per profile and language, so coming back to Home paints them at once
 const lastRows = new Map<string, RecommendationRow[]>();
+const NO_ROWS: RecommendationRow[] = [];
 
 // A rating change refreshes the rows after a short pause (the server recomputes them).
 // The swap waits while a hover preview is open, so the card under the mouse does not vanish.
@@ -21,17 +22,23 @@ export function useRecommendations(profileId: number | null): RecommendationRow[
   // Titles come in the profile language (X-Lang), so rows are kept and refetched per language
   const locale = useLocale();
   const rowsKey = `${profileId}:${locale}`;
-  const [rows, setRows] = useState<RecommendationRow[] | null>(profileId ? lastRows.get(rowsKey) ?? null : null);
+  // Answer for one key; until the current key has one, the cached rows (or null) are shown
+  const [fetched, setFetched] = useState<{ key: string; rows: RecommendationRow[] } | null>(null);
   const [refresh, setRefresh] = useState(0);
   const ratingsVersion = useRatingsVersion();
+  const rows = !profileId ? NO_ROWS
+    : fetched?.key === rowsKey ? fetched.rows
+      : lastRows.get(rowsKey) ?? null;
 
   useEffect(() => {
-    if (!profileId) { setRows([]); return; }
-    setRows(lastRows.get(rowsKey) ?? null);
+    if (!profileId) return;
     const ctrl = new AbortController();
     fetchRecommendations(profileId, ctrl.signal, locale)
-      .then(r => { lastRows.set(rowsKey, r); setRows(r); })
-      .catch(err => { if (err?.name !== 'AbortError') setRows(prev => prev ?? []); });
+      .then(r => { lastRows.set(rowsKey, r); setFetched({ key: rowsKey, rows: r }); })
+      .catch(err => {
+        if (err?.name === 'AbortError') return;
+        setFetched(prev => (prev?.key === rowsKey ? prev : { key: rowsKey, rows: lastRows.get(rowsKey) ?? [] }));
+      });
     return () => ctrl.abort();
   }, [profileId, rowsKey, locale, refresh]);
 

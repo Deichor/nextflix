@@ -104,7 +104,12 @@ export default function RootLayout({
                   wrap(HTMLImageElement.prototype, 'src');
                   wrap(HTMLImageElement.prototype, 'srcset');
                   wrap(HTMLVideoElement.prototype, 'poster');
-                  ['backgroundImage', 'background'].forEach(function(p) { wrap(CSSStyleDeclaration.prototype, p); });
+                  // Firefox keeps the style accessors on CSS2Properties.prototype
+                  var styleProtos = [CSSStyleDeclaration.prototype];
+                  if (typeof CSS2Properties !== 'undefined') styleProtos.push(CSS2Properties.prototype);
+                  styleProtos.forEach(function(proto) {
+                    ['backgroundImage', 'background', 'background-image', 'cssText'].forEach(function(p) { wrap(proto, p); });
+                  });
                   var setProp = CSSStyleDeclaration.prototype.setProperty;
                   CSSStyleDeclaration.prototype.setProperty = function(n, v, pr) { return setProp.call(this, n, fix(v), pr); };
                 } catch (e) {}

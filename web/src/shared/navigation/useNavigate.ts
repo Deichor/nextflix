@@ -9,12 +9,12 @@ export const useNavigate = () => {
   const { startLoading } = useNavigationLoader();
 
   const push = useCallback((href: string) => {
-    startLoading();
+    startLoading(href);
     router.push(href);
   }, [router, startLoading]);
 
   const replace = useCallback((href: string) => {
-    startLoading();
+    startLoading(href);
     router.replace(href);
   }, [router, startLoading]);
 
@@ -28,10 +28,10 @@ export const useNavigate = () => {
     router.forward();
   }, [router, startLoading]);
 
+  // No overlay: refresh keeps the URL, so nothing would clear it.
   const refresh = useCallback(() => {
-    startLoading();
     router.refresh();
-  }, [router, startLoading]);
+  }, [router]);
 
   return {
     push,

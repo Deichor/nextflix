@@ -100,7 +100,34 @@ export interface SubtitleQuery {
   year?: number;
 }
 
-const listCache = new Map<string, Promise<SubtitleItem[]>>();
+// Map that keeps only the `max` most recently used entries (Map iterates in insertion order)
+class LruCache<K, V> {
+  private readonly map = new Map<K, V>();
+  private readonly max: number;
+  constructor(max: number) {
+    this.max = max;
+  }
+  get(key: K): V | undefined {
+    const v = this.map.get(key);
+    if (v !== undefined) {
+      this.map.delete(key);
+      this.map.set(key, v);
+    }
+    return v;
+  }
+  set(key: K, value: V) {
+    this.map.delete(key);
+    this.map.set(key, value);
+    if (this.map.size > this.max) this.map.delete(this.map.keys().next().value as K);
+  }
+  delete(key: K) {
+    this.map.delete(key);
+  }
+}
+
+const CACHE_MAX = 20;
+
+const listCache = new LruCache<string, Promise<SubtitleItem[]>>(CACHE_MAX);
 
 /**
  * Subtitles for the playing file, best first per language. Cached per file for the session;
@@ -232,7 +259,7 @@ export interface Cue {
   text: string;
 }
 
-const cueCache = new Map<string, Promise<Cue[]>>();
+const cueCache = new LruCache<string, Promise<Cue[]>>(CACHE_MAX);
 // Subtitle files that could not be loaded, by id: not asked again before `until`
 const failedFiles = new Map<string, { why: SubtitleFailure; until: number }>();
 const FAILED_FILE_MS = 5 * 60 * 1000;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 
 // Same localStorage entry and shape as the player (features/watch/subtitles.ts: PlayerPrefs).
 // audioLang and sub are already read by the player; 'original', subSize and autoplayNext are new.
@@ -22,15 +22,29 @@ export const SUBTITLE_SIZE_SCALE: Record<SubtitleSize, number> = { small: 0.8, m
 
 const prefsKey = (profileId: number | null) => `hfx-player:${profileId ?? 0}`;
 
-export function readPrefs(profileId: number | null): SettingsPlayerPrefs {
+function readRaw(profileId: number | null): string | null {
   try {
-    const raw = window.localStorage.getItem(prefsKey(profileId));
+    return window.localStorage.getItem(prefsKey(profileId));
+  } catch {
+    return null;
+  }
+}
+
+function parsePrefs(raw: string | null): SettingsPlayerPrefs {
+  try {
     const parsed = raw ? JSON.parse(raw) : {};
     return parsed && typeof parsed === 'object' ? (parsed as SettingsPlayerPrefs) : {};
   } catch {
     return {};
   }
 }
+
+export function readPrefs(profileId: number | null): SettingsPlayerPrefs {
+  return parsePrefs(readRaw(profileId));
+}
+
+// Same-tab writes do not fire 'storage'
+const localListeners = new Set<() => void>();
 
 // Merges into the stored object so keys written by the player (e.g. sub.id) are kept
 export function writePrefs(profileId: number | null, patch: Partial<SettingsPlayerPrefs>): void {
@@ -40,26 +54,27 @@ export function writePrefs(profileId: number | null, patch: Partial<SettingsPlay
   } catch {
     /* storage unavailable */
   }
+  localListeners.forEach(fn => fn());
 }
 
-export function usePlayerPrefs(profileId: number | null) {
-  const [prefs, setPrefs] = useState<SettingsPlayerPrefs>({});
+function subscribePrefs(onChange: () => void) {
+  localListeners.add(onChange);
+  window.addEventListener('storage', onChange);
+  return () => {
+    localListeners.delete(onChange);
+    window.removeEventListener('storage', onChange);
+  };
+}
 
-  useEffect(() => {
-    setPrefs(readPrefs(profileId));
-    const key = prefsKey(profileId);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key) setPrefs(readPrefs(profileId));
-    };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, [profileId]);
+const serverRaw = () => null;
+
+export function usePlayerPrefs(profileId: number | null) {
+  // The raw JSON string is a stable snapshot; parsed only when it changes
+  const raw = useSyncExternalStore(subscribePrefs, () => readRaw(profileId), serverRaw);
+  const prefs = useMemo(() => parsePrefs(raw), [raw]);
 
   const update = useCallback(
-    (patch: Partial<SettingsPlayerPrefs>) => {
-      writePrefs(profileId, patch);
-      setPrefs(readPrefs(profileId));
-    },
+    (patch: Partial<SettingsPlayerPrefs>) => writePrefs(profileId, patch),
     [profileId],
   );
 

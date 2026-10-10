@@ -118,6 +118,14 @@ export default function SeekThumbnail({ apiUrl, hash, index, duration, dragTime,
     listeners.add(bump);
     return () => { listeners.delete(bump); };
   }, []);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const t = dragTime ?? hoverT;
   const grid = t === null ? null : Math.max(0, Math.floor(t / GRID) * GRID);
   const ready = !!hash && index !== undefined && duration > 0;
@@ -158,7 +166,6 @@ export default function SeekThumbnail({ apiUrl, hash, index, duration, dragTime,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiUrl, hash, index, ready, playing, prefetchSlot, duration, prefix]);
 
-  const width = box.current?.clientWidth || 0;
   // Half the frame plus a margin: the frame never leaves the bar
   const half = touch ? 92 : 110;
   const x = t === null || duration <= 0 ? 0 : Math.max(half, Math.min(width - half, (t / duration) * width));

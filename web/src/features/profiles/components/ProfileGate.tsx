@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { getActiveProfile, setActiveProfile, PROFILE_EVENT } from '@/shared/lib/profile';
+import { getActiveProfile, setActiveProfile, useActiveProfile } from '@/shared/lib/profile';
 import { listProfiles } from '@/features/profiles/api';
 
 const PICKER_PATH = '/profiles';
@@ -21,26 +21,13 @@ export default function ProfileGate({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const onPicker = isPickerPath(pathname);
-  const [verified, setVerified] = useState(false);
-  const validated = useRef(false);
+  const hasProfile = !!useActiveProfile();
+  // Set once the backend check of this page load is done; later navigations only need hasProfile
+  const [validated, setValidated] = useState(false);
+  const verified = validated && hasProfile;
 
   useEffect(() => {
-    if (onPicker) return;
-
-    const redirect = () => {
-      const current = window.location.pathname + window.location.search;
-      router.replace(`${PICKER_PATH}?next=${encodeURIComponent(current)}`);
-    };
-
-    // Later navigations only need the cheap local check
-    if (validated.current) {
-      if (getActiveProfile()) setVerified(true);
-      else {
-        setVerified(false);
-        redirect();
-      }
-      return;
-    }
+    if (onPicker || validated) return;
 
     let cancelled = false;
     const controller = new AbortController();
@@ -48,7 +35,6 @@ export default function ProfileGate({ children }: { children: ReactNode }) {
 
     (async () => {
       const stored = getActiveProfile();
-      let ok = !!stored;
       try {
         const profiles = await listProfiles(controller.signal);
         const fresh = stored ? profiles.find((p) => p.id === stored.id) : undefined;
@@ -61,10 +47,9 @@ export default function ProfileGate({ children }: { children: ReactNode }) {
           ) {
             setActiveProfile(fresh);
           }
-          ok = true;
-        } else {
-          if (stored) setActiveProfile(null);
-          ok = false;
+        } else if (stored) {
+          // Unknown to the backend: clearing it sends the effect below to the picker
+          setActiveProfile(null);
         }
       } catch {
         // Backend unreachable: keep whatever is stored
@@ -72,9 +57,7 @@ export default function ProfileGate({ children }: { children: ReactNode }) {
         clearTimeout(timer);
       }
       if (cancelled) return;
-      validated.current = true;
-      if (ok) setVerified(true);
-      else redirect();
+      setValidated(true);
     })();
 
     return () => {
@@ -82,25 +65,14 @@ export default function ProfileGate({ children }: { children: ReactNode }) {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [onPicker, pathname, router]);
+  }, [onPicker, validated]);
 
-  // Profile cleared elsewhere (e.g. deleted in another tab) -> back to the picker
+  // No profile (none stored, cleared elsewhere, e.g. deleted in another tab) -> the picker
   useEffect(() => {
-    if (onPicker) return;
-    const onChange = () => {
-      if (!getActiveProfile()) {
-        setVerified(false);
-        const current = window.location.pathname + window.location.search;
-        router.replace(`${PICKER_PATH}?next=${encodeURIComponent(current)}`);
-      }
-    };
-    window.addEventListener(PROFILE_EVENT, onChange);
-    window.addEventListener('storage', onChange);
-    return () => {
-      window.removeEventListener(PROFILE_EVENT, onChange);
-      window.removeEventListener('storage', onChange);
-    };
-  }, [onPicker, router]);
+    if (onPicker || !validated || hasProfile) return;
+    const current = window.location.pathname + window.location.search;
+    router.replace(`${PICKER_PATH}?next=${encodeURIComponent(current)}`);
+  }, [onPicker, validated, hasProfile, router]);
 
   if (onPicker) return <>{children}</>;
   if (!verified) return <div className="fixed inset-0 bg-[#141414]" aria-busy="true" />;
