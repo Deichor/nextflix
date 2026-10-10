@@ -27,64 +27,21 @@ const nextConfig = {
   // Development configuration
   allowedDevOrigins: ['192.168.0.109', 'localhost', '127.0.0.1', '0.0.0.0'],
 
-  // Compiler optimizations
+  // Compiler optimizations (errors and warnings stay visible in production)
   compiler: {
-    removeConsole: process.env.NODE_ENV === 'production',
+    removeConsole: process.env.NODE_ENV === 'production' ? { exclude: ['error', 'warn'] } : false,
   },
 
-  // Bundle optimization
-  webpack: (config, { dev, isServer }) => {
-    // Optimize bundle splitting
-    if (!dev && !isServer) {
-      config.optimization.splitChunks = {
-        chunks: 'all',
-        cacheGroups: {
-          vendor: {
-            // anime4k.js (large shaders) stays in its own lazy chunk, loaded only when upscaling is on
-            test: /[\\/]node_modules[\\/](?!anime4k\.js[\\/])/,
-            name: 'vendors',
-            chunks: 'all',
-          },
-          common: {
-            name: 'common',
-            minChunks: 2,
-            chunks: 'all',
-            enforce: true,
-          },
-        },
-      };
-    }
-
-    // Optimize imports
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      '@': require('path').resolve(__dirname, 'src'),
-    };
-
-    return config;
-  },
+  // Turbopack (the default bundler) splits chunks itself; anime4k.js stays a lazy chunk via its dynamic import.
+  // The `@/` alias comes from tsconfig paths.
 
   // Static optimization
   trailingSlash: false,
   poweredByHeader: false,
-  
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
 
-  // Image optimization
+  // next/image is not used; images load via /tmdb-img (Go server cache), so the optimizer stays off
   images: {
-    formats: ['image/webp', 'image/avif'],
-    minimumCacheTTL: 31536000, // 1 year
-    dangerouslyAllowSVG: true,
-    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
-    remotePatterns: [
-      {
-        protocol: 'https',
-        hostname: 'image.tmdb.org',
-        pathname: '/t/p/**',
-      },
-    ],
+    unoptimized: true,
   },
 
   // Headers for caching
@@ -104,15 +61,6 @@ const nextConfig = {
           {
             key: 'X-XSS-Protection',
             value: '1; mode=block',
-          },
-        ],
-      },
-      {
-        source: '/_next/static/(.*)',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=31536000, immutable',
           },
         ],
       },

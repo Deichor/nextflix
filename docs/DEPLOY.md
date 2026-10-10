@@ -41,16 +41,27 @@ compose file and point at the other services.
 
 ## Services, ports and volumes
 
-| Service | Image | Published | Data |
-|---|---|---|---|
-| `server` | built | `8252` (LAN) | volume `db` -> `/app/data` (SQLite) |
-| `web` | built | `3008` (LAN) | none |
-| `redis` | `redis:7-alpine` (AOF, 512 MB LRU) | no | volume `redis-data` |
-| `jackett` | `lscr.io/linuxserver/jackett` | `127.0.0.1:9117` | `deploy/data/jackett` |
-| `flaresolverr` | `ghcr.io/flaresolverr/flaresolverr:v3.5.2` | no | none |
-| `torrserver` | `ghcr.io/yourok/torrserver:MatriX.145.1` | `127.0.0.1:8090` | volume `torrserver-data` |
+| Service | Image | Published | Networks | Data |
+|---|---|---|---|---|
+| `server` | built | `8252` (LAN) | frontend, backend, cache | volume `db` -> `/app/data` (SQLite) |
+| `web` | built | `3008`, `80` (LAN) | frontend | none |
+| `tvapp` | `nginx:1.30.5-alpine` | no | frontend | `tv/webos/dist` (read-only) |
+| `mdns` | built (`python:3.14.8-slim-trixie`) | `5353/udp` (host network) | host | none |
+| `redis` | `redis:8.10.2-alpine` (AOF, 512 MB LRU) | no | cache | volume `redis-data` |
+| `jackett` | `lscr.io/linuxserver/jackett:v0.24.2810-ls53` | `127.0.0.1:9117` | backend | `deploy/data/jackett` |
+| `flaresolverr` | `ghcr.io/flaresolverr/flaresolverr:v3.5.2` | no | backend | none |
+| `torrserver` | `ghcr.io/yourok/torrserver:MatriX.146` | `127.0.0.1:8090`, `41413` tcp+udp (peers) | backend | volume `torrserver-data` |
 
 Keep the service name `flaresolverr`: Jackett's config points at `http://flaresolverr:8191`.
+
+Every third-party image is pinned to an exact tag; update by changing the tag (Jackett's in-container
+`AUTO_UPDATE` is off). Networks: `web` only reaches `server` and `tvapp` (`frontend`); Jackett, FlareSolverr and
+TorrServer sit on `backend`; Redis is alone with `server` on `cache`, an internal network without internet access.
+`server` waits for Redis' healthcheck (`redis-cli ping`) before it starts.
+
+All services use `no-new-privileges` and json-file logs capped at 3 x 10 MB. All except Jackett drop every Linux
+capability; `redis` and `tvapp` add back only what their root entrypoints need to switch users. Jackett keeps the
+defaults because s6-overlay starts as root and chowns `/config`.
 
 SQLite lives in a named volume on purpose: WAL and mmap are unreliable on Windows bind mounts (`/mnt/c`).
 
@@ -62,6 +73,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 Database migrations run automatically at server start (gorm AutoMigrate; tables are never dropped).
+Redis data written by Redis 8 cannot be loaded by Redis 7 again, so do not roll the `redis` tag back.
 
 ## Backups
 

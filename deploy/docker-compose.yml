@@ -3,6 +3,13 @@
 # Copy deploy/config/*.env.example to *.env first.
 name: nextflix
 
+# Cap docker logs per container (30 MB max)
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   server:
     build:
@@ -28,10 +35,18 @@ services:
       - db:/app/data
       # Built TV app, served at /tv/ for the TV's own browser (tv/webos/scripts/build.sh)
       - ../tv/webos/dist:/app/tv:ro
+    networks: [frontend, backend, cache]
     depends_on:
-      - redis
-      - jackett
-      - torrserver
+      # Notifications are turned off when Redis is not up at boot
+      redis:
+        condition: service_healthy
+      jackett:
+        condition: service_started
+      torrserver:
+        condition: service_started
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
     restart: unless-stopped
 
   web:
@@ -51,15 +66,26 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3008
+    # Only talks to server and tvapp
+    networks: [frontend]
     depends_on:
       - server
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
     restart: unless-stopped
 
   # The built TV app (tv/webos/scripts/build.sh), reached through web at http://tv.nextflix.local and /tv/
   tvapp:
-    image: nginx:1.27-alpine
+    image: nginx:1.30.5-alpine
     volumes:
       - ../tv/webos/dist:/usr/share/nginx/html:ro
+    networks: [frontend]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # Master starts as root, binds :80, creates its cache dirs and switches workers to "nginx"
+    cap_add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE]
+    logging: *logging
     restart: unless-stopped
 
   # Announces nextflix.local on the LAN (mDNS); needs the host network to reach multicast
@@ -67,26 +93,47 @@ services:
     build:
       context: ./mdns
     network_mode: host
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.10.2-alpine
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
+    # Internal network: no internet access, only server reaches it
+    networks: [cache]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # The entrypoint fixes /data ownership as root, then drops to the "redis" user
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    logging: *logging
     restart: unless-stopped
 
   jackett:
-    image: lscr.io/linuxserver/jackett:latest
+    image: lscr.io/linuxserver/jackett:v0.24.2810-ls53
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=UTC
-      - AUTO_UPDATE=true
+      # Version is pinned by the image tag; update by changing the tag
+      - AUTO_UPDATE=false
     volumes:
       - ${JACKETT_CONFIG_DIR:-./data/jackett}:/config
     ports:
       - "127.0.0.1:9117:9117"
+    networks: [backend]
+    # No cap_drop: s6-overlay starts as root and needs to chown /config and switch users
+    security_opt: [no-new-privileges:true]
+    logging: *logging
     restart: unless-stopped
 
   # Solves Cloudflare challenges for Jackett indexers like 1337x (internal only).
@@ -96,11 +143,16 @@ services:
     environment:
       - LOG_LEVEL=info
       - TZ=UTC
+    networks: [backend]
+    # Runs as a non-root user and starts Chromium with --no-sandbox
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
     restart: unless-stopped
 
   # Streams torrents over HTTP while they download (used by the "Watch" button)
   torrserver:
-    image: ghcr.io/yourok/torrserver:MatriX.145.1
+    image: ghcr.io/yourok/torrserver:MatriX.146
     environment:
       - TS_PORT=8090
       - TS_CONF_PATH=/opt/ts/config
@@ -112,7 +164,21 @@ services:
       # BitTorrent peer port only (forwarded on the router); the API above stays local
       - "41413:41413/tcp"
       - "41413:41413/udp"
+    networks: [backend]
+    # Runs as root on root-owned files and only binds ports above 1024
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
     restart: unless-stopped
+
+networks:
+  # web, server and tvapp
+  frontend:
+  # server and the services it calls (they need internet access)
+  backend:
+  # server and redis only, no internet
+  cache:
+    internal: true
 
 volumes:
   db:

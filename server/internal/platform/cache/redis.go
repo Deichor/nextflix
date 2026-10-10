@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // Cache wraps a redis client. A nil *Cache is valid and behaves as an always-miss cache.
@@ -15,7 +15,9 @@ type Cache struct {
 	client *redis.Client
 }
 
-// New connects to redis and pings it. An empty url disables the cache (nil, nil).
+// New creates the redis client. An empty url disables the cache (nil, nil); only a bad url
+// is an error. The client connects lazily and reconnects on its own, so a redis that is down
+// at boot is picked up once it is back (see Ping).
 func New(url string) (*Cache, error) {
 	if url == "" {
 		return nil, nil
@@ -24,15 +26,17 @@ func New(url string) (*Cache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse redis url: %w", err)
 	}
-	client := redis.NewClient(opts)
+	return &Cache{client: redis.NewClient(opts)}, nil
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("connect to redis: %w", err)
+// Ping checks that redis answers within 5 seconds.
+func (c *Cache) Ping(ctx context.Context) error {
+	if c == nil || c.client == nil {
+		return errors.New("redis disabled")
 	}
-	return &Cache{client: client}, nil
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.client.Ping(ctx).Err()
 }
 
 // GetJSON decodes the value at key into dst. It reports false on a miss or when the cache is disabled.

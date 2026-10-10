@@ -7,7 +7,7 @@ docker run --rm \
   -v "$ROOT/web:/src:ro" \
   -v nextflix-npm-cache:/root/.npm \
   -e OWN_REGEX="${1:-}" \
-  node:18-alpine sh -c '
+  node:24-alpine sh -c '
     mkdir -p /app && cd /src &&
     tar --exclude=./node_modules --exclude=./.next -cf - . | tar -C /app -xf - &&
     cd /app &&

@@ -1,5 +1,5 @@
 # Build context: server/ (see deploy/docker-compose.yml)
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.27-trixie AS builder
 
 # go-sqlite3 needs cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,7 +17,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags '-s -w -linkmode external -extldflags "-static"' \
     -o /out/nextflix ./cmd/nextflix
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # ffmpeg remuxes torrent streams to fMP4; sqlite3 is kept for debugging the database
 RUN apt-get update && apt-get install -y --no-install-recommends \

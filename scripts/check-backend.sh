@@ -10,7 +10,7 @@ docker run --rm \
   -v nextflix-gomod:/go/pkg/mod \
   -v nextflix-gocache:/root/.cache/go-build \
   -e PKGS="$PKGS" \
-  golang:1.24-bookworm sh -c '
+  golang:1.27-trixie sh -c '
     mkdir -p /app && cd /src && tar --exclude="*.db*" -cf - . | tar -C /app -xf - &&
     cd /app && { go build $PKGS && echo "GO_BUILD=ok" || echo "GO_BUILD=failed"; } &&
     files=$(gofmt -l .) ; echo "$files" | sed "/^$/d;s/^/gofmt: /"; echo "GOFMT_FILES=$(echo "$files" | sed "/^$/d" | wc -l)";

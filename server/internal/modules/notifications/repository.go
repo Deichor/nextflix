@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -62,7 +62,7 @@ func (r *repository) add(ctx context.Context, n Notification) error {
 	if err != nil {
 		return err
 	}
-	if err := r.rdb.ZAdd(ctx, feedKey, &redis.Z{Score: float64(n.Timestamp), Member: string(data)}).Err(); err != nil {
+	if err := r.rdb.ZAdd(ctx, feedKey, redis.Z{Score: float64(n.Timestamp), Member: string(data)}).Err(); err != nil {
 		return fmt.Errorf("add notification: %w", err)
 	}
 	r.rdb.Expire(ctx, feedKey, feedTTL)
@@ -103,9 +103,9 @@ func (r *repository) markRead(ctx context.Context, owner string, ids ...string) 
 	}
 	key := readKeyPrefix + owner
 	now := time.Now().Unix()
-	members := make([]*redis.Z, len(ids))
+	members := make([]redis.Z, len(ids))
 	for i, id := range ids {
-		members[i] = &redis.Z{Score: float64(now), Member: id}
+		members[i] = redis.Z{Score: float64(now), Member: id}
 	}
 	pipe := r.rdb.TxPipeline()
 	pipe.ZAdd(ctx, key, members...)
@@ -136,11 +136,11 @@ func (r *repository) setSeen(ctx context.Context, owner string, unix int64) erro
 	return r.rdb.Set(ctx, seenKeyPrefix+owner, unix, stateTTL).Err()
 }
 
-// purgeNonTMDB removes leftovers of the old local-media generators.
-func (r *repository) purgeNonTMDB(ctx context.Context) {
+// purgeNonTMDB removes leftovers of the old local-media generators; false when redis did not answer.
+func (r *repository) purgeNonTMDB(ctx context.Context) bool {
 	raw, err := r.rdb.ZRange(ctx, feedKey, 0, -1).Result()
 	if err != nil {
-		return
+		return false
 	}
 	var stale []any
 	for _, member := range raw {
@@ -153,6 +153,7 @@ func (r *repository) purgeNonTMDB(ctx context.Context) {
 		r.rdb.ZRem(ctx, feedKey, stale...)
 		log.Printf("notifications: removed %d old local-media notifications", len(stale))
 	}
+	return true
 }
 
 func decode(raw []string) []Notification {

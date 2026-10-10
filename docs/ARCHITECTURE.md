@@ -4,12 +4,12 @@ Nextflix is a modular monolith: one Go binary (`server/`) and one Next.js app (`
 in its own module on both sides; shared infrastructure lives in `platform/` (server) and `shared/` (web).
 
 ```
-server/                     Go 1.24, gin, gorm + SQLite, go-redis v8   (module name: nextflix)
+server/                     Go 1.27, gin, gorm + SQLite, go-redis v9   (module name: nextflix)
   cmd/nextflix/main.go      wiring only
   internal/platform/        config, database, httpserver, cache, tmdb, upstream, torbox
   internal/modules/         profiles, progress, ratings, recommendations, top10, catalog, providers,
                             notifications, streaming, subtitles, segments, images, playbacklog
-web/                        Next.js 15 (App Router), React 19, TypeScript
+web/                        Next.js 16 (App Router), React 19, TypeScript
   src/app/                  thin routes: export { default } from '@/features/...'
   src/features/<domain>/    screens, components, api/store files of one domain
   src/shared/               lib (api, profile, image), i18n, navigation, hooks, ui, types
@@ -24,9 +24,9 @@ docs/                       this folder
 
 | Package | Responsibility |
 |---|---|
-| `config` | Reads env: `PORT` (8252), `DATABASE_URL`, `REDIS_URL`, `TMDB_API_KEY`, `TORRSERVER_URL`, `JACKETT_URL`, `JACKETT_API_KEY`, `ALLOWED_ORIGINS` |
+| `config` | Reads env: `PORT` (8252), `DATABASE_URL`, `REDIS_URL`, `TMDB_API_KEY`, `TORRSERVER_URL`, `JACKETT_URL`, `JACKETT_API_KEY`, `ALLOWED_ORIGINS`, `ALLOWED_HOSTS` |
 | `database` | SQLite open with pragmas and pool settings, `Migrate(db, models...)` |
-| `httpserver` | gin engine, logging/recovery, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check, `ProfileID(c)` from `X-User-ID`, `GET /api/health`, `http.Server` with graceful shutdown |
+| `httpserver` | gin engine, logging/recovery, Host check against DNS rebinding (LAN names and IPs, `server`, hosts of `ALLOWED_ORIGINS` and `ALLOWED_HOSTS`), `Sec-Fetch-Site: cross-site` block (except LAN CORS origins, the packaged webOS app and page navigations outside `/api/`), 1 MB body cap, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check, `ProfileID(c)` from `X-User-ID`, `GET /api/health`, `http.Server` with graceful shutdown |
 | `cache` | go-redis v8 wrapper; a nil `*Cache` is valid and behaves as "no cache" |
 | `tmdb` | TMDB HTTP client (v4 token as Bearer, on `upstream`), types, 24 h in-memory cache shared by catalog, providers and notifications; expired entries are kept 7 days and served when TMDB fails (see [DPI resilience](#dpi-resilience)) |
 | `upstream` | Resilient HTTP client for TMDB API, image CDN, the TMDB export files (search typo index) and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |

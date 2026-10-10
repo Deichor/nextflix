@@ -27,7 +27,7 @@ restructured into a small modular monolith: one Go server, one Next.js web app, 
 | Container | What it does | Port |
 |---|---|---|
 | `server` | Go/gin API (`server/`), SQLite in the `db` volume, ffmpeg for remuxing | 8252 |
-| `web` | Next.js 15 app (`web/`), proxies `/api/*` to the server and `/tmdb-img/*` to TMDB | 3008 |
+| `web` | Next.js 16 app (`web/`), proxies `/api/*` to the server and `/tmdb-img/*` to TMDB | 3008 |
 | `redis` | Backs the notification feed | internal |
 | `jackett` | Torrent indexer aggregator | 127.0.0.1:9117 |
 | `flaresolverr` | Solves Cloudflare challenges for Jackett | internal |

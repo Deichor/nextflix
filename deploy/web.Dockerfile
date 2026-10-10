@@ -1,5 +1,5 @@
 # Build context: web/ (see deploy/docker-compose.yml)
-FROM node:18-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
@@ -15,7 +15,7 @@ ENV BACKEND_INTERNAL_URL=$BACKEND_INTERNAL_URL NEXT_PUBLIC_API_URL=$BACKEND_INTE
 
 RUN npm run build
 
-FROM node:18-alpine AS runner
+FROM node:24-alpine AS runner
 
 WORKDIR /app
 
