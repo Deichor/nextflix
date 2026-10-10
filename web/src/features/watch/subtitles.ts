@@ -332,22 +332,7 @@ export function parseVtt(text: string): Cue[] {
   return cues.sort((x, y) => x.start - y.start);
 }
 
-/** Cues showing at time t (cues must be sorted by start). */
-export function activeCues(cues: Cue[], t: number): Cue[] {
-  let lo = 0;
-  let hi = cues.length - 1;
-  let last = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (cues[mid].start <= t) { last = mid; lo = mid + 1; } else hi = mid - 1;
-  }
-  const out: Cue[] = [];
-  // Overlapping cues are rare and short; looking back a few is enough
-  for (let i = last; i >= 0 && i > last - 12; i--) {
-    if (cues[i].end > t) out.unshift(cues[i]);
-  }
-  return out;
-}
+export { activeCues } from '@/features/watch/cueLookup';
 
 /**
  * Default subtitle: the viewer's last choice (same file if offered, else the best of that

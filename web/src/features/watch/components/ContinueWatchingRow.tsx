@@ -15,6 +15,9 @@ import {
   progressPercent,
   progressToRequest,
 } from '@/features/watch/api';
+import { type ProfileList, listFor, storeLoad } from '@/features/watch/profileList';
+
+const NO_ITEMS: StreamProgress[] = [];
 
 interface ContinueWatchingRowProps {
   /** Overrides the default "Continue Watching for <profile>" heading */
@@ -29,24 +32,29 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
   const t = useT();
   const locale = useLocale();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [items, setItems] = useState<StreamProgress[]>([]);
+  const [loaded, setLoaded] = useState<ProfileList<StreamProgress> | null>(null);
   const [request, setRequest] = useState<PlayRequest | null>(null);
   const [canLeft, setCanLeft] = useState(false);
   const [canRight, setCanRight] = useState(false);
 
   const profileId = profile?.id ?? null;
+  const items = listFor(loaded, profileId, NO_ITEMS);
+  // Loads that end after a profile switch are dropped
+  const profileRef = useRef(profileId);
+  useEffect(() => { profileRef.current = profileId; }, [profileId]);
 
   const load = useCallback(async () => {
     // Without a profile nothing renders (see below)
     if (!profileId) return;
     const list = await getProgressList(profileId);
-    setItems(list);
+    const activeId = profileRef.current;
+    setLoaded(prev => storeLoad(prev, { profileId, list }, activeId));
   }, [profileId]);
 
   useEffect(() => {
     if (!profileId) return;
     let cancelled = false;
-    getProgressList(profileId).then(list => { if (!cancelled) setItems(list); });
+    getProgressList(profileId).then(list => { if (!cancelled) setLoaded({ profileId, list }); });
     return () => { cancelled = true; };
   }, [profileId]);
 
@@ -70,7 +78,9 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
 
   const remove = async (p: StreamProgress) => {
     if (!profileId) return;
-    setItems(prev => prev.filter(x => !(x.media_type === p.media_type && x.tmdb_id === p.tmdb_id)));
+    setLoaded(prev => prev && prev.profileId === profileId
+      ? { profileId, list: prev.list.filter(x => !(x.media_type === p.media_type && x.tmdb_id === p.tmdb_id)) }
+      : prev);
     const ok = await deleteProgress(profileId, p.media_type, p.tmdb_id);
     if (!ok) load();
   };

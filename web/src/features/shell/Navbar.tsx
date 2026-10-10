@@ -10,6 +10,7 @@ import ProfileMenu from "@/features/profiles/components/ProfileMenu";
 import BottomTabBar from "@/features/shell/BottomTabBar";
 import { useNavigate } from "@/shared/navigation/useNavigate";
 import { getApiUrl } from "@/shared/lib/api";
+import { releaseYear } from "@/shared/lib/year";
 import { useNotifications } from "@/features/notifications/store";
 import { useT, type MessageKey } from "@/shared/i18n";
 
@@ -46,10 +47,7 @@ const SCROLL_SOLID_AT = 60;
 const isActive = (pathname: string | null, href: string) =>
   href === "/" ? pathname === "/" : !!pathname && (pathname === href || pathname.startsWith(`${href}/`));
 
-const yearOf = (date: string) => {
-  const y = date ? new Date(date).getFullYear() : NaN;
-  return Number.isFinite(y) ? String(y) : "";
-};
+const yearOf = (date: string) => String(releaseYear(date) ?? "");
 
 // Closes a popover when clicking outside of `ref`
 function useOutsideClose(ref: React.RefObject<HTMLElement | null>, open: boolean, close: () => void) {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { getCachedSource, qualityBadges, ResolveParams } from './api';
+import { getCachedSource, qualityBadges, ResolveParams } from '@/features/watch/api';
 
 // Re-check while a prefetch may still be finding the source
 const CHECK_AT_MS = [0, 3000, 8000, 15000, 30000];

@@ -3,6 +3,7 @@
 import { contentLang, getApiUrl } from '@/shared/lib/api';
 import { pickLogo, tmdbImage } from '@/shared/lib/image';
 import { getActiveProfileId } from '@/shared/lib/profile';
+import { releaseYear } from '@/shared/lib/year';
 import { en, type MessageKey, type TFunction } from '@/shared/i18n';
 
 export type NfMediaType = 'movie' | 'tv';
@@ -98,12 +99,6 @@ function rawTmdbPath(path: string | null | undefined): string | undefined {
   return path.startsWith('/') ? path : undefined;
 }
 
-function yearOf(date?: string | null): number | undefined {
-  if (!date) return undefined;
-  const y = parseInt(date.slice(0, 4), 10);
-  return Number.isFinite(y) && y > 1800 ? y : undefined;
-}
-
 export function tmdbDetailHref(id: number, type: NfMediaType, play = false): string {
   return `/tmdb-movie/${id}?type=${type}${play ? '&play=1' : ''}`;
 }
@@ -136,7 +131,7 @@ export function fromTmdb(item: any, fallbackType: NfMediaType = 'movie'): NfTitl
     backdropPath,
     poster: imageUrl(item.poster_path, 'w342'),
     backdrop: imageUrl(item.backdrop_path, 'w780'),
-    year: yearOf(item.release_date || item.first_air_date),
+    year: releaseYear(item.release_date || item.first_air_date),
     rating: typeof item.vote_average === 'number' ? item.vote_average : undefined,
     genreIds,
     genreNames: genreIds.map(genreName).filter((x): x is string => !!x),

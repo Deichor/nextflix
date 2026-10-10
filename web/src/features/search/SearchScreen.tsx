@@ -28,6 +28,7 @@ import {
   parseFilters,
 } from '@/features/search/filters';
 import { Completion, searchTitles, suggestTitles } from '@/features/search/api';
+import { loadMoreRetryDelay } from '@/features/search/loadMoreRetry';
 import { useT } from '@/shared/i18n';
 
 const chipBase = 'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors pointer-coarse:min-h-11';
@@ -48,6 +49,9 @@ function SearchContent() {
   const [searched, setSearched] = useState(false);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  // Failed "load more" pages in a row; a few are retried, then a Retry button shows
+  const [moreFails, setMoreFails] = useState(0);
+  const [moreAttempt, setMoreAttempt] = useState(0);
   const [suggestions, setSuggestions] = useState<NfTitle[]>([]);
   const [didYouMean, setDidYouMean] = useState('');
   const [completions, setCompletions] = useState<Completion[]>([]);
@@ -142,6 +146,7 @@ function SearchContent() {
       setDidYouMean(corrected);
       setPage(1);
       setTotalPages(pages);
+      setMoreFails(0);
       setSearched(true);
       setLoading(false);
     }, q ? 300 : 0);
@@ -186,9 +191,10 @@ function SearchContent() {
   const showCompletions = inputFocused && typing && completions.length > 0;
 
   // Infinite scroll while browsing by filters
+  const moreGaveUp = moreFails > 0 && loadMoreRetryDelay(moreFails) === null;
   useEffect(() => {
     const el = sentinelRef.current;
-    if (!el || !browsing || !searched || page >= totalPages) return;
+    if (!el || !browsing || !searched || page >= totalPages || moreGaveUp) return;
     const io = new IntersectionObserver(async entries => {
       if (!entries.some(e => e.isIntersecting) || loadingMore.current) return;
       loadingMore.current = true;
@@ -197,7 +203,11 @@ function SearchContent() {
       const res = await discover(filters, '', next);
       if (id !== searchId.current) return;
       loadingMore.current = false;
-      if (!res) return;
+      if (!res) {
+        setMoreFails(f => f + 1);
+        return;
+      }
+      setMoreFails(0);
       setResults(prev => {
         const seen = new Set(prev.map(r => r.key));
         return [...prev, ...fromTmdbList(res.results).filter(r => !seen.has(r.key))];
@@ -207,7 +217,15 @@ function SearchContent() {
     }, { rootMargin: '800px 0px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [browsing, searched, page, totalPages, filters]);
+  }, [browsing, searched, page, totalPages, filters, moreGaveUp, moreAttempt]);
+
+  // A new observer reports a visible sentinel right away, which retries the page
+  useEffect(() => {
+    const delay = loadMoreRetryDelay(moreFails);
+    if (delay === null) return;
+    const timer = setTimeout(() => setMoreAttempt(a => a + 1), delay);
+    return () => clearTimeout(timer);
+  }, [moreFails]);
 
   const setType = (type: TypeFilter) => setFilters(f => ({
     ...f,
@@ -356,9 +374,18 @@ function SearchContent() {
               </p>
             )}
             <TitleGrid items={results} />
-            {browsing && page < totalPages && (
+            {browsing && page < totalPages && (moreGaveUp ? (
+              <div className="py-8 text-center">
+                <button
+                  onClick={() => setMoreFails(0)}
+                  className="rounded border border-white/30 px-5 py-2 text-sm font-semibold text-white hover:border-white"
+                >
+                  {t('common.retry')}
+                </button>
+              </div>
+            ) : (
               <div ref={sentinelRef} className="py-8 text-center text-sm text-[#808080]">{t('search.loadingMore')}</div>
-            )}
+            ))}
           </div>
         ) : searched ? (
           q ? (

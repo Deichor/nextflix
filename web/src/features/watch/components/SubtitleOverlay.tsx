@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
-import { Cue, activeCues } from '@/features/watch/subtitles';
+import { Cue } from '@/features/watch/subtitles';
+import { ShownCues, activeCues, shownCues } from '@/features/watch/cueLookup';
 
 interface SubtitleOverlayProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -60,21 +61,23 @@ function renderCue(text: string, key: number): React.ReactNode {
 // looked up every frame, so timing stays right across stream restarts.
 export default function SubtitleOverlay({ videoRef, offsetRef, cues, delay, raised, scale = 1, layout }: SubtitleOverlayProps) {
   // Tagged with the cue list it came from: a new or empty list never shows the old lines
-  const [active, setActive] = useState<{ cues: Cue[]; shown: Cue[] } | null>(null);
-  const shown = active && active.cues === cues ? active.shown : [];
+  const [active, setActive] = useState<ShownCues | null>(null);
+  const shown = shownCues(active, cues);
 
   useEffect(() => {
     if (cues.length === 0) return;
     let raf = 0;
-    let lastKey = '';
+    // The first frame always tags the state with this list (shownCues guesses until then)
+    let lastKey: string | null = null;
     const tick = () => {
       const v = videoRef.current;
       if (v) {
-        const now = activeCues(cues, offsetRef.current + v.currentTime - delay);
+        const t = offsetRef.current + v.currentTime - delay;
+        const now = activeCues(cues, t);
         const key = now.map(c => c.start).join('|');
         if (key !== lastKey) {
           lastKey = key;
-          setActive({ cues, shown: now });
+          setActive({ cues, t, shown: now });
         }
       }
       raf = requestAnimationFrame(tick);

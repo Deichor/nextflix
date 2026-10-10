@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { getApiUrl } from '@/shared/lib/api';
 import { getActiveProfileId, profileHeaders, PROFILE_EVENT } from '@/shared/lib/profile';
+import { parseRatings } from '@/features/favorites/ratingsResponse';
 
 // Per-profile ratings ("Not for me" / "I like this" / "Love this!") and Favorites, backed by
 // /api/ratings. The whole list is loaded once per profile and shared by every card, so a
@@ -93,10 +94,10 @@ export function loadRatings(force = false): Promise<void> {
   const p: Promise<void> = (async () => {
     try {
       const res = await fetch(`${getApiUrl()}/api/ratings?profile_id=${pid}`, { headers: profileHeaders(), cache: 'no-store' });
-      const data = res.ok ? await res.json() : [];
+      const data = await parseRatings<Rating>(res);
       if (profileId !== pid) return;
       const next = new Map<string, Rating>();
-      (Array.isArray(data) ? (data as Rating[]) : []).forEach(r => next.set(keyOf(r.media_type, r.tmdb_id), r));
+      data.forEach(r => next.set(keyOf(r.media_type, r.tmdb_id), r));
       // Keep optimistic values of titles that are still being saved
       pending.forEach((n, k) => {
         const local = entries.get(k);

@@ -172,6 +172,7 @@ export default function SurpriseModal({ onClose, onPlay }: SurpriseModalProps) {
                   <Shuffle className="h-5 w-5" /> {t('surprise.next')}
                 </button>
               </div>
+              {failed && <p role="alert" className="mt-3 text-sm text-[#b3b3b3]">{t('surprise.error')}</p>}
             </>
           )}
           {!pick && failed && (

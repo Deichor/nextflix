@@ -74,6 +74,7 @@ import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
+import { savePosition } from '@/features/watch/progressSave';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
 import { Upscaler, upscaleSupported, type UpscaleMode, type UpscaleStop } from '@/features/watch/upscale';
 import { UpscaleLog } from '@/features/watch/upscaleLog';
@@ -2150,13 +2151,16 @@ function PlayerCore({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, stream?.n]);
 
+  // Saved finished: later saves would store the position again (cleared when the viewer plays on)
+  const savedFinishedRef = useRef(false);
   const persist = useCallback((opts: { keepalive?: boolean; finished?: boolean } = {}) => {
     const m = metaRef.current;
     const pid = getActiveProfileId();
     const s = stateRef.current;
-    if (!m || !pid || !s.hash || s.duration <= 0) return;
-    const pos = opts.finished ? s.duration : s.saveAt;
-    if (pos < 10) return;
+    if (!m || !pid || !s.hash) return;
+    const pos = savePosition(s.saveAt, s.duration, !!opts.finished, savedFinishedRef.current);
+    if (pos === null) return;
+    if (opts.finished) savedFinishedRef.current = true;
     saveProgress({
       profile_id: pid,
       media_type: m.media_type,
@@ -2897,7 +2901,7 @@ function PlayerCore({
             playsInline
             // CORS-mode load, so the upscaler may read frames into WebGL (the API allows the app's origins)
             crossOrigin="anonymous"
-            onPlay={e => { if (isActive(e)) { setPlaying(true); resumed(); } }}
+            onPlay={e => { if (isActive(e)) { savedFinishedRef.current = false; setPlaying(true); resumed(); } }}
             onPause={e => {
               if (!isActive(e) || holdRef.current) return;
               setPlaying(false);

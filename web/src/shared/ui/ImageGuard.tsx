@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { createFailCounter } from "@/shared/ui/imageFailCounter";
 
 const TMDB = "https://image.tmdb.org/";
 const PROXY = "/tmdb-img/";
@@ -12,7 +13,7 @@ const MAX_FAILS = 2;
 // script in app/layout.tsx already patches the style setters, and new nodes are scanned.
 export default function ImageGuard() {
   useEffect(() => {
-    const fails = new Map<string, number>();
+    const fails = createFailCounter(MAX_FAILS);
 
     const proxify = (el: Element) => {
       const src = el.getAttribute("src");
@@ -28,13 +29,14 @@ export default function ImageGuard() {
       root.querySelectorAll("[src], [srcset], [style]").forEach(proxify);
     };
 
+    const onLoad = (e: Event) => {
+      if (e.target instanceof HTMLImageElement) fails.loaded(e.target);
+    };
+
     const onError = (e: Event) => {
       const img = e.target;
       if (!(img instanceof HTMLImageElement)) return;
-      const src = img.getAttribute("src") || "";
-      const count = (fails.get(src) || 0) + 1;
-      fails.set(src, count);
-      if (count > MAX_FAILS) {
+      if (fails.fail(img)) {
         // Runs in the capture phase, so the component's own onError never fires
         e.stopImmediatePropagation();
         img.removeAttribute("srcset");
@@ -51,10 +53,12 @@ export default function ImageGuard() {
     });
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset"] });
     window.addEventListener("error", onError, true);
+    window.addEventListener("load", onLoad, true);
 
     return () => {
       observer.disconnect();
       window.removeEventListener("error", onError, true);
+      window.removeEventListener("load", onLoad, true);
     };
   }, []);
 

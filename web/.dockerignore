@@ -1,2 +1,6 @@
 node_modules/
 .next/
+# Gitignored build output (out-screens is ~150 MB)
+out/
+out-screens/
+**/.env*

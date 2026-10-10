@@ -43,6 +43,7 @@ import RatingButtons from '@/features/favorites/components/RatingButtons';
 import { useFormat, useLocale, useT, intlLocale, type Locale } from '@/shared/i18n';
 import TmdbImage from '@/shared/ui/TmdbImage';
 import { BILLBOARD_SIZES } from '@/shared/lib/image';
+import { releaseYear } from '@/shared/lib/year';
 
 interface Person {
   id: number;
@@ -231,14 +232,14 @@ const TMDBMoviePage: React.FC = () => {
   );
 
   const buildMeta = useCallback((): StreamMeta => {
-    const year = mediaDetails?.release_date ? new Date(mediaDetails.release_date).getFullYear() : NaN;
+    const year = releaseYear(mediaDetails?.release_date);
     return {
       tmdb_id: mediaDetails?.id ?? parseInt(movieId),
       media_type: mediaDetails?.media_type === 'tv' ? 'tv' : 'movie',
       title: mediaDetails?.title || '',
       poster_path: mediaDetails?.poster_path || '',
       backdrop_path: mediaDetails?.backdrop_path || '',
-      year: Number.isFinite(year) ? year : undefined,
+      year,
       runtime: mediaDetails?.media_type === 'tv' ? undefined : mediaDetails?.runtime || undefined,
       original_language: mediaDetails?.original_language || undefined,
     };
@@ -290,11 +291,11 @@ const TMDBMoviePage: React.FC = () => {
 
       // Opening the detail page is the intent to watch: warm up the source Play will use,
       // unless it already has a saved torrent. Leaving the page releases it (see below).
-      const year = mediaDetails.release_date ? new Date(mediaDetails.release_date).getFullYear() : NaN;
+      const year = releaseYear(mediaDetails.release_date);
       let target: ResolveParams | null = null;
       let saved = false;
       if (mediaDetails.media_type === 'movie') {
-        target = { type: 'movie', title: mediaDetails.title, tmdb_id: mediaDetails.id, year: Number.isFinite(year) ? year : undefined, runtime: mediaDetails.runtime || undefined };
+        target = { type: 'movie', title: mediaDetails.title, tmdb_id: mediaDetails.id, year, runtime: mediaDetails.runtime || undefined };
         saved = !!findProgress(entries)?.hash;
       } else if (tvSeasons.length > 0) {
         const ep = p && !isFinished(p)
@@ -427,7 +428,7 @@ const TMDBMoviePage: React.FC = () => {
   }
 
   const isTv = mediaDetails.media_type === 'tv';
-  const year = mediaDetails.release_date ? new Date(mediaDetails.release_date).getFullYear() : undefined;
+  const year = releaseYear(mediaDetails.release_date);
   const cast = (mediaDetails.credits?.cast || []).map(p => p.name);
   const crew = mediaDetails.credits?.crew || [];
   const directors = crew.filter(p => p.job === 'Director').map(p => p.name);
