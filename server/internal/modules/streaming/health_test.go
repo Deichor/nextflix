@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -209,6 +210,98 @@ func TestMeasureHealthShortFastRead(t *testing.T) {
 	h := NewService(nil, Config{TorrServerURL: ts.URL}).measureHealth(context.Background(), strings.Repeat("a", 40), 1, int64(tsMB), 3*time.Second)
 	if h == nil || !h.KeepsUp || h.partial || h.Rate < 2*int64(tsMB) {
 		t.Fatalf("short fast read: %v", h)
+	}
+}
+
+// cacheTorrServer is TorrServer for one torrent (file 1 of size bytes) whose RAM cache holds
+// the bytes from cacheFrom to cacheTo: a read starting there gets them at once and the torrent
+// downloads nothing; elsewhere the swarm delivers rate bytes/s, counted in TorrServer's
+// downloaded bytes (bytes_read_useful_data, 500 MB before).
+func cacheTorrServer(t *testing.T, hash string, size, cacheFrom, cacheTo int64, rate, peers, seeders int) *httptest.Server {
+	var got atomic.Int64
+	got.Store(500 << 20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["stat"]; ok {
+			fmt.Fprintf(w, `{"hash":%q,"name":"Movie.2020.1080p.WEB-DL.x264-GRP","download_speed":%d,"active_peers":%d,"connected_seeders":%d,`+
+				`"bytes_read_useful_data":%d,"file_stats":[{"id":1,"path":"Movie.2020.1080p.WEB-DL.x264-GRP.mkv","length":%d}]}`,
+				hash, rate, peers, seeders, got.Load(), size)
+			return
+		}
+		var off int64
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &off)
+		w.WriteHeader(http.StatusPartialContent)
+		cached := off >= cacheFrom && off < cacheTo
+		chunk := make([]byte, max(rate/20, 1))
+		if cached {
+			chunk = make([]byte, 1<<20)
+		}
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			if cached {
+				continue
+			}
+			got.Add(int64(len(chunk)))
+			select {
+			case <-time.After(50 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The Mentalist S02E10: a reuse check read a file whose swarm had one peer at 1157 MB/s,
+// "keeps up". Those were bytes TorrServer still held from the playback minutes before; the
+// torrent downloaded nothing meanwhile. Such a read is no swarm measurement.
+func TestMeasureHealthIgnoresTorrServerCache(t *testing.T) {
+	fastWarm(t)
+	hash := strings.Repeat("a", 40)
+	ts := cacheTorrServer(t, hash, 6000<<20, 0, 6000<<20, 0, 1, 0)
+	h := NewService(nil, Config{TorrServerURL: ts.URL}).measureHealth(context.Background(), hash, 1, int64(tsMB), 2*time.Second)
+	if h == nil || h.KeepsUp || !h.cached || h.Rate >= int64(tsMB) {
+		t.Fatalf("cached read: %v", h)
+	}
+
+	// A swarm that really delivers (TorrServer's downloaded bytes grow with the read) keeps up
+	ts = cacheTorrServer(t, hash, 6000<<20, 0, 0, 8<<20, 9, 4)
+	s := NewService(nil, Config{TorrServerURL: ts.URL})
+	h = s.measureHealth(context.Background(), hash, 1, int64(tsMB), 2*time.Second)
+	if h == nil || !h.KeepsUp || h.cached {
+		t.Fatalf("live swarm: %v", h)
+	}
+	if _, ok := s.recentSwarm(hash, 1); !ok {
+		t.Fatal("the swarm verdict was not recorded")
+	}
+}
+
+// A saved source read from TorrServer's cache where playback resumes is measured again half
+// the file away: a dead swarm there sends the player to a fresh resolve; when everything read
+// was cached the source is unmeasured and plays.
+func TestReuseMeasuresBeyondTorrServerCache(t *testing.T) {
+	f := newFakeTorBox(t)
+	hash := strings.Repeat("c", 40)
+	// need = 600 MB / 100 min = 100 KB/s; the resume point (about 164 MB) is cached, the swarm
+	// delivers 40 KB/s
+	ts := cacheTorrServer(t, hash, 600_000_000, 100<<20, 300<<20, 40_000, 1, 0)
+	s := reuseSetup(t, f, ts.URL, false)
+	ans := reuseRun(s, hash, 1)
+	if ans.Action != "resolve" || !strings.Contains(ans.Reason, "does not keep up") {
+		t.Fatalf("answer %+v, want resolve", ans)
+	}
+
+	all := cacheTorrServer(t, hash, 600_000_000, 0, 600_000_000, 40_000, 1, 0)
+	s = reuseSetup(t, f, all.URL, false)
+	ans = reuseRun(s, hash, 1)
+	if ans.Action != "play" || ans.Source == nil || ans.Source.Health != nil {
+		t.Fatalf("answer %+v %+v, want an unmeasured play", ans, ans.Source)
+	}
+	if _, ok := s.recentSwarm(hash, 1); ok {
+		t.Fatal("a cached read was recorded as a swarm verdict")
 	}
 }
 

@@ -505,6 +505,16 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
      0.29 MB/s needed). The Little Shop of Horrors case (best 3 s said 1.05 MB/s, playback got 0.22) stays starving:
      its burst falls into the first 1.5 s. `peak` (best 3 s window) is logged and returned for comparison; the health
      log line also lists the median and every poll (`[median …; read/speed …]`, MB/s).
+   - TorrServer's RAM cache (2 GB per torrent) serves bytes it read before (playback minutes ago, its read-ahead, an
+     earlier check) without the swarm: a reuse check of The Mentalist S02E10 read "1157 MB/s … keeps up" from a
+     swarm of one peer that delivered 0.04 MB/s hours later. So every measurement of a TorrServer read compares the
+     bytes read with what the torrent downloaded meanwhile (`bytes_read_useful_data` of its stat, taken once before
+     the read and with every poll): a read of ≥ 4 MB that got at least 4× what was downloaded came from the cache
+     (`fromCache`) and is judged on the downloaded bytes and TorrServer's speed only (logged `(read from
+     TorrServer's cache)`), so it never keeps up by cached bytes. A swarm verdict of a TorrServer read that is not
+     cached is remembered per file for 3 minutes (`noteSwarm`, also the pick of a resolve) for the cached-source
+     check below. A TorBox proxy read has no swarm and is not judged this way; a TorBox file read from TorrServer
+     (TorBox paused) is judged on TorrServer's own stat.
 4. `tsPickBestKeep` returns the best good candidate (keeps up, duration verified or runtime unknown) as soon as it is
    there, also from a running check's snapshot. It waits only while a better-ranked check of at least its resolution
    is still running and already delivers ≥ 0.8 of its need (`tsPromising`): a 3 s grace (15 s for a higher resolution
@@ -547,6 +557,18 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
 The chosen source is saved in TorrServer's DB (`save_to_db`, category `nextflix`), so after a drop or a restart it opens
 from its stored metadata (≈ 20 ms instead of seconds of metadata exchange). Closed entries older than 7 days are
 removed at start and every 6 hours.
+
+A resolve the source cache answers is checked before it answers (`verifyCached`, `reuse.go`): a source that played
+fine hours ago may have lost its swarm (The Mentalist S02E10, TorBox paused: the cached 52d6688e opened with no data
+for 11.6 s, then the player searched again). A cached source TorBox plays (TorBox on and not paused) answers at once,
+and so does one whose swarm verdict is less than 3 minutes old (`tsCachedFresh`: the pick of a prefetch, a reuse or
+an earlier check; logged `the cached … was measured … ago`). Any other one, a TorBox source while TorBox is paused
+included, is added to TorrServer and measured like a saved source (below): up to 8 s where playback starts (`?t=`
+of the TV, else mid-file), next to the probe the player reads next. Keeps up or unmeasured: it answers with the new
+health (`the cached … was measured again: …, playing it`). Starving, dead or without metadata: the cached source is
+dropped and the resolve runs fresh with its hash in `avoid` (`the cached … is not played, …: resolving fresh
+without it`). The extra start delay: none for TorBox or a fresh verdict, about 3-5 s for a swarm that keeps up
+(the verdict needs 1.5 s + 3 s of samples; the probe runs meanwhile), 8 s plus the search for one that starves.
 
 ### Debrid (TorBox)
 
@@ -625,10 +647,13 @@ TorBox log line, the player restarted the same swarm for 3 minutes; TorBox had t
   video), registered, its link fetched, and it plays from TorBox (`debrid: true`, TorBox index). The header is read
   ahead (`debridRewarm`).
 - Not cached (or TorBox off, paused, unknown): the torrent is added (stat, ≤ 10 s for metadata) and its swarm is
-  measured for up to 8 s where playback resumes (the pieces the player reads next; the probe runs next to it). Keeps
-  up (≥ 1.3× size / runtime) or unmeasured: it plays with that health (the start buffer uses it). Starving, dead or
-  without metadata: `resolve` (the player resolves again with that hash in `avoid`, which picks a TorBox or faster
-  release; the torrent is dropped).
+  measured for up to 8 s where playback resumes (the pieces the player reads next; the probe runs next to it). A
+  read TorrServer served from its cache (see swarm health) is measured once more, half the file away
+  (`swarmHealthAt`, logged `came from TorrServer's cache …, measuring at … MB`); when that is cached too the swarm
+  counts as unmeasured. Keeps up (≥ 1.3× size / runtime) or unmeasured: it plays with that health (the start buffer
+  uses it). Starving, dead or without metadata: `resolve` (the player resolves again with that hash in `avoid`,
+  which picks a TorBox or faster release; the torrent is dropped). The resolve that follows checks a cached source
+  the same way before it answers with it (see above).
 - A saved source that a step down picked (its hash is a cached source of a `|max…` key of this title) gives way to
   the title's uncapped cached source for these caps: after a slow swarm stepped down to 1080p, progress saved the
   1080p and every resume played it.

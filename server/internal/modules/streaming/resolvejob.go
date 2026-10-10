@@ -103,7 +103,11 @@ func (s *Service) startResolve(key string, q tsResolveQuery) (*tsFlight, bool) {
 		ctx, cancel := context.WithTimeout(q.warmCtx(), tsResolveJobTime)
 		defer cancel()
 		started := time.Now()
-		res, seed, err := s.findSource(ctx, q)
+		find := s.findFn
+		if find == nil {
+			find = s.findSource
+		}
+		res, seed, err := find(ctx, q)
 		if err != nil {
 			// A released title did not fail; one that gave way to playback runs again on resume
 			if q.warmCtx().Err() == nil {
@@ -118,6 +122,10 @@ func (s *Service) startResolve(key string, q tsResolveQuery) (*tsFlight, bool) {
 		}
 		s.failedAt.Delete(key)
 		s.storeSource(key, *res)
+		// Measured just now: a play soon after opens it without measuring it again
+		if res.Health != nil && !res.Health.cached && !res.Debrid {
+			s.noteSwarm(res.Hash, res.Index, res.Health)
+		}
 		// After the store, so a quick upgrade is never overwritten by this pick
 		s.afterPick(key, res, seed)
 		go s.mergeLate(key, q, res, seed)
@@ -239,10 +247,24 @@ func (h handler) resolve(c *gin.Context) {
 		// Play is about to open it: the title is held, and released with the player
 		w := s.holdWarm(key)
 		s.markIntent(w) // a player asks: the title never gives way to another one's playback
-		s.useSource(w, res)
-		res.Cached = true
-		c.JSON(http.StatusOK, res)
-		return
+		// ?t= is where playback starts (seconds): the swarm is checked there
+		at, _ := strconv.ParseFloat(c.Query("t"), 64)
+		if !(at > 0 && at < 86400) {
+			at = 0
+		}
+		why := s.verifyCached(c.Request.Context(), q, res, at, w)
+		if c.Request.Context().Err() != nil {
+			return
+		}
+		if why == "" {
+			s.useSource(w, res)
+			res.Cached = true
+			c.JSON(http.StatusOK, res)
+			return
+		}
+		log.Printf("resolve %q: the cached %s:%d is not played, %s: resolving fresh without it", q.title, tsShortHash(res.Hash), res.Index, why)
+		q.avoid = append(q.avoid, strings.ToLower(res.Hash))
+		s.forgetSource(key)
 	}
 	// Titles that are not out yet (or only in cinemas) are not searched
 	if !s.flights.running(key) {

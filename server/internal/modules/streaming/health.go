@@ -60,6 +60,9 @@ type tsHealth struct {
 	partial     bool          // live health before the verdict: the rate of the samples so far, never keeps up
 	sampled     time.Duration // how long the samples cover
 	series      string        // per-poll read / TorrServer rates in MB/s (log only)
+	// TorrServer served the read from its RAM cache (see fromCache): judged by what the swarm
+	// delivered meanwhile, and no proof that the swarm keeps up
+	cached bool
 }
 
 func (h *tsHealth) ratio() float64 {
@@ -81,6 +84,9 @@ func (h *tsHealth) String() string {
 		verdict = "measuring"
 	case !h.KeepsUp:
 		verdict = "starving"
+	}
+	if h.cached {
+		verdict += " (read from TorrServer's cache)"
 	}
 	return fmt.Sprintf("%.2f MB/s (peak %.2f) for %.2f MB/s needed (x%.2f), %d active peers, %d seeders: %s",
 		float64(h.Rate)/float64(tsMB), float64(h.Peak)/float64(tsMB), float64(h.Need)/float64(tsMB), h.ratio(),
@@ -341,6 +347,8 @@ type tsSwarmStat struct {
 	DownloadSpeed    float64 `json:"download_speed"` // bytes/s
 	ActivePeers      int     `json:"active_peers"`
 	ConnectedSeeders int     `json:"connected_seeders"`
+	// Piece data the torrent got from peers since it was loaded (omitted while 0)
+	Downloaded *int64 `json:"bytes_read_useful_data"`
 }
 
 // tsWarmSample is one poll during a warm-up.
@@ -349,7 +357,11 @@ type tsWarmSample struct {
 	read  int64         // bytes read so far
 	speed float64       // TorrServer download_speed in bytes/s, -1 when the stat failed
 	peers int           // active peers, -1 when the stat failed
+	got   int64         // TorrServer's downloaded bytes (Downloaded), -1 when unknown
 }
+
+// tsCacheMinRead: a read this small says nothing either way, so it is never judged as cached.
+const tsCacheMinRead = int64(4) << 20
 
 // tsWarmMeter judges a warm-up from its samples (no I/O, so tests can feed it).
 type tsWarmMeter struct {
@@ -362,10 +374,47 @@ type tsWarmMeter struct {
 	alive     time.Duration // last sample with peers or new data
 	seenAlive bool
 	dead      bool
+	base      int64 // TorrServer's downloaded bytes before the read, -1 when unknown
 }
 
 func newWarmMeter(need int64) *tsWarmMeter {
-	return &tsWarmMeter{need: float64(need), enough: tsKeepUpFactor * float64(need)}
+	return &tsWarmMeter{need: float64(need), enough: tsKeepUpFactor * float64(need), base: -1}
+}
+
+// fromCache: the read got at least 4 times what the torrent downloaded meanwhile, so
+// TorrServer served it from its RAM cache (pieces played or read ahead minutes before; a
+// dead swarm read 1157 MB/s that way). Such a read says nothing about the swarm.
+func (m *tsWarmMeter) fromCache() bool {
+	if m.base < 0 || len(m.samples) == 0 {
+		return false
+	}
+	got := int64(-1)
+	for _, s := range m.samples {
+		if s.got >= 0 {
+			got = s.got
+		}
+	}
+	read := m.samples[len(m.samples)-1].read
+	return got >= 0 && read >= tsCacheMinRead && (got-m.base)*4 < read
+}
+
+// swarmMeter is the meter of a cached read with the bytes the swarm delivered in place of the
+// bytes read; nil when the read was not cached.
+func (m *tsWarmMeter) swarmMeter() *tsWarmMeter {
+	if !m.fromCache() {
+		return nil
+	}
+	o := newWarmMeter(int64(m.need))
+	o.seeders = m.seeders
+	got := m.base
+	for _, s := range m.samples {
+		if s.got >= 0 {
+			got = s.got
+		}
+		s.read = max(got-m.base, 0)
+		o.add(s)
+	}
+	return o
 }
 
 // add records a sample and reports whether the warm-up can stop: the delivered rate clearly
@@ -510,6 +559,11 @@ func (m *tsWarmMeter) verdict() bool {
 // health is the verdict (or the health so far); before any poll after tsWarmSkip the rate
 // is the one of the whole read.
 func (m *tsWarmMeter) health(need int64) *tsHealth {
+	if o := m.swarmMeter(); o != nil {
+		h := o.health(need)
+		h.cached = true
+		return h
+	}
 	st, _ := m.window()
 	rate := st.avg
 	if st.span <= 0 && len(m.samples) > 0 {
@@ -530,6 +584,11 @@ func (m *tsWarmMeter) health(need int64) *tsHealth {
 // window could judge it: a fast source finishes a short read in a few seconds, so the rate
 // of the whole read decides.
 func (m *tsWarmMeter) wholeRead(need int64) *tsHealth {
+	if o := m.swarmMeter(); o != nil {
+		h := o.wholeRead(need)
+		h.cached = true
+		return h
+	}
 	h := m.health(need)
 	if n := len(m.samples); n > 0 {
 		rate := m.rate(tsWarmSample{}, m.samples[n-1])
@@ -600,18 +659,47 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 	rctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel() // also stops the read
 
+	src := s.fileURL(hash, index)
+	// A read of TorrServer (also a TorBox file while TorBox is paused) is judged by TorrServer's
+	// own stat; a TorBox proxy read has no swarm
+	swarm := strings.HasPrefix(src, s.torrServerURL()+"/")
+	stat := func(ctx context.Context, out *tsSwarmStat) error {
+		sctx, cancel := context.WithTimeout(ctx, tsWarmPoll)
+		defer cancel()
+		if swarm {
+			return s.torrServerStat(sctx, hash, out)
+		}
+		return s.swarmStat(sctx, hash, out)
+	}
+	m := newWarmMeter(need)
+	// What the torrent downloaded before, so a read served from TorrServer's cache shows
+	var before tsSwarmStat
+	if err := stat(ctx, &before); err == nil {
+		m.base = 0 // omitted while 0
+		if before.Downloaded != nil {
+			m.base = *before.Downloaded
+		}
+	}
+	// A swarm verdict lets resolve answer with this file as a cached source without measuring
+	// it again (tsCachedFresh)
+	final := func(h *tsHealth) *tsHealth {
+		if swarm && h != nil && !h.cached && (m.verdict() || h.Dead || h.sampled >= tsMeasuredSpan) {
+			s.noteSwarm(hash, index, h)
+		}
+		return h
+	}
+
 	var read atomic.Int64
 	var failed, complete atomic.Bool
 	ended := make(chan struct{})
 	start := time.Now()
 	go func() {
 		defer close(ended)
-		opened, whole := tsReadInto(rctx, s.fileURL(hash, index), offset, &read)
+		opened, whole := tsReadInto(rctx, src, offset, &read)
 		failed.Store(!opened)
 		complete.Store(whole)
 	}()
 
-	m := newWarmMeter(need)
 	tick := time.NewTicker(tsWarmPoll)
 	defer tick.Stop()
 	for {
@@ -626,13 +714,14 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 		if ctx.Err() != nil || failed.Load() {
 			return nil, false
 		}
-		sample := tsWarmSample{speed: -1, peers: -1}
+		sample := tsWarmSample{speed: -1, peers: -1, got: -1}
 		var st tsSwarmStat
-		sctx, scancel := context.WithTimeout(ctx, tsWarmPoll)
-		if err := s.swarmStat(sctx, hash, &st); err == nil {
+		if err := stat(ctx, &st); err == nil {
 			sample.speed, sample.peers, m.seeders = st.DownloadSpeed, st.ActivePeers, st.ConnectedSeeders
+			if st.Downloaded != nil {
+				sample.got = *st.Downloaded
+			}
 		}
-		scancel()
 		sample.read, sample.at = read.Load(), time.Since(start)
 		done := m.add(sample)
 		if m.seenAlive && hooks.alive != nil {
@@ -649,16 +738,16 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 		}
 		if done || finished {
 			if complete.Load() && !verdict {
-				return m.wholeRead(need), false
+				return final(m.wholeRead(need)), false
 			}
-			return m.health(need), false
+			return final(m.health(need)), false
 		}
 		// A resolve's checks turn background once it answered; another title's playback
 		// stops any read of a title that gives way (priority.go)
 		if other, why := s.yieldReason(ctx, hash); other != "" {
 			if verdict {
 				log.Printf("warm: health check of %s cut short after %s: %s %s", tsShortHash(hash), sample.at.Round(time.Second), tsShortHash(other), why)
-				return m.health(need), false
+				return final(m.health(need)), false
 			}
 			return nil, true
 		}
@@ -702,6 +791,11 @@ func (s *Service) torrentStat(ctx context.Context, hash string, out any) error {
 	if ok, err := s.debridStat(hash, out); ok {
 		return err // a debrid source: answered without loading it into TorrServer
 	}
+	return s.torrServerStat(ctx, hash, out)
+}
+
+// torrServerStat asks TorrServer itself, also about a debrid source.
+func (s *Service) torrServerStat(ctx context.Context, hash string, out any) error {
 	statURL := s.torrServerURL() + "/stream?" + url.Values{"link": {hash}, "stat": {""}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statURL, nil)
 	if err != nil {

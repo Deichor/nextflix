@@ -348,11 +348,13 @@ export function unavailableLabel(a: Availability | null, locale: Locale, date: (
 export async function resolveSource(
   params: ResolveParams,
   signal?: AbortSignal,
-  opts: { refresh?: boolean; avoid?: string[] } = {},
+  opts: { refresh?: boolean; avoid?: string[]; t?: number } = {},
 ): Promise<ResolvedSource> {
   const q = addCaps(resolveQuery(params));
   if (opts.refresh) q.set('refresh', '1');
   if (opts.avoid && opts.avoid.length) q.set('avoid', opts.avoid.join(','));
+  // Where playback starts: a cached source's swarm is checked there
+  if (opts.t && opts.t > 0) q.set('t', String(Math.round(opts.t)));
   try {
     return await getJson<ResolvedSource>(`/api/torrent-stream/resolve?${q.toString()}`, { signal });
   } catch (e) {

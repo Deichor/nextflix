@@ -484,7 +484,7 @@ export class PlayerEngine {
         console.info(`[restart] saved source ${h.slice(0, 8)} not reused (${a.reason || 'slow'}): resolving again`);
         if (this.avoid.indexOf(h) < 0) this.avoid = [...this.avoid, h];
       }
-      const r = await resolveSource(paramsOf(m, this.cap), ctrl.signal, { refresh: retry.refresh, avoid: this.avoid });
+      const r = await resolveSource(paramsOf(m, this.cap), ctrl.signal, { refresh: retry.refresh, avoid: this.avoid, t: start });
       if (ctrl.signal.aborted) return;
       this.cancelResolve();
       this.openSource(sourceOf(r), start, r.cached ? 'cached' : 'fresh');

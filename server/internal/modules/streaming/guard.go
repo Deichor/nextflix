@@ -255,6 +255,12 @@ func (s *Service) pruneState(now time.Time) {
 	}
 	s.warmMu.Unlock()
 	s.pruneProbes(now, held)
+	s.swarmSeen.Range(func(k, v any) bool {
+		if now.Sub(v.(tsSwarmSeen).at) >= tsCachedFresh {
+			s.swarmSeen.Delete(k)
+		}
+		return true
+	})
 }
 
 // pruneProbes drops cached probes older than tsProbeKeep whose torrent is not in held.

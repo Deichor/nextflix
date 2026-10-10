@@ -31,6 +31,7 @@ type Service struct {
 
 	probeCache   sync.Map // "hash:index" -> *tsProbe
 	resolveCache sync.Map // resolve query key -> tsCacheEntry (in front of stream_sources)
+	swarmSeen    sync.Map // "hash:index" -> tsSwarmSeen, the last swarm verdict (reuse.go)
 	jackettBase  sync.Map // "base" -> last Jackett URL that answered
 	runtimes     sync.Map // "movie:id" / "tv:id:s:e" -> tsRuntimeEntry
 	titles       sync.Map // "movie:id" / "tv:id" -> English TMDB title
@@ -46,8 +47,10 @@ type Service struct {
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
 	probeAt map[string]time.Time    // "hash:index" -> when probeCache got it (pruning)
-	// Tests: replace ffprobe, and the search of a draining player's sidegrade (findSource)
+	// Tests: replace ffprobe, and the search (findSource) of a resolve job and of a draining
+	// player's sidegrade
 	probeFn      func(ctx context.Context, hash string, index int) (*tsProbe, error)
+	findFn       func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error)
 	sideSearchFn func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error)
 
 	flights       tsFlightGroup // running resolve jobs, shared by prefetch and play
