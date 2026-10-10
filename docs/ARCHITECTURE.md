@@ -1242,6 +1242,21 @@ per episode and file):
 - Without credits data nothing appears before the end; the old "last 40-120 s" Next button is gone. The `ended`
   event (the real end) always starts the full-screen 5 s countdown, also after "Watch credits".
 
+## Pause screen
+
+Netflix's "You're watching" screen in the web, phone and TV players (`web/src/features/watch/components/PauseScreen.tsx`,
+`tv/webos/src/player/PauseScreen.tsx`). When the viewer paused and gives no input for 6 s, the controls fade out and
+the picture dims under the title, `S1:E3 "Episode name"` (series) or year and runtime (films), the overview, and
+"Paused" in the corner. It does not come while buffering, during a start hold, the countdown, the Audio & Subtitles
+panel, a seek preview or a Skip intro / Next episode button.
+
+- Text: the episode's overview from the season endpoint (the show's overview when TMDB has none), the film's from
+  `/api/tmdb-movie/:id`, in the profile language; cached per title / episode and language (`getPauseInfo` in
+  `watch/api.ts`, `pauseInfo` in `tv/webos/src/lib/catalog.ts`).
+- Web: mouse movement, a key, a wheel or a tap brings the controls back; the screen takes no clicks, so a click on it
+  plays like a click on the video. TV: the first key only brings the controls back, except the media keys (Play,
+  Pause, Stop, Fast forward, Rewind), which act at once.
+
 ## Ratings and Favorites
 
 `server/internal/modules/ratings` stores one row per profile and title in `title_ratings` (unique

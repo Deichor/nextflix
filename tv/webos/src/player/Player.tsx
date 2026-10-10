@@ -9,10 +9,13 @@ import { focusById, focusDefault, move, pushKeyHandler } from '../nav/spatial';
 import { PlayerEngine, type PlayerState } from './engine';
 import AudioSubtitlePanel from './AudioSubtitlePanel';
 import SubtitleOverlay from './SubtitleOverlay';
+import PauseScreen from './PauseScreen';
 import TrickPlay, { useTrickPlayPrefetch } from './TrickPlay';
 import { skipPhase, useSkipSegments } from './skipSegments';
 
 const HIDE_MS = 4500;
+// Paused this long without a key: the pause screen ("You're watching") replaces the controls
+const PAUSE_SCREEN_MS = 6000;
 const COMMIT_MS = 800;
 // Scrub mode (a second Left / Right press, or one held): no auto-commit; OK seeks, Back cancels, and it
 // closes by itself after this long without a key. Playback goes on underneath.
@@ -54,6 +57,10 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   panelRef.current = panel;
   const zoneRef = useRef(zone);
   zoneRef.current = zone;
+  const [pauseScreen, setPauseScreen] = useState(false);
+  const pauseScreenRef = useRef(false);
+  pauseScreenRef.current = pauseScreen;
+  const lastInputRef = useRef(0);
 
   useEffect(() => {
     const engine = new PlayerEngine(videoRef.current!, req, locale);
@@ -70,6 +77,8 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   }, []);
 
   const reveal = useCallback(() => {
+    lastInputRef.current = Date.now();
+    setPauseScreen(false);
     setVisible(true);
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => {
@@ -163,7 +172,11 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     if (!engine || !st) return true;
     const code = e.keyCode;
     const canPlay = st.phase === 'ready' && st.duration > 0 && !st.fatal;
+    const woke = pauseScreenRef.current;
     reveal();
+    // The first key on the pause screen only brings the controls back (media keys still act)
+    if (woke && code !== KEY.STOP && code !== KEY.PLAY && code !== KEY.PAUSE && code !== KEY.PLAY_PAUSE &&
+      code !== KEY.FAST_FORWARD && code !== KEY.REWIND) return true;
 
     if (code === KEY.STOP) { onClose(); return true; }
     if (code === KEY.PLAY) { engine.play(); return true; }
@@ -247,6 +260,21 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     return () => cancelAnimationFrame(raf);
   }, [skipShown, panel, overlay]);
 
+  // Paused by the viewer with nothing else on screen: the pause screen after PAUSE_SCREEN_MS without a key
+  const idlePaused = playable && !overlay && !!s && !s.playing && !s.buffering && !s.ended && s.countdown === null &&
+    !panel && preview === null && !skipShown;
+  useEffect(() => {
+    if (!idlePaused) {
+      setPauseScreen(false);
+      return;
+    }
+    lastInputRef.current = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - lastInputRef.current >= PAUSE_SCREEN_MS) setPauseScreen(true);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [idlePaused]);
+
   const engine = engineRef.current;
   const subtitleTime = useCallback(() => engineRef.current?.subtitleTime() ?? 0, []);
   if (!s) {
@@ -261,7 +289,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   const subtitle = m.media_type === 'tv' ? [episodeLabel(locale, m.season, m.episode), m.episode_title].filter(Boolean).join(' · ') : '';
   const shown = preview ?? s.position;
   const pct = s.duration > 0 ? Math.min(100, (shown / s.duration) * 100) : 0;
-  const controls = playable && (visible || !s.playing || panel || preview !== null);
+  const controls = playable && !pauseScreen && (visible || !s.playing || panel || preview !== null);
   const thumbFile = preview !== null ? engine?.currentFile() ?? null : null;
   const nextLabel = s.next ? episodeLabel(locale, s.next.season, s.next.episode) : '';
   const errorText = (e: { key?: Parameters<typeof t>[0]; text?: string } | null) => (e ? (e.key ? t(e.key) : e.text || '') : '');
@@ -282,6 +310,8 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
           previewing={styling}
         />
       )}
+
+      {playable && <PauseScreen meta={m} shown={pauseScreen} />}
 
       {(overlay === 'resolving' || overlay === 'loading' || overlay === 'error' || overlay === 'unreleased') && (
         <div className="player-cover">

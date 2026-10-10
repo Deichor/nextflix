@@ -171,6 +171,8 @@ export const en = {
   'player.episodes': 'Episodes',
   'player.close': 'Close (Esc)',
   'player.back': 'Back',
+  'player.youreWatching': "You're watching",
+  'player.paused': 'Paused',
   'player.loading': 'Loading...',
   'player.chooseFile': 'Choose a file to watch',
   'player.switchedTo4k': 'Switched to 4K',

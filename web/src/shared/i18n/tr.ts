@@ -159,6 +159,8 @@ export const tr: Messages = {
   'player.episodes': 'Bölümler',
   'player.close': 'Kapat (Esc)',
   'player.back': 'Geri',
+  'player.youreWatching': 'İzlediğiniz içerik',
+  'player.paused': 'Duraklatıldı',
   'player.loading': 'Yükleniyor...',
   'player.chooseFile': 'İzlemek için bir dosya seç',
   'player.switchedTo4k': "4K'ya geçildi",

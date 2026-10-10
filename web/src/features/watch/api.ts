@@ -1,4 +1,4 @@
-import { getApiUrl } from '@/shared/lib/api';
+import { contentLang, getApiUrl } from '@/shared/lib/api';
 import { translate, type Locale } from '@/shared/i18n/core';
 
 export type StreamMediaType = 'movie' | 'tv';
@@ -263,6 +263,29 @@ export function getAvailability(target: AvailabilityTarget): Promise<Availabilit
   return p;
 }
 
+/** Raw TMDB details of a title; fields are checked where they are read. */
+type TitleDetails = Record<string, unknown>;
+
+const DETAILS_TTL_MS = 10 * 60 * 1000;
+const detailsCache = new Map<string, { at: number; p: Promise<TitleDetails | null> }>();
+
+// TMDB details in the content language (X-Lang), shared by the helpers below
+function getTitleDetails(tmdbId: number, type: StreamMediaType): Promise<TitleDetails | null> {
+  const key = `${contentLang()}|${type}:${tmdbId}`;
+  const hit = detailsCache.get(key);
+  if (hit && Date.now() - hit.at < DETAILS_TTL_MS) return hit.p;
+  const p = fetch(`${getApiUrl()}/api/tmdb-movie/${tmdbId}?type=${type}`)
+    .then(res => (res.ok ? res.json() : null))
+    .then(json => {
+      const data = json?.data ?? json;
+      return data && typeof data === 'object' && !Array.isArray(data) ? (data as TitleDetails) : null;
+    })
+    .catch(() => null);
+  detailsCache.set(key, { at: Date.now(), p });
+  p.then(d => { if (!d) detailsCache.delete(key); });
+  return p;
+}
+
 interface TitleTraits {
   originalLanguage?: string;
   genreIds: number[];
@@ -275,11 +298,9 @@ function getTitleTraits(tmdbId: number, type: StreamMediaType): Promise<TitleTra
   const key = `${type}:${tmdbId}`;
   let p = traitsCache.get(key);
   if (!p) {
-    p = fetch(`${getApiUrl()}/api/tmdb-movie/${tmdbId}?type=${type}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then(json => {
-        const data = json?.data ?? json;
-        if (!data || typeof data !== 'object') return null;
+    p = getTitleDetails(tmdbId, type)
+      .then(data => {
+        if (!data) return null;
         return {
           originalLanguage: (typeof data.original_language === 'string' && data.original_language) || undefined,
           genreIds: Array.isArray(data.genres) ? data.genres.map((g: { id?: unknown }) => Number(g?.id)).filter(Number.isFinite) : [],
@@ -699,15 +720,8 @@ export async function deleteProgress(profileId: number, mediaType: StreamMediaTy
 
 // Regular seasons of a TMDB show (specials / season 0 skipped)
 export async function getTvSeasons(tmdbId: number): Promise<SeasonInfo[]> {
-  try {
-    const res = await fetch(`${getApiUrl()}/api/tmdb-movie/${tmdbId}?type=tv`);
-    if (!res.ok) return [];
-    const json = await res.json();
-    const data = json?.data ?? json;
-    return normalizeSeasons(data?.seasons);
-  } catch {
-    return [];
-  }
+  const data = await getTitleDetails(tmdbId, 'tv');
+  return normalizeSeasons(Array.isArray(data?.seasons) ? data.seasons : null);
 }
 
 export function normalizeSeasons(seasons: any[] | undefined | null): SeasonInfo[] {
@@ -790,6 +804,67 @@ export function episodeLabel(season?: number, episode?: number, locale: Locale =
 export function isPlaceholderEpisodeName(ep: Pick<EpisodeInfo, 'name' | 'episode_number'>): boolean {
   // TMDB names untitled episodes "Episode 3" (en-US) or "3. Bölüm" (tr-TR)
   return ep.name === `Episode ${ep.episode_number}` || ep.name === `${ep.episode_number}. Bölüm`;
+}
+
+export interface PauseInfo {
+  overview: string;
+  /** Release (TV: first air) year and runtime in minutes */
+  year?: number;
+  runtime: number;
+  /** TV: the episode's name ('' for TMDB placeholders) */
+  episodeTitle: string;
+}
+
+const pauseInfoCache = new Map<string, Promise<PauseInfo | null>>();
+const pauseSeasonCache = new Map<string, { at: number; p: Promise<EpisodeInfo[]> }>();
+
+// getSeasonEpisodes once per season for all of its episodes; failures (no episodes) are not kept
+function pauseSeasonEpisodes(tmdbId: number, season: number): Promise<EpisodeInfo[]> {
+  const key = `${contentLang()}|${tmdbId}|${season}`;
+  const hit = pauseSeasonCache.get(key);
+  if (hit && Date.now() - hit.at < DETAILS_TTL_MS) return hit.p;
+  const p = getSeasonEpisodes(tmdbId, { season_number: season, episode_count: 0 });
+  pauseSeasonCache.set(key, { at: Date.now(), p });
+  p.then(eps => { if (eps.length === 0) pauseSeasonCache.delete(key); });
+  return p;
+}
+
+const asText = (v: unknown) => (typeof v === 'string' ? v : '');
+
+function yearOf(date: unknown): number | undefined {
+  const year = parseInt(asText(date).slice(0, 4), 10);
+  return year > 1800 ? year : undefined;
+}
+
+/**
+ * Text of the player's pause screen in the content language: the episode's (else the show's) or
+ * the film's overview (cached for the session).
+ */
+export function getPauseInfo(m: StreamMeta): Promise<PauseInfo | null> {
+  const key = `${contentLang()}|${m.media_type}|${m.tmdb_id}|${m.season || 0}|${m.episode || 0}`;
+  let p = pauseInfoCache.get(key);
+  if (p) return p;
+  p = (async (): Promise<PauseInfo | null> => {
+    if (m.media_type === 'tv' && m.season && m.episode) {
+      const [eps, d] = await Promise.all([pauseSeasonEpisodes(m.tmdb_id, m.season), getTitleDetails(m.tmdb_id, 'tv')]);
+      const ep = eps.find(e => e.episode_number === m.episode);
+      // Nothing to show yet: let the next pause retry
+      if (!ep?.overview && !d) return null;
+      const runTimes = Array.isArray(d?.episode_run_time) ? d.episode_run_time : [];
+      return {
+        overview: ep?.overview || asText(d?.overview),
+        year: yearOf(d?.first_air_date),
+        runtime: ep?.runtime || Number(runTimes[0]) || 0,
+        episodeTitle: ep && !isPlaceholderEpisodeName(ep) ? ep.name : '',
+      };
+    }
+    const d = await getTitleDetails(m.tmdb_id, m.media_type);
+    if (!d) return null;
+    return { overview: asText(d.overview), year: yearOf(d.release_date || d.first_air_date), runtime: Number(d.runtime) || 0, episodeTitle: '' };
+  })().catch(() => null);
+  pauseInfoCache.set(key, p);
+  p.then(i => { if (!i) pauseInfoCache.delete(key); });
+  return p;
 }
 
 // Saved progress -> player request that reuses the stored torrent (no resolve)

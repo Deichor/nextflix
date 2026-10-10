@@ -8,6 +8,7 @@ import { getActiveProfileId } from '@/shared/lib/profile';
 import { intlLocale, useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction, type Vars } from '@/shared/i18n';
 import AudioSubtitlePanel from '@/features/watch/components/AudioSubtitlePanel';
 import SubtitleOverlay from '@/features/watch/components/SubtitleOverlay';
+import PauseScreen from '@/features/watch/components/PauseScreen';
 import SeekThumbnail from '@/features/watch/components/SeekThumbnail';
 import TouchSeekBar from '@/features/watch/components/TouchSeekBar';
 import {
@@ -1307,6 +1308,8 @@ interface PlayerCoreProps {
 // add 10 s each and the seek runs SEEK_COMMIT_MS after the last one (one restart, not one per tap)
 const DOUBLE_TAP_MS = 260;
 const SEEK_COMMIT_MS = 650;
+// Paused this long without input: the pause screen ("You're watching") replaces the controls
+const PAUSE_SCREEN_MS = 6000;
 
 // Plays a torrent while it downloads. The stream is a live fMP4 requested at `stream.t`
 // that really starts at `startPoint.t`, so the shown time adds that offset. Seeks inside
@@ -2662,6 +2665,27 @@ function PlayerCore({
   const loadingShown = useSteady(buffering, LOADING_SHOW_MS, LOADING_HIDE_MS);
   const playable = !!file && duration > 0 && !error;
 
+  // Pause screen: paused by the viewer with nothing else on screen and no input for PAUSE_SCREEN_MS
+  const idlePaused = playable && !playing && !buffering && !holding && !ended && countdown === null && !panelOpen &&
+    seekPreview === null && !showSkipIntro && !showNextButton;
+  const [pauseScreen, setPauseScreen] = useState(false);
+  useEffect(() => {
+    setPauseScreen(false);
+    if (!idlePaused) return;
+    let timer = setTimeout(() => setPauseScreen(true), PAUSE_SCREEN_MS);
+    const wake = () => {
+      setPauseScreen(false);
+      clearTimeout(timer);
+      timer = setTimeout(() => setPauseScreen(true), PAUSE_SCREEN_MS);
+    };
+    const events = ['keydown', 'pointermove', 'pointerdown', 'wheel'] as const;
+    events.forEach(ev => window.addEventListener(ev, wake, { passive: true }));
+    return () => {
+      clearTimeout(timer);
+      events.forEach(ev => window.removeEventListener(ev, wake));
+    };
+  }, [idlePaused]);
+
   const upscaleOn = anime && upscalePref && !upscaleStop && playable;
   // The first upscaled frame is up (the canvas wipes in); the sweep line runs until its animation ends
   const [upscaleReady, setUpscaleReady] = useState(false);
@@ -2728,8 +2752,8 @@ function PlayerCore({
   const upscaleModeLabel = !upscaleMode ? '' : upscaleMode.secondary
     ? ({ A: 'A+A', B: 'B+B', C: 'C+A' } as const)[upscaleMode.mode] : upscaleMode.mode;
 
-  // Paused by the viewer: the controls (and the Back button) stay up
-  const controlsVisible = showControls || panelOpen || (playable && !playing && !buffering && countdown === null);
+  // Paused by the viewer: the controls (and the Back button) stay up until the pause screen comes
+  const controlsVisible = !pauseScreen && (showControls || panelOpen || (playable && !playing && !buffering && countdown === null));
   const ctl = 'p-2 text-white hover:text-red-500 focus:outline-none focus-visible:text-red-500';
   controlsVisibleRef.current = controlsVisible;
   // Touch: hidden controls take no taps (they would catch taps meant for the video)
@@ -2875,6 +2899,8 @@ function PlayerCore({
       {playable && !!subId && cues.length > 0 && (
         <SubtitleOverlay videoRef={videoRef} offsetRef={offsetRef} cues={cues} delay={subDelay} raised={controlsVisible} scale={subScale} layout={subLayout} />
       )}
+
+      {playable && <PauseScreen meta={meta} title={title} shown={pauseScreen} />}
 
       {/* Episode / file picker (legacy magnet mode) */}
       {!file && files.length > 1 && !error && (

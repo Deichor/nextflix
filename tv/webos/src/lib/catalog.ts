@@ -312,3 +312,29 @@ export async function tvSeasons(tvId: number): Promise<SeasonInfo[]> {
     return [];
   }
 }
+
+export interface PauseInfo {
+  overview: string;
+  /** Movies: release year and runtime in minutes */
+  year?: number;
+  runtime: number;
+  /** TV: the episode's name ('' for TMDB placeholders) */
+  episodeTitle: string;
+}
+
+/** Text of the player's pause screen: the episode's (else the show's) or the film's overview. */
+export function pauseInfo(m: { tmdb_id: number; media_type: MediaType; season?: number; episode?: number }): Promise<PauseInfo> {
+  const key = scoped(`pause|${m.media_type}|${m.tmdb_id}|${m.season || 0}|${m.episode || 0}`);
+  return cached(key, 6 * 60 * 60 * 1000, async () => {
+    if (m.media_type === 'tv' && m.season && m.episode) {
+      const eps = await seasonEpisodes(m.tmdb_id, { season_number: m.season, episode_count: 0 });
+      const ep = eps.find(e => e.episode_number === m.episode);
+      const episodeTitle = ep && !isPlaceholderEpisodeName(ep) ? ep.name : '';
+      if (ep?.overview) return { overview: ep.overview, runtime: ep.runtime, episodeTitle };
+      const d = await details(m.tmdb_id, 'tv').catch(() => null);
+      return { overview: d?.overview || '', runtime: ep?.runtime || 0, episodeTitle };
+    }
+    const d = await details(m.tmdb_id, m.media_type);
+    return { overview: d.overview, year: yearOf(d.date), runtime: d.runtime, episodeTitle: '' };
+  });
+}

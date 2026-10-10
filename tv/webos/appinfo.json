@@ -1,6 +1,6 @@
 {
   "id": "com.nextflix.tv",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "vendor": "Nextflix",
   "type": "web",
   "main": "index.html",
