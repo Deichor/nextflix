@@ -24,11 +24,15 @@ var (
 	epNxN    = regexp.MustCompile(`(?i)(?:^|[^0-9a-z])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
 	epE      = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:e|ep|episode|b[öo]l[üu]m)[ ._-]*(\d{1,3})(?:[^0-9]|$)`)
 	epBolumN = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,3})[ ._-]*\.?[ ._-]*b[öo]l[üu]m`)
+	// Anime releases count episodes absolutely: "[SubsPlease] Sousou no Frieren - 02 (1080p)"
+	epDash = regexp.MustCompile(`[ _]-[ _](\d{1,3})(?:v\d)?(?:[ _.(\[]|$)`)
+	// A release's checksum tag ("[E5A85899]") is not an episode
+	crcTag = regexp.MustCompile(`\[[0-9A-Fa-f]{8}\]`)
 )
 
 // episodeOf guesses season and episode from a file name; 0 when unknown.
 func episodeOf(name string) (season, episode int) {
-	base := path.Base(strings.ReplaceAll(name, "\\", "/"))
+	base := crcTag.ReplaceAllString(path.Base(strings.ReplaceAll(name, "\\", "/")), "")
 	if m := epSxE.FindStringSubmatch(base); m != nil {
 		s, _ := strconv.Atoi(m[1])
 		e, _ := strconv.Atoi(m[2])
@@ -44,6 +48,10 @@ func episodeOf(name string) (season, episode int) {
 		return 0, e
 	}
 	if m := epBolumN.FindStringSubmatch(base); m != nil {
+		e, _ := strconv.Atoi(m[1])
+		return 0, e
+	}
+	if m := epDash.FindStringSubmatch(base); m != nil {
 		e, _ := strconv.Atoi(m[1])
 		return 0, e
 	}

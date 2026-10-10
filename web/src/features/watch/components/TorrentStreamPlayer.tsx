@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare, ChevronsLeft, ChevronsRight, RotateCwSquare, Clapperboard } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import { getActiveProfileId } from '@/shared/lib/profile';
-import { useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction } from '@/shared/i18n';
+import { intlLocale, useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction, type Vars } from '@/shared/i18n';
 import AudioSubtitlePanel from '@/features/watch/components/AudioSubtitlePanel';
 import SubtitleOverlay from '@/features/watch/components/SubtitleOverlay';
 import SeekThumbnail from '@/features/watch/components/SeekThumbnail';
@@ -18,6 +18,7 @@ import {
   LATE_SUBTITLE_POLL_MS,
   lateSubtitles,
   nextSubtitleAfterFailure,
+  subtitleRetryAt,
   type SubtitleFailure,
   LIVE_CUES_POLL_MS,
   SUBALT_RETRY_MAX,
@@ -1448,12 +1449,12 @@ function PlayerCore({
   const failedSubsRef = useRef(failedSubs);
   const subsRef = useRef(subs);
   subsRef.current = subs;
-  // Short notice above the controls (OpenSubtitles' daily limit), once per player
-  const [subNotice, setSubNotice] = useState<MessageKey | ''>('');
-  const quotaNoticeRef = useRef(false);
+  // Short notice above the controls (OpenSubtitles' daily limit once per player, upscaling stopped)
+  const [subNotice, setSubNotice] = useState<{ key: MessageKey; vars?: Vars; ms?: number } | null>(null);
+  const quotaNoticeRef = useRef<MessageKey | ''>('');
   useEffect(() => {
     if (!subNotice) return;
-    const timer = setTimeout(() => setSubNotice(''), 4000);
+    const timer = setTimeout(() => setSubNotice(null), subNotice.ms ?? 4000);
     return () => clearTimeout(timer);
   }, [subNotice]);
   // Anime4K upscaling: anime only, opt-in per profile, a WebGL canvas over the active slot
@@ -1863,12 +1864,25 @@ function PlayerCore({
     failed.add(id);
     failedSubsRef.current = failed;
     setFailedSubs(failed);
-    if (why === 'quota' && !quotaNoticeRef.current) {
-      quotaNoticeRef.current = true;
-      setSubNotice('player.subQuotaReached');
-    }
     const next = nextSubtitleAfterFailure(subsRef.current || [], id, why, failed);
-    if (next && subIdRef.current === id) setSubId(next);
+    const current = subIdRef.current === id;
+    // Say whether another source took over; without one, which language is missing and when the quota resets
+    const key: MessageKey = next ? 'player.subQuotaSwitched' : 'player.subQuotaNoOther';
+    if (why === 'quota' && current && quotaNoticeRef.current !== key) {
+      quotaNoticeRef.current = key;
+      const loc = localeRef.current;
+      const lang = (subsRef.current || []).find(s => s.id === id)?.language || '';
+      const at = subtitleRetryAt(id);
+      setSubNotice(next ? { key } : {
+        key,
+        ms: 9000,
+        vars: {
+          lang: languageName(loc, normLang(lang)),
+          time: at ? new Date(at).toLocaleTimeString(intlLocale(loc), { hour: '2-digit', minute: '2-digit' }) : '',
+        },
+      });
+    }
+    if (next && current) setSubId(next);
   }, []);
 
   useEffect(() => {
@@ -2669,7 +2683,7 @@ function PlayerCore({
       onMode: setUpscaleMode,
       onExtraDropped: () => {
         setUpscaleExtraDropped(true);
-        setSubNotice('player.upscaleExtraSlow');
+        setSubNotice({ key: 'player.upscaleExtraSlow' });
       },
       onReady: () => {
         setUpscaleReady(true);
@@ -2678,7 +2692,7 @@ function PlayerCore({
       onStop: why => {
         upscalerRef.current = null;
         setUpscaleStop(why);
-        if (why !== 'unsupported') setSubNotice(why === 'slow' ? 'player.upscaleSlow' : 'player.upscaleFailed');
+        if (why !== 'unsupported') setSubNotice({ key: why === 'slow' ? 'player.upscaleSlow' : 'player.upscaleFailed' });
       },
     });
     upscalerRef.current = u;
@@ -2967,8 +2981,8 @@ function PlayerCore({
       </div>
 
       {!!subNotice && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded bg-black/80 border border-white/20 text-white text-sm shadow-lg pointer-events-none" role="status">
-          {t(subNotice)}
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded bg-black/80 border border-white/20 w-max max-w-[90vw] text-center text-white text-sm shadow-lg pointer-events-none" role="status">
+          {t(subNotice.key, subNotice.vars)}
         </div>
       )}
 

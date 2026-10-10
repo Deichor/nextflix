@@ -45,7 +45,7 @@ docs/                       this folder
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
-| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
+| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL, SubSource and turkcealtyazi.org; SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings | `subtitle_settings`, files in `/app/data/subtitles` |
 | `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 | `playbacklog` | `POST /api/playback-log`: playback diagnostics from the TV player (waits, freezes, dropped frames, seeks) written as `playback: ...` log lines and daily files, rate limited per IP; read them with `scripts/playback-log.sh` (see [API.md](API.md#playback-log-modulesplaybacklog)) | daily files in `PLAYBACK_LOG_DIR`, 14 days |
@@ -268,8 +268,8 @@ Subtitle providers (`modules/subtitles/providers_http.go`) use it too, since the
 connections from Docker (logs showed `connection reset by peer` on turkcealtyazi.org and a cut OpenSubtitles answer,
 `unexpected end of JSON input`):
 
-- OpenSubtitles and SubDL share one client (3 tries, hedge after 4 s for GETs, 15 s header timeout, 5 s stall
-  timeout, 25 s budget, retries 500/502/503/504); their search GETs, file downloads (SubDL zips, OpenSubtitles
+- OpenSubtitles, SubDL and SubSource share one client (3 tries, hedge after 4 s for GETs, 15 s header timeout, 5 s stall
+  timeout, 25 s budget, retries 500/502/503/504); their search GETs, file downloads (SubDL and SubSource zips, OpenSubtitles
   links) and the OpenSubtitles `login` / `download` POSTs retry resets on a new connection;
 - turkcealtyazi.org has its own client: no hedging (one request every 2 s is the polite rate), only 502/504 retried
   (its 503 is a Cloudflare challenge), redirects only on the site (`/tt<id>/` → `/mov/<id>/<name>.html`); its
@@ -1072,10 +1072,10 @@ those retries and the audio is in another language:
   answers, at most every 5 min per title). New subtitles are added to the panel; when the profile language arrives
   and the viewer has not chosen a subtitle it is shown, with the toast "Türkçe altyazı bulundu".
 - A subtitle file that fails (web player; `subtitles.ts`, `nextSubtitleAfterFailure`): after a 429 (OpenSubtitles'
-  daily quota or another rate limit) the next subtitle of the same language from another provider is shown (SubDL,
+  daily quota or another rate limit) the next subtitle of the same language from another provider is shown (SubDL, SubSource,
   Türkçe Altyazı, embedded, torrent; that provider is not tried again), after a 5xx another provider first, then the
-  same one. A quota failure shows the toast "OpenSubtitles günlük indirme hakkı doldu" / "OpenSubtitles daily
-  download limit reached" once. Failed files are remembered (a quota until its `reset_at`, others 5 minutes) and not
+  same one. A quota failure of the shown subtitle says in a toast either that another source took over or, without
+  one, that no other source has the language and when the quota resets (once per kind). Failed files are remembered (a quota until its `reset_at`, others 5 minutes) and not
   asked again on seeks; they and the items the server marks `quota: true` are greyed in the panel with the hint
   "giriş yapınca hak artar" / "more after signing in", and the default pick, a remembered pick and late lists only
   take them when nothing else of that language is left. Only the chosen file is ever downloaded.

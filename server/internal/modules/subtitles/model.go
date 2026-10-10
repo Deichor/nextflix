@@ -13,6 +13,7 @@ const (
 	SourceOpenSubtitles = "opensubtitles"
 	SourceSubDL         = "subdl"
 	SourceTurkceAltyazi = "turkcealtyazi"
+	SourceSubSource     = "subsource"
 )
 
 // Settings is the single row of subtitle provider settings (id 1). Secrets never leave the server.
@@ -22,6 +23,7 @@ type Settings struct {
 	OpenSubtitlesUsername string `gorm:"column:opensubtitles_username"`
 	OpenSubtitlesPassword string `gorm:"column:opensubtitles_password"`
 	SubDLAPIKey           string `gorm:"column:subdl_api_key"`
+	SubSourceAPIKey       string `gorm:"column:subsource_api_key"`
 	TurkceAltyaziEnabled  bool   `gorm:"column:turkcealtyazi_enabled"`
 	DefaultLangs          string `gorm:"column:default_langs"`
 	UpdatedAt             time.Time
@@ -49,6 +51,9 @@ type SettingsView struct {
 	SubDL struct {
 		APIKeySet bool `json:"api_key_set"`
 	} `json:"subdl"`
+	SubSource struct {
+		APIKeySet bool `json:"api_key_set"`
+	} `json:"subsource"`
 	TurkceAltyazi struct {
 		Enabled bool `json:"enabled"`
 	} `json:"turkcealtyazi"`
@@ -81,6 +86,9 @@ type SettingsInput struct {
 	SubDL *struct {
 		APIKey optString `json:"api_key"`
 	} `json:"subdl"`
+	SubSource *struct {
+		APIKey optString `json:"api_key"`
+	} `json:"subsource"`
 	TurkceAltyazi *struct {
 		Enabled *bool `json:"enabled"`
 	} `json:"turkcealtyazi"`

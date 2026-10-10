@@ -245,6 +245,9 @@ func TestEpisodeOf(t *testing.T) {
 		"Dizi 7. Bölüm.srt":             {0, 7},
 		"Dizi Bölüm 12.srt":             {0, 12},
 		"Inception.2010.1080p.srt":      {0, 0},
+		"Show - 2023.srt":               {0, 0},
+		"[SubsPlease] Frieren - 02.ass": {0, 2},
+		"Frieren - 12v2 [E5A85899].srt": {0, 12},
 	}
 	for name, want := range cases {
 		if s, e := episodeOf(name); s != want[0] || e != want[1] {

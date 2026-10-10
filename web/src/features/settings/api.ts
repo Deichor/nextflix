@@ -77,6 +77,7 @@ export async function testIndexer(settings: { jackett_url: string; jackett_api_k
 export interface SubtitleSettings {
   opensubtitles: { api_key_set: boolean; username: string; password_set: boolean };
   subdl: { api_key_set: boolean };
+  subsource: { api_key_set: boolean };
   turkcealtyazi: { enabled: boolean };
   default_langs: string[];
 }
@@ -85,6 +86,7 @@ export interface SubtitleSettings {
 export interface SubtitleSettingsInput {
   opensubtitles?: { api_key?: string | null; username?: string | null; password?: string | null };
   subdl?: { api_key?: string | null };
+  subsource?: { api_key?: string | null };
   turkcealtyazi?: { enabled?: boolean };
   default_langs?: string[];
 }

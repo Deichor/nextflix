@@ -572,7 +572,7 @@ without it loses the name's hint. These parts stay below a resolution step and n
 
 ## Subtitles (`modules/subtitles`)
 
-Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|turkcealtyazi", "language": "tr",
+Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|subsource|turkcealtyazi", "language": "tr",
 "label": "Türkçe", "release": "BDRip HDRINVASION", "hi": false, "forced": false, "synced": false, "score": 0.3,
 "author": "WoraZ", "fps": 23.976, "downloads": 6527, "live": true, "quota": true }` (`author`, `fps`, `downloads` only when known; `live`: an
 embedded track of a big file, read while it plays, see below; `quota`: an OpenSubtitles item while its download quota is
@@ -582,12 +582,13 @@ used up, listed after the other items of its language)
 |---|---|---|
 | GET | `/api/subtitles` | `tmdb_id`, `media_type=movie\|tv`, `season`, `episode` (required for tv), `hash` + `index` (playing TorrServer file), `langs=tr,en` (default: the settings order), `title` (playing torrent name, ranking hint), `year`, `refresh=1` (late uploads: ask the providers again, skipping the 30 min list cache and turkcealtyazi's 24 h page cache (pages older than 10 min); at most every 5 min per title, otherwise the cache answers) → 200 `{items: [Sub], opensubtitles_quota_until?: "<RFC 3339>"}` (the field only while the OpenSubtitles download quota is used up); 400 without `tmdb_id` and `hash` |
 | GET | `/api/subtitles/file?id=[&t=<sec>]` | 200 `text/vtt; charset=utf-8`; a subtitle listed for a playing file (not made for it) is timed to that file (see [ARCHITECTURE.md](ARCHITECTURE.md#automatic-subtitle-timing-modulessubtitlessyncgo)): while that runs the answer is the subtitle as it is, marked partial like a live track (ask again), then the timed one; `X-Subtitle-Sync: pending\|synced\|unchanged\|replaced\|poor\|failed` tells the state; for a `live` embedded track the cues read so far from about `t` (the player's position) on, marked by a `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1` (`no-store`) while more follow (ask again; the whole track is cached once every part of the file was read); 400 unknown id, 429 provider quota or rate limit (OpenSubtitles quota: `{error, quota: true, reset_at: "<RFC 3339>"}`, answered without asking OpenSubtitles until then), 502 provider failure |
-| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, turkcealtyazi: {enabled}, default_langs: ["tr","en"]}`; secrets are never returned |
-| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, turkcealtyazi: {enabled}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
+| GET | `/api/settings/subtitles` | 200 `{opensubtitles: {api_key_set, username, password_set}, subdl: {api_key_set}, subsource: {api_key_set}, turkcealtyazi: {enabled}, default_langs: ["tr","en"]}`; secrets are never returned |
+| PUT | `/api/settings/subtitles` | any of `{opensubtitles: {api_key, username, password}, subdl: {api_key}, subsource: {api_key}, turkcealtyazi: {enabled}, default_langs}`; an empty string keeps the stored value, `null` clears it → 200 like GET |
 
 Sources: subtitle files inside the torrent and embedded text tracks (whole when the file is small or mostly cached, else
 live: read from the playing position on while it streams, see ARCHITECTURE.md), OpenSubtitles.com
-(API key; username/password log in for a JWT cached 23 h, which raises the download quota), SubDL (API key) and
+(API key; username/password log in for a JWT cached 23 h, which raises the download quota), SubDL (API key), SubSource
+(API key) and
 turkcealtyazi.org (scraped, on by default). `/api/subtitles` answers within 6 s with what is ready; slower providers keep
 running and fill the 30 min in-memory list cache for the next call (failures are cached 3 min, except network
 failures and 5xx, which the next call retries). Provider requests go through `platform/upstream`: resets, stalls and
@@ -608,6 +609,10 @@ is in another language), the players ask `subalt` for a release that carries it 
   the download, later ones and `refresh=1` lists use the cached file).
 - SubDL: search by `tmdb_id` + type (+ season/episode, and a second `full_season=1` query for packs) with `unpack=1`, so a
   pack's single episode file is downloaded directly; otherwise the episode is picked from the zip.
+- SubSource (`api.subsource.net/api/v1`, key in the `X-API-Key` header): each season of a show is its own title,
+  found by IMDb id (`movies/search?searchType=imdb&season=N`, cached 6 h), then one `subtitles` listing per language.
+  Items whose release names name another episode are dropped (anime absolute numbers like `- 02` count); items naming
+  none are season packs, whose episode is picked from the zip.
 - turkcealtyazi.org: the title page is found by IMDb id (`/tt<id>/`, via TMDB external ids), the download is the page's
   POST form (`/ind`) returning a zip. At most one request every 2 s server-wide, pages cached 24 h on disk, a clear
   User-Agent; on a Cloudflare challenge the page is loaded through FlareSolverr and its cookies are reused. RAR archives

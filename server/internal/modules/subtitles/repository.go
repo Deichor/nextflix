@@ -90,6 +90,9 @@ func (in SettingsInput) apply(s *Settings) {
 	if o := in.SubDL; o != nil {
 		set(&s.SubDLAPIKey, o.APIKey)
 	}
+	if o := in.SubSource; o != nil {
+		set(&s.SubSourceAPIKey, o.APIKey)
+	}
 	if o := in.TurkceAltyazi; o != nil && o.Enabled != nil {
 		s.TurkceAltyaziEnabled = *o.Enabled
 	}
@@ -106,6 +109,7 @@ func (s Settings) view() SettingsView {
 	v.OpenSubtitles.Username = s.OpenSubtitlesUsername
 	v.OpenSubtitles.PasswordSet = s.OpenSubtitlesPassword != ""
 	v.SubDL.APIKeySet = s.SubDLAPIKey != ""
+	v.SubSource.APIKeySet = s.SubSourceAPIKey != ""
 	v.TurkceAltyazi.Enabled = s.TurkceAltyaziEnabled
 	v.DefaultLangs = s.langs()
 	return v

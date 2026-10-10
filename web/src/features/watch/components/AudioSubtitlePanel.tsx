@@ -41,7 +41,9 @@ interface UpscaleSwitch {
 }
 
 const SOURCE_KEYS = { torrent: 'player.subSourceTorrent', embedded: 'player.subSourceEmbedded' } as const;
-const SOURCE_NAMES: Record<string, string> = { opensubtitles: 'OpenSubtitles', subdl: 'SubDL', turkcealtyazi: 'Türkçe Altyazı' };
+const SOURCE_NAMES: Record<string, string> = {
+  opensubtitles: 'OpenSubtitles', subdl: 'SubDL', subsource: 'SubSource', turkcealtyazi: 'Türkçe Altyazı',
+};
 
 function sourceLabel(t: TFunction, source: string): string {
   if (source in SOURCE_KEYS) return t(SOURCE_KEYS[source as keyof typeof SOURCE_KEYS]);

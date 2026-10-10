@@ -38,6 +38,7 @@ type Config struct {
 	OpenSubtitlesURL string
 	SubDLAPIURL      string
 	SubDLDownloadURL string
+	SubSourceAPIURL  string
 	TurkceAltyaziURL string
 	HTTPClient       *http.Client
 	// Debrid maps files that play from TorBox (nil = TorrServer only)
@@ -56,6 +57,7 @@ type Service struct {
 
 	os  *openSubtitles
 	sdl *subDL
+	ss  *subSource
 	ta  *turkceAltyazi
 
 	hashMu sync.Mutex
@@ -90,6 +92,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		wait:      listWait,
 		os:        newOpenSubtitles(cfg.OpenSubtitlesURL, api),
 		sdl:       newSubDL(cfg.SubDLAPIURL, cfg.SubDLDownloadURL, api),
+		ss:        newSubSource(cfg.SubSourceAPIURL, api),
 		ta:        newTurkceAltyazi(cfg.TurkceAltyaziURL, cfg.FlareSolverrURL, files),
 		hashes:    map[string]string{},
 		refreshed: map[string]time.Time{},
@@ -140,7 +143,7 @@ func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
 	}
 	// New keys or toggles change what providers return.
 	if before.OpenSubtitlesAPIKey != st.OpenSubtitlesAPIKey || before.SubDLAPIKey != st.SubDLAPIKey ||
-		before.TurkceAltyaziEnabled != st.TurkceAltyaziEnabled || before.OpenSubtitlesUsername != st.OpenSubtitlesUsername {
+		before.SubSourceAPIKey != st.SubSourceAPIKey || before.TurkceAltyaziEnabled != st.TurkceAltyaziEnabled || before.OpenSubtitlesUsername != st.OpenSubtitlesUsername {
 		s.lists.clear()
 	}
 	return st.view(), nil
@@ -192,6 +195,15 @@ func (s *Service) List(ctx context.Context, q Query) []Sub {
 		if st.SubDLAPIKey != "" {
 			jobs = append(jobs, job{SourceSubDL, "subdl|" + base, func(ctx context.Context) ([]candidate, error) {
 				return s.sdl.search(ctx, q, st)
+			}})
+		}
+		if st.SubSourceAPIKey != "" && s.cfg.IMDb != nil {
+			jobs = append(jobs, job{SourceSubSource, "ss|" + base, func(ctx context.Context) ([]candidate, error) {
+				imdb, err := s.cfg.IMDb(q.MediaType, q.TmdbID)
+				if err != nil {
+					return nil, fmt.Errorf("subsource: IMDb id lookup: %w", err)
+				}
+				return s.ss.search(ctx, q, st, imdb)
 			}})
 		}
 		if st.TurkceAltyaziEnabled && s.cfg.IMDb != nil {
@@ -514,6 +526,8 @@ func (s *Service) download(ctx context.Context, source, lang, ref string) ([]byt
 		raw, name, err = s.os.fetch(ctx, ref, st)
 	case SourceSubDL:
 		raw, name, err = s.sdl.fetch(ctx, ref, lang)
+	case SourceSubSource:
+		raw, name, err = s.ss.fetch(ctx, ref, lang, st)
 	case SourceTurkceAltyazi:
 		if !st.TurkceAltyaziEnabled {
 			return nil, errors.New("turkcealtyazi.org is disabled in settings")
@@ -543,7 +557,7 @@ func decodeID(id string) (source, lang, ref string, err error) {
 		return "", "", "", ErrBadID
 	}
 	switch parts[0] {
-	case SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceTurkceAltyazi:
+	case SourceTorrent, SourceEmbedded, SourceOpenSubtitles, SourceSubDL, SourceSubSource, SourceTurkceAltyazi:
 	default:
 		return "", "", "", ErrBadID
 	}

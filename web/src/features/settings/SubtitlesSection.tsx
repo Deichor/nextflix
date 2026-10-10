@@ -35,7 +35,9 @@ function orderLangs(langs: string[]): string[] {
 function providerState(s: SubtitleSettings | null, loadError: string | null): ConnectionState {
   if (loadError !== null) return 'error';
   if (!s) return 'checking';
-  return s.opensubtitles.api_key_set || s.subdl.api_key_set || s.turkcealtyazi.enabled ? 'connected' : 'notSet';
+  return s.opensubtitles.api_key_set || s.subdl.api_key_set || s.subsource.api_key_set || s.turkcealtyazi.enabled
+    ? 'connected'
+    : 'notSet';
 }
 
 export default function SubtitlesSection() {
@@ -46,7 +48,8 @@ export default function SubtitlesSection() {
   const [osUser, setOsUser] = useState('');
   const [osPass, setOsPass] = useState('');
   const [sdlKey, setSdlKey] = useState('');
-  const [cleared, setCleared] = useState({ osKey: false, osPass: false, sdlKey: false });
+  const [ssKey, setSsKey] = useState('');
+  const [cleared, setCleared] = useState({ osKey: false, osPass: false, sdlKey: false, ssKey: false });
   const [taEnabled, setTaEnabled] = useState(true);
   const [langs, setLangs] = useState<string[]>(KNOWN_LANGS);
   const [saving, setSaving] = useState(false);
@@ -57,8 +60,9 @@ export default function SubtitlesSection() {
     setOsKey('');
     setOsPass('');
     setSdlKey('');
+    setSsKey('');
     setOsUser(s.opensubtitles.username || '');
-    setCleared({ osKey: false, osPass: false, sdlKey: false });
+    setCleared({ osKey: false, osPass: false, sdlKey: false, ssKey: false });
     setTaEnabled(s.turkcealtyazi.enabled);
     setLangs(orderLangs(s.default_langs || []));
   };
@@ -79,9 +83,11 @@ export default function SubtitlesSection() {
     (osKey.trim() !== '' ||
       osPass !== '' ||
       sdlKey.trim() !== '' ||
+      ssKey.trim() !== '' ||
       cleared.osKey ||
       cleared.osPass ||
       cleared.sdlKey ||
+      cleared.ssKey ||
       osUser.trim() !== (settings.opensubtitles.username || '') ||
       taEnabled !== settings.turkcealtyazi.enabled ||
       langs.join(',') !== savedLangs.join(','));
@@ -105,6 +111,7 @@ export default function SubtitlesSection() {
         password: cleared.osPass ? null : osPass,
       },
       subdl: { api_key: cleared.sdlKey ? null : sdlKey.trim() },
+      subsource: { api_key: cleared.ssKey ? null : ssKey.trim() },
       turkcealtyazi: { enabled: taEnabled },
       default_langs: langs,
     };
@@ -211,6 +218,21 @@ export default function SubtitlesSection() {
                 onChange={setSdlKey}
                 cleared={cleared.sdlKey}
                 onClear={(v) => setCleared((c) => ({ ...c, sdlKey: v }))}
+              />
+            </fieldset>
+          </div>
+
+          <div className="border-t border-white/10 pt-6">
+            <fieldset className="space-y-3">
+              <legend className="text-sm font-semibold">SubSource</legend>
+              <p className="text-xs text-[#8c8c8c]">{t('settings.subtitles.subsourceHint')}</p>
+              <SecretField
+                label={t('settings.subtitles.apiKey')}
+                isSet={settings.subsource.api_key_set}
+                value={ssKey}
+                onChange={setSsKey}
+                cleared={cleared.ssKey}
+                onClear={(v) => setCleared((c) => ({ ...c, ssKey: v }))}
               />
             </fieldset>
           </div>

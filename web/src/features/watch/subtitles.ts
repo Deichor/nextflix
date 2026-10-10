@@ -68,7 +68,7 @@ export function writePlayerPrefs(profileId: number | null, patch: Partial<Player
 
 // ---- Subtitles API ----
 
-export type SubtitleSource = 'torrent' | 'embedded' | 'opensubtitles' | 'subdl' | 'turkcealtyazi' | string;
+export type SubtitleSource = 'torrent' | 'embedded' | 'opensubtitles' | 'subdl' | 'subsource' | 'turkcealtyazi' | string;
 
 export interface SubtitleItem {
   id: string;
@@ -236,6 +236,9 @@ const cueCache = new Map<string, Promise<Cue[]>>();
 // Subtitle files that could not be loaded, by id: not asked again before `until`
 const failedFiles = new Map<string, { why: SubtitleFailure; until: number }>();
 const FAILED_FILE_MS = 5 * 60 * 1000;
+
+/** When a failed subtitle file may be asked again (the quota reset for OpenSubtitles), null if it did not fail. */
+export const subtitleRetryAt = (id: string): number | null => failedFiles.get(id)?.until ?? null;
 
 // The server marks a partial live answer with this note (more cues follow while the file plays)
 export const PARTIAL_NOTE = 'NOTE nextflix-partial';
