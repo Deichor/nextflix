@@ -1046,7 +1046,8 @@ Player preferences live per profile in localStorage `hfx-player:<profileId>` (wr
 the 5 s countdown at the end credits and the end of an episode (only the Next button stays, see
 [Skip intro and Next episode](#skip-intro-and-next-episode)), `subSize` (`small`/`medium`/`large`) scales
 the subtitle overlay by `SUBTITLE_SIZE_SCALE`, `audioLang: 'original'` picks the title's original language and skips
-the "Turkish profile → Turkish audio" rule (picking the original track in the player keeps `'original'`).
+the "Turkish profile → Turkish audio" rule (picking the original track in the player keeps `'original'`),
+`upscale: true` turns on [Anime upscaling](#anime-upscaling-web) for anime.
 
 Default audio track (`features/watch/audioPick.ts`, a pure function; the TV app has the same rules in
 `tv/webos/src/lib/subtitles.ts`), first match wins: the last picked language (not with `'original'`), Turkish for a
@@ -1157,6 +1158,55 @@ peers; buffered ahead 22 s of media after 10 s, 51 s after 20 s, 140 s after 30 
 1.9 GB range (≈ 18 min) after 90 s, then at the reader's pace. With a second torrent read at full speed next to it
 the playing one still got 20-24 MB/s (19 s ahead after 11 s, 72 s after 21 s), because that swarm was strong; with a
 weak playing swarm (3-5 active peers) the other torrents take the line, hence the playback priority.
+
+## Anime upscaling (web)
+
+The web player can run [Anime4K](https://github.com/bloc97/Anime4K) on anime: a switch under "Picture" in the Audio &
+Subtitles panel, shown only when the title is anime by the server's rule (TMDB Animation genre 16 and original
+language `ja`, `isAnimeTitle` in `features/watch/api.ts`). It is off by default and remembered per profile
+(`upscale` in the player prefs). The TV app has nothing like it: webOS plays video on a hardware plane the page can't
+read, and the TV upscales on its own.
+
+- `features/watch/upscale.ts` draws the active `<video>` slot through the shaders into a canvas over the slots (under
+  the subtitle overlay) on every new frame (`requestVideoFrameCallback`). It uses `anime4k.js` (WebGL port of the
+  v4.0.1 GLSL shaders, pinned). WebGPU ports exist but WebGPU needs a secure context, and the LAN app runs on plain
+  http.
+- The mode is picked from the video on its first frame and again when the source changes (`pickMode`, Anime4K's
+  advice): lines = max(height, width x 9/16); 900+ lines Mode A (most 1080p), 600-899 Mode B (most 720p, softer
+  restore), below 600 Mode C (a modern SD release is a downscaled HD master) or Mode A for titles before 2009 (real
+  SD masters). The panel hint shows it ("auto mode B for this 720p video"), the wipe label too ("Anime4K B").
+- Chains (`anime4kShaders.ts`, all after Clamp_Highlights), in CNN size M (S after a step down): A = Restore_CNN +
+  Upscale_CNN_x2, B = Restore_CNN_Soft + Upscale_CNN_x2, C = Upscale_Denoise_CNN_x2. Their AutoDownscalePre and
+  second upscale are left out: the output is the picture's on-screen size in device pixels, at most 2x the video,
+  so they could never run. The x2 pass only runs when the output is over 1.2x the video (720p on a 1080p screen,
+  1080p on 4K); 1080p on a 1080p screen only gets the restore pass.
+- "Extra enhancement" (a second switch, shown while upscaling is on; `upscaleExtra` in the prefs) runs the
+  secondary mode in HQ sizes: A+A = Restore_CNN_VL, Upscale_CNN_x2_VL, Restore_CNN_M, AutoDownscalePre_x2/x4,
+  Upscale_CNN_x2_M; B+B = Restore_CNN_Soft_VL, Upscale_CNN_x2_VL, AutoDownscalePre, Restore_CNN_Soft_M,
+  Upscale_CNN_x2_M; C+A = Upscale_Denoise_CNN_x2_VL, AutoDownscalePre, Restore_CNN_M, Upscale_CNN_x2_M. Anime4K
+  says secondary modes are for x2 or more, so they only run when the screen (not the window, so fullscreen
+  doesn't rebuild) is at least 1.9x the video; otherwise the primary mode runs and the switch says why. Toggling it
+  restarts the upscaler (and the wipe below).
+- Watchdog: if more than 25 % of 240 presented frames were skipped by the loop, it steps down extra -> M -> S
+  (leaving extra shows "Extra enhancement turned off" on that switch), then it stops with a notice ("the graphics
+  card could not keep up"). Frames are not judged for 2.5 s after the first
+  frame of freshly built shaders (anime4k.js compiles them synchronously and ANGLE finishes the big ones on the
+  first draws), nor across a gap over 500 ms, a hidden tab, a pause or a seek. It also stops on missing WebGL
+  extensions, a lost context, a cross-origin frame or an empty first frame, and the plain video shows again.
+- When the first upscaled frame is up, the canvas wipes in from the left behind a glowing line
+  (`components/upscale.module.css`, 4.5 s): it reaches the middle in 1.5 s and holds there until 3 s with
+  "Anime4K <mode>" on its left and "Original" on its right, so both pictures can be compared, then moves out to the
+  right.
+- Diagnostics go to the playback log (`features/watch/upscaleLog.ts`, client `web-a4k`): `a4k-gpu` (GPU name,
+  backend, dpr), `a4k-build` (`mode`, `tier` X/M/S, `lines`, `extra_idle`, build ms), `a4k-first` (`chain` such as
+  `B:M`, first-frame ms, sizes), `a4k-window` (every 240 frames: `skipped`, `draw_avg` / `draw_max` ms),
+  `a4k-level`, `a4k-stop` (`why`, `at`, `err`).
+- The `<video>` slots load with `crossOrigin="anonymous"` so WebGL can read their frames; the API's CORS already
+  allows every origin `getApiUrl()` talks to directly.
+- The shaders are their own lazy chunk (`features/watch/anime4kShaders.ts`, kept out of the `vendors`
+  chunk in `next.config.js`), loaded only when upscaling starts.
+- Drawing through a canvas bypasses the browser's own video upscalers (NVIDIA RTX Video Super Resolution, Edge
+  Video Super Resolution) and HDR output, one reason it stays opt-in.
 
 ## Skip intro and Next episode
 

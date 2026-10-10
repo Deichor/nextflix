@@ -40,6 +40,10 @@ export interface PlayerPrefs {
   subSize?: SubtitleSize;
   /** Start the next episode after the countdown (Settings, default on) */
   autoplayNext?: boolean;
+  /** Anime4K upscaling for anime (player panel, default off) */
+  upscale?: boolean;
+  /** Anime4K A+A instead of Mode A while upscaling is on (default off) */
+  upscaleExtra?: boolean;
 }
 
 const prefsKey = (profileId: number | null) => `hfx-player:${profileId ?? 0}`;

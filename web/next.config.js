@@ -40,7 +40,8 @@ const nextConfig = {
         chunks: 'all',
         cacheGroups: {
           vendor: {
-            test: /[\\/]node_modules[\\/]/,
+            // anime4k.js (large shaders) stays in its own lazy chunk, loaded only when upscaling is on
+            test: /[\\/]node_modules[\\/](?!anime4k\.js[\\/])/,
             name: 'vendors',
             chunks: 'all',
           },

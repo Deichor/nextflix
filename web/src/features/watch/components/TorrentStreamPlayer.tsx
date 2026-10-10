@@ -45,6 +45,7 @@ import {
   getTitleProgress,
   getTvSeasons,
   getOriginalLanguage,
+  isAnimeTitle,
   getSeasonEpisodes,
   saveProgress,
   nextEpisodeOf,
@@ -72,6 +73,9 @@ import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
+import { Upscaler, upscaleSupported, type UpscaleMode, type UpscaleStop } from '@/features/watch/upscale';
+import { UpscaleLog } from '@/features/watch/upscaleLog';
+import upscaleCss from '@/features/watch/components/upscale.module.css';
 import { useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
 
@@ -1452,6 +1456,33 @@ function PlayerCore({
     const timer = setTimeout(() => setSubNotice(''), 4000);
     return () => clearTimeout(timer);
   }, [subNotice]);
+  // Anime4K upscaling: anime only, opt-in per profile, a WebGL canvas over the active slot
+  const [anime, setAnime] = useState(false);
+  const [upscalePref, setUpscalePref] = useState(false);
+  const [upscaleStop, setUpscaleStop] = useState<UpscaleStop | null>(null);
+  const upscaleCanvasRef = useRef<HTMLCanvasElement>(null);
+  const upscalerRef = useRef<Upscaler | null>(null);
+  // Extra (Anime4K A+A) on top of it; dropped is the watchdog stepping it down this session
+  const [upscaleExtraPref, setUpscaleExtraPref] = useState(false);
+  const [upscaleExtraDropped, setUpscaleExtraDropped] = useState(false);
+  const upscaleExtraRef = useRef(false);
+  upscaleExtraRef.current = upscaleExtraPref && !upscaleExtraDropped;
+  // Bumped by the extra switch: the upscaler restarts with the other chain
+  const [upscaleGen, setUpscaleGen] = useState(0);
+  useEffect(() => {
+    const prefs = readPlayerPrefs(getActiveProfileId());
+    setUpscalePref(!!prefs.upscale);
+    setUpscaleExtraPref(!!prefs.upscaleExtra);
+  }, []);
+  const metaId = meta?.tmdb_id;
+  const metaType = meta?.media_type;
+  useEffect(() => {
+    setAnime(false);
+    if (!metaId || !metaType) return;
+    let cancelled = false;
+    isAnimeTitle(metaId, metaType).then(a => { if (!cancelled) setAnime(a); });
+    return () => { cancelled = true; };
+  }, [metaId, metaType]);
   const subIdRef = useRef(subId);
   subIdRef.current = subId;
   const onSubtitleStateRef = useRef(onSubtitleState);
@@ -2616,6 +2647,73 @@ function PlayerCore({
   // The loading overlay comes only after LOADING_SHOW_MS without frames and goes once they ran LOADING_HIDE_MS
   const loadingShown = useSteady(buffering, LOADING_SHOW_MS, LOADING_HIDE_MS);
   const playable = !!file && duration > 0 && !error;
+
+  const upscaleOn = anime && upscalePref && !upscaleStop && playable;
+  // The first upscaled frame is up (the canvas wipes in); the sweep line runs until its animation ends
+  const [upscaleReady, setUpscaleReady] = useState(false);
+  const [upscaleSweep, setUpscaleSweep] = useState(false);
+  // The chain the upscaler picked for this video (mode A/B/C, secondary for extra)
+  const [upscaleMode, setUpscaleMode] = useState<UpscaleMode | null>(null);
+  useEffect(() => {
+    const canvas = upscaleCanvasRef.current;
+    if (!upscaleOn || !canvas) return;
+    const m = metaRef.current;
+    const log = new UpscaleLog(
+      { type: m?.media_type || '', tmdb: m?.tmdb_id || 0, s: m?.season, e: m?.episode, title: m?.title },
+      () => filePosRef.current,
+    );
+    const u = new Upscaler(canvas, {
+      note: log.note,
+      extra: upscaleExtraRef.current,
+      year: m?.year,
+      onMode: setUpscaleMode,
+      onExtraDropped: () => {
+        setUpscaleExtraDropped(true);
+        setSubNotice('player.upscaleExtraSlow');
+      },
+      onReady: () => {
+        setUpscaleReady(true);
+        setUpscaleSweep(true);
+      },
+      onStop: why => {
+        upscalerRef.current = null;
+        setUpscaleStop(why);
+        if (why !== 'unsupported') setSubNotice(why === 'slow' ? 'player.upscaleSlow' : 'player.upscaleFailed');
+      },
+    });
+    upscalerRef.current = u;
+    u.setVideo(slotEls.current[activeSlotRef.current]);
+    return () => {
+      u.destroy();
+      log.close();
+      upscalerRef.current = null;
+      setUpscaleReady(false);
+      setUpscaleSweep(false);
+      setUpscaleMode(null);
+    };
+  }, [upscaleOn, upscaleGen]);
+  // A seamless switch hands the canvas to the new slot
+  useEffect(() => { upscalerRef.current?.setVideo(slotEls.current[activeSlot]); }, [activeSlot]);
+  const toggleUpscale = () => {
+    const next = !(upscalePref && !upscaleStop);
+    setUpscaleStop(next && !upscaleSupported() ? 'unsupported' : null);
+    setUpscalePref(next);
+    writePlayerPrefs(getActiveProfileId(), { upscale: next });
+  };
+  const upscaleExtraOn = upscaleExtraPref && !upscaleExtraDropped;
+  const toggleUpscaleExtra = () => {
+    const next = !upscaleExtraOn;
+    setUpscaleExtraDropped(false);
+    setUpscaleExtraPref(next);
+    setUpscaleGen(n => n + 1);
+    writePlayerPrefs(getActiveProfileId(), { upscaleExtra: next });
+  };
+  const upscaleNote = upscaleStop === 'unsupported' ? t('player.upscaleUnsupported')
+    : upscaleStop === 'slow' ? t('player.upscaleSlow')
+    : upscaleStop === 'failed' ? t('player.upscaleFailed') : '';
+  const upscaleModeLabel = !upscaleMode ? '' : upscaleMode.secondary
+    ? ({ A: 'A+A', B: 'B+B', C: 'C+A' } as const)[upscaleMode.mode] : upscaleMode.mode;
+
   // Paused by the viewer: the controls (and the Back button) stay up
   const controlsVisible = showControls || panelOpen || (playable && !playing && !buffering && countdown === null);
   const ctl = 'p-2 text-white hover:text-red-500 focus:outline-none focus-visible:text-red-500';
@@ -2677,6 +2775,8 @@ function PlayerCore({
               i === activeSlot ? 'opacity-100 z-[1]' : i === fadingSlot ? 'opacity-100 z-0' : 'opacity-0 z-0 pointer-events-none'
             }`}
             playsInline
+            // CORS-mode load, so the upscaler may read frames into WebGL (the API allows the app's origins)
+            crossOrigin="anonymous"
             onPlay={e => { if (isActive(e)) { setPlaying(true); resumed(); } }}
             onPause={e => {
               if (!isActive(e) || holdRef.current) return;
@@ -2739,6 +2839,22 @@ function PlayerCore({
             onProgress={e => { if (isActive(e)) lastDataRef.current = Date.now(); }}
           />
         ))}
+        {upscaleOn && (
+          <canvas
+            ref={upscaleCanvasRef}
+            aria-hidden="true"
+            className={`absolute inset-0 z-[2] w-full h-full object-contain pointer-events-none ${upscaleCss.canvas} ${upscaleReady ? upscaleCss.reveal : ''}`}
+          />
+        )}
+        {upscaleOn && upscaleSweep && (
+          <div className={upscaleCss.sweep} aria-hidden="true">
+            <div className={upscaleCss.track} onAnimationEnd={() => setUpscaleSweep(false)}>
+              <span className={upscaleCss.line} />
+              <span className={`${upscaleCss.label} ${upscaleCss.labelNew}`}>{upscaleModeLabel ? `Anime4K ${upscaleModeLabel}` : 'Anime4K'}</span>
+              <span className={`${upscaleCss.label} ${upscaleCss.labelOld}`}>{t('player.original')}</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Subtitles are drawn here (the stream restarts with offsets, so native tracks would drift) */}
@@ -3079,6 +3195,18 @@ function PlayerCore({
           delay={subDelay}
           onDelay={setSubDelay}
           subAlt={subAlt}
+          upscale={anime ? {
+            on: upscalePref && !upscaleStop,
+            note: upscaleNote,
+            hint: upscaleMode ? t('player.upscaleAuto', { mode: upscaleModeLabel, lines: upscaleMode.lines }) : '',
+            onToggle: toggleUpscale,
+            extra: {
+              on: upscaleExtraOn,
+              note: upscaleExtraDropped ? t('player.upscaleExtraSlow') : '',
+              hint: upscaleExtraOn && upscaleMode?.extraIdle ? t('player.upscaleExtraIdle') : '',
+              onToggle: toggleUpscaleExtra,
+            },
+          } : undefined}
         />
       )}
     </div>

@@ -263,25 +263,50 @@ export function getAvailability(target: AvailabilityTarget): Promise<Availabilit
   return p;
 }
 
-const originalLangCache = new Map<string, Promise<string | undefined>>();
+interface TitleTraits {
+  originalLanguage?: string;
+  genreIds: number[];
+}
+
+const traitsCache = new Map<string, Promise<TitleTraits | null>>();
+
+// Original language and genres of a title from TMDB details (cached for the session)
+function getTitleTraits(tmdbId: number, type: StreamMediaType): Promise<TitleTraits | null> {
+  const key = `${type}:${tmdbId}`;
+  let p = traitsCache.get(key);
+  if (!p) {
+    p = fetch(`${getApiUrl()}/api/tmdb-movie/${tmdbId}?type=${type}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(json => {
+        const data = json?.data ?? json;
+        if (!data || typeof data !== 'object') return null;
+        return {
+          originalLanguage: (typeof data.original_language === 'string' && data.original_language) || undefined,
+          genreIds: Array.isArray(data.genres) ? data.genres.map((g: { id?: unknown }) => Number(g?.id)).filter(Number.isFinite) : [],
+        };
+      })
+      .catch(() => null);
+    traitsCache.set(key, p);
+    p.then(t => { if (!t) traitsCache.delete(key); });
+  }
+  return p;
+}
 
 /**
  * TMDB original_language of a title (cached for the session), for resumes whose meta lacks it
  * (Continue Watching). Undefined when unknown or slower than waitMs.
  */
 export function getOriginalLanguage(tmdbId: number, type: StreamMediaType, waitMs = 0): Promise<string | undefined> {
-  const key = `${type}:${tmdbId}`;
-  let p = originalLangCache.get(key);
-  if (!p) {
-    p = fetch(`${getApiUrl()}/api/tmdb-movie/${tmdbId}?type=${type}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then(data => (typeof data?.original_language === 'string' && data.original_language) || undefined)
-      .catch(() => undefined);
-    originalLangCache.set(key, p);
-    p.then(lang => { if (!lang) originalLangCache.delete(key); });
-  }
+  const p = getTitleTraits(tmdbId, type).then(t => t?.originalLanguage);
   if (waitMs <= 0) return p;
   return Promise.race([p, new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), waitMs))]);
+}
+
+const ANIMATION_GENRE = 16;
+
+/** Anime by the server's rule (catalog/discover.go): Animation with Japanese as the original language */
+export function isAnimeTitle(tmdbId: number, type: StreamMediaType): Promise<boolean> {
+  return getTitleTraits(tmdbId, type).then(t => !!t && t.originalLanguage === 'ja' && t.genreIds.includes(ANIMATION_GENRE));
 }
 
 /** Episode air date (YYYY-MM-DD) still ahead of today. */

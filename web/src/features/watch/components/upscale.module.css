@@ -1,0 +1,86 @@
+/* Anime4K canvas: hidden until its first upscaled frame, then wiped in from the left behind a light line.
+   The line stops in the middle for a while (upscaled left, original right) so the difference shows,
+   then moves on. The canvas clip and the line share the same keyframe positions. */
+.canvas {
+  clip-path: inset(0 100% 0 0);
+}
+
+.reveal {
+  animation: wipe 4500ms linear forwards;
+}
+
+.sweep {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.track {
+  position: absolute;
+  inset: 0;
+  animation: track 4500ms linear forwards;
+}
+
+.line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: #fff;
+  box-shadow: 0 0 10px 2px rgba(255, 255, 255, 0.9), 0 0 28px 8px rgba(229, 9, 20, 0.75), 0 0 70px 18px rgba(229, 9, 20, 0.35);
+}
+
+.label {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 5px 12px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* Left of the line: the upscaled picture */
+.labelNew {
+  right: calc(100% + 16px);
+  border-color: rgba(229, 9, 20, 0.8);
+}
+
+/* Right of the line: the original */
+.labelOld {
+  left: 16px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* 0-1.5 s to the middle, held until 3 s, then out to the right */
+@keyframes wipe {
+  0% { clip-path: inset(0 100% 0 0); animation-timing-function: cubic-bezier(0.3, 0, 0.2, 1); }
+  33% { clip-path: inset(0 50% 0 0); }
+  67% { clip-path: inset(0 50% 0 0); animation-timing-function: cubic-bezier(0.6, 0, 0.6, 1); }
+  100% { clip-path: inset(0 0 0 0); }
+}
+
+@keyframes track {
+  0% { transform: translateX(0); opacity: 1; animation-timing-function: cubic-bezier(0.3, 0, 0.2, 1); }
+  33% { transform: translateX(50%); }
+  67% { transform: translateX(50%); opacity: 1; animation-timing-function: cubic-bezier(0.6, 0, 0.6, 1); }
+  95% { opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    animation-duration: 1ms;
+  }
+  .track {
+    animation-duration: 1ms;
+  }
+}

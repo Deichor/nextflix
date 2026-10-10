@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronLeft, Loader2, Minus, Plus, Repeat, SlidersHorizontal } from 'lucide-react';
+import { Check, ChevronLeft, Loader2, Minus, Plus, Repeat, ScanEye, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { useFormat, useLocale, useT, type Locale, type TFunction } from '@/shared/i18n';
 import { AudioTrackInfo, SubtitleItem, languageName, normLang } from '@/features/watch/subtitles';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
@@ -27,6 +27,17 @@ interface AudioSubtitlePanelProps {
   subAlt?: { lang: string; busy: boolean; onSwitch: () => void } | null;
   /** Touch layout: a bottom sheet (swipe down to close) instead of the popover */
   sheet?: boolean;
+  /** Anime only: the Anime4K upscaling switch and, while it is on, the extra (A+A) switch; note says why one is off */
+  upscale?: UpscaleSwitch & { extra: UpscaleSwitch };
+}
+
+interface UpscaleSwitch {
+  on: boolean;
+  /** Why it is off (shown as a warning) */
+  note: string;
+  /** Replaces the default hint (the picked mode, why extra does nothing here) */
+  hint?: string;
+  onToggle: () => void;
 }
 
 const SOURCE_KEYS = { torrent: 'player.subSourceTorrent', embedded: 'player.subSourceEmbedded' } as const;
@@ -88,10 +99,35 @@ function Row({
   );
 }
 
+// An on/off row with a hint line under the label (wraps, never cut)
+function SwitchRow({
+  icon, label, hint, warn, on, onToggle,
+}: { icon: React.ReactNode; label: string; hint: string; warn: boolean; on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      data-col="audio"
+      onClick={onToggle}
+      className={`${rowBase} ${on ? 'text-white' : 'text-[#b3b3b3] hover:bg-white/10 hover:text-white'}`}
+    >
+      <span className="flex w-6 shrink-0 justify-center self-start pt-0.5">{icon}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block">{label}</span>
+        <span className={`mt-0.5 block text-xs font-normal leading-snug md:text-sm ${warn ? 'text-[#e5a00d]' : 'text-[#8c8c8c]'}`}>{hint}</span>
+      </span>
+      <span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${on ? 'bg-[#E50914]' : 'bg-white/25'}`}>
+        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </span>
+    </button>
+  );
+}
+
 // Netflix-style "Audio & Subtitles" panel: two columns, red check on the active row,
 // arrow keys move inside / between the columns, Esc or a click outside closes it.
 export default function AudioSubtitlePanel({
-  open, onClose, anchorRef, audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, failedSubtitles, onSubtitle, delay, onDelay, subAlt, sheet = false,
+  open, onClose, anchorRef, audioTracks, audio, onAudio, originalLang, subtitles, subtitleId, failedSubtitles, onSubtitle, delay, onDelay, subAlt, sheet = false, upscale,
 }: AudioSubtitlePanelProps) {
   const t = useT();
   const f = useFormat();
@@ -253,6 +289,29 @@ export default function AudioSubtitlePanel({
                 </Row>
               );
             })
+          )}
+          {!!upscale && (
+            <div className="mt-3 border-t border-white/10 pt-3">
+              <h4 className="px-3 pb-1 text-sm font-semibold text-[#b3b3b3] md:px-4">{t('player.picture')}</h4>
+              <SwitchRow
+                icon={<ScanEye className="h-5 w-5" />}
+                label={t('player.upscale')}
+                hint={upscale.note || upscale.hint || t('player.upscaleHint')}
+                warn={!!upscale.note}
+                on={upscale.on}
+                onToggle={upscale.onToggle}
+              />
+              {upscale.on && (
+                <SwitchRow
+                  icon={<Sparkles className="h-5 w-5" />}
+                  label={t('player.upscaleExtra')}
+                  hint={upscale.extra.note || upscale.extra.hint || t('player.upscaleExtraHint')}
+                  warn={!!upscale.extra.note}
+                  on={upscale.extra.on}
+                  onToggle={upscale.extra.onToggle}
+                />
+              )}
+            </div>
           )}
         </section>
 
