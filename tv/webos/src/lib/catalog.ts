@@ -331,9 +331,9 @@ export interface PauseInfo {
 
 /**
  * Text of the player's pause screen: the episode's (else the show's) or the film's overview.
- * null when nothing could be loaded; only complete answers are cached, so the next pause asks again.
+ * info is null when nothing could be loaded; `complete` false (a request failed): not cached, ask again on the next pause.
  */
-export function pauseInfo(m: { tmdb_id: number; media_type: MediaType; season?: number; episode?: number }): Promise<PauseInfo | null> {
+export function pauseInfo(m: { tmdb_id: number; media_type: MediaType; season?: number; episode?: number }): Promise<{ info: PauseInfo | null; complete: boolean }> {
   const key = scoped(`pause|${m.media_type}|${m.tmdb_id}|${m.season || 0}|${m.episode || 0}`);
   const load = async (): Promise<{ info: PauseInfo | null; complete: boolean }> => {
     if (m.media_type === 'tv' && m.season && m.episode) {
@@ -359,5 +359,5 @@ export function pauseInfo(m: { tmdb_id: number; media_type: MediaType; season?: 
     if (!d) return { info: null, complete: false };
     return { info: { overview: d.overview, year: yearOf(d.date), runtime: d.runtime, episodeTitle: '' }, complete: true };
   };
-  return cached(key, 6 * 60 * 60 * 1000, load, r => r.complete).then(r => r.info, () => null);
+  return cached(key, 6 * 60 * 60 * 1000, load, r => r.complete).catch(() => ({ info: null, complete: false }));
 }

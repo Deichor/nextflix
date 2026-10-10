@@ -21,10 +21,10 @@ export default function PauseScreen({ meta, shown }: { meta: StreamMeta; shown: 
   useEffect(() => {
     if (!shown || loadedRef.current === key) return;
     loadedRef.current = key;
-    pauseInfo(meta).then(i => {
+    pauseInfo(meta).then(r => {
       if (loadedRef.current !== key) return;
-      if (i) setInfo(i);
-      else loadedRef.current = '';
+      if (r.info) setInfo(r.info);
+      if (!r.complete) loadedRef.current = '';
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, shown]);

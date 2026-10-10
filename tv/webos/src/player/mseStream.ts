@@ -1,4 +1,5 @@
 import { KeyframeScanner, initSegmentEnd, mimeCandidates, parseCodecs, type TrackCodec } from './mp4Codecs';
+import { allDataIn, endOfStreamDue, type LaneFill } from './mseEnd';
 import { logNote, markSeek } from './playbackLog';
 
 // Feeds /play streams (live fragmented MP4) to a <video> through Media Source Extensions.
@@ -365,7 +366,6 @@ export class MseStream {
   private objectUrl: string;
   private lanes: Lane[];
   private stopped = false;
-  private ended = false;
   private aligned = false;
   private ready = false;
   private job: SpliceJob | null = null;
@@ -515,7 +515,8 @@ export class MseStream {
     if (lane.evictTo > 0) {
       const to = lane.evictTo;
       lane.evictTo = 0;
-      if (sb.buffered.length > 0 && sb.buffered.start(0) < to - 0.1) {
+      // Once the whole file is in nothing needs the room, and a remove() would reopen the ended MediaSource
+      if (!allDataIn(this.fills()) && sb.buffered.length > 0 && sb.buffered.start(0) < to - 0.1) {
         sb.remove(0, to);
         lane.dropKeyframesBefore(to);
         return;
@@ -549,15 +550,17 @@ export class MseStream {
       }
       return;
     }
-    const allIn = this.lanes.every(l => l.feed.done && l.feed.queued === 0 && !l.sb?.updating);
-    if (allIn && !this.ended && this.ms.readyState === 'open') {
-      this.ended = true;
+    if (endOfStreamDue(this.ms.readyState, this.fills())) {
       try {
         this.ms.endOfStream();
       } catch {
         /* closed meanwhile */
       }
     }
+  }
+
+  private fills(): LaneFill[] {
+    return this.lanes.map(l => ({ done: l.feed.done, queued: l.feed.queued, updating: !!l.sb?.updating }));
   }
 
   // The buffer is full: plan with less from now on, drop what was played and try again
@@ -741,7 +744,6 @@ export class MseStream {
       return;
     }
     job.committing = false;
-    this.ended = false;
     this.setMime();
     this.finishSplice({ ok: true, cut });
     this.lanes.forEach(l => this.pump(l));

@@ -124,6 +124,9 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
     setPreview(null);
   }, []);
 
+  // The source went away (another one is looked up, or a fatal error): nothing left to seek in
+  useEffect(() => { if (!playable) endScrub(); }, [playable, endScrub]);
+
   const commit = useCallback(() => {
     const p = previewRef.current;
     endScrub();

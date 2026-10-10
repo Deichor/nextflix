@@ -1,5 +1,7 @@
 import { getServer } from './config';
 import { getProfileId, profileLocale } from './profile';
+import { peekEntry, storeEntry, type CacheEntry } from './answerCache';
+import { tmdbImgUrl } from './tmdbImg';
 
 export class HttpError extends Error {
   status: number;
@@ -67,16 +69,12 @@ export function beacon(path: string): void {
 
 /** TMDB image through the server's disk-cached proxy (the TV cannot rely on image.tmdb.org). */
 export function img(path: string | null | undefined, size: string): string {
-  if (!path) return '';
-  const m = path.match(/\/t\/p\/[^/]+(\/[^/?#]+)$/);
-  const file = m ? m[1] : path.startsWith('/') ? path : `/${path}`;
-  return `${base()}/tmdb-img/t/p/${size}${file}`;
+  return tmdbImgUrl(base(), path, size);
 }
 
 // ---- In-memory answer cache: screens that remount (Back from detail) paint at once ----
 
-// Oldest insert first; `ttl` is the one the entry was stored with (pruned once past it)
-const cache = new Map<string, { at: number; ttl: number; data: unknown }>();
+const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<unknown>>();
 const CACHE_MAX = 150;
 
@@ -84,24 +82,11 @@ const CACHE_MAX = 150;
 export const scoped = (key: string) => `${getProfileId() ?? 0}|${profileLocale()}|${key}`;
 
 export function peek<T>(key: string, ttlMs: number): T | undefined {
-  const hit = cache.get(key);
-  if (!hit) return undefined;
-  const age = Date.now() - hit.at;
-  if (age >= hit.ttl) {
-    cache.delete(key);
-    return undefined;
-  }
-  return age < ttlMs ? (hit.data as T) : undefined;
+  return peekEntry(cache, key, ttlMs, Date.now()) as T | undefined;
 }
 
 function store(key: string, ttl: number, data: unknown) {
-  const now = Date.now();
-  const expired: string[] = [];
-  cache.forEach((v, k) => { if (now - v.at >= v.ttl) expired.push(k); });
-  expired.forEach(k => cache.delete(k));
-  cache.delete(key);
-  cache.set(key, { at: now, ttl, data });
-  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value as string);
+  storeEntry(cache, key, ttl, data, CACHE_MAX, Date.now());
 }
 
 /** `keep` false: the answer is returned but not cached (the next call loads again). */

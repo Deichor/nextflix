@@ -18,6 +18,7 @@ import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuf
 import { lengthsMatch, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
+import { canSeek, cueAnswer, openStart, progressToSave } from './playRules';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
 // The stream is a live fragmented MP4 requested at `t` that really starts at `offset`
@@ -245,6 +246,8 @@ export class PlayerEngine {
   private stallConfirmTimer?: Timer;
   private hasPlayed = false;
   private everPlayed = false;
+  // Any source of this item showed frames (everPlayed is per source)
+  private itemPlayed = false;
   private recoveries = 0;
   private stallTimer?: Timer;
   private stallArmed = false;
@@ -592,8 +595,16 @@ export class PlayerEngine {
       : null;
     this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), status: 'player.buffering' });
     this.videoHeight = video ? videoQuality(video.width, video.height) : 0;
+    const at = openStart(startAt, duration, reason === 'open' && !this.itemPlayed);
+    if (at === 'end') {
+      console.info(`[restart] ${reason} at ${startAt.toFixed(0)} s of ${duration.toFixed(0)}: the title is over`);
+      this.stopStream();
+      this.set({ buffering: false, position: duration });
+      this.finish();
+      return;
+    }
     this.loadSubtitles(session);
-    this.restartAt(startAt > 0 && (duration <= 0 || startAt < duration - 10) ? startAt : 0, reason);
+    this.restartAt(at, reason);
     this.scheduleUpgrade(session);
     if (src.starving) this.scheduleSidegrade(session, startAt);
   }
@@ -839,6 +850,7 @@ export class PlayerEngine {
       this.endStall();
       this.hasPlayed = true;
       this.everPlayed = true;
+      this.itemPlayed = true;
       clearTimeout(this.stallResetTimer);
       this.stallResetTimer = setTimeout(() => { this.recoveries = 0; }, 60000);
     });
@@ -867,6 +879,11 @@ export class PlayerEngine {
       this.recover();
       return;
     }
+    this.finish();
+  }
+
+  /** The title is over: saved as watched, the next episode counts down */
+  private finish() {
     this.disarmStall();
     this.set({ playing: false, ended: true });
     this.persist({ finished: true });
@@ -1457,8 +1474,9 @@ export class PlayerEngine {
 
   /** `why` names the seek in the playback log (user, skip-intro ...) */
   seekTo(t: number, why = 'user') {
+    // While another source is looked up hash and duration still name the failed one
+    if (!canSeek(this.state, this.hash)) return;
     const duration = this.state.duration;
-    if (!this.hash || duration <= 0) return;
     const target = Math.max(0, Math.min(duration - 1, t));
     const v = this.video;
     const rel = target - this.offset;
@@ -1522,7 +1540,12 @@ export class PlayerEngine {
     // A live embedded track (big file) is read from the playing position on: ask again while it grows
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
       if (this.stale(session) || this.state.subId !== id) return;
-      if (f.cues.length === 0 && !f.partial) {
+      const answer = cueAnswer(f.cues.length, f.partial, loads);
+      if (answer === 'retry') {
+        this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
+        return;
+      }
+      if (answer === 'fallback') {
         // Nothing came (an OpenSubtitles quota answers 429): the next one of the language, another provider first
         const alt = this.subtitleFallback(id);
         console.info(`[subtitles] ${id.slice(0, 16)} gave no cues${alt ? `, trying ${alt.slice(0, 16)}` : ''}`);
@@ -1759,6 +1782,7 @@ export class PlayerEngine {
     this.autoRefreshes = 0;
     this.avoid = [];
     this.lengthRetries = 0;
+    this.itemPlayed = false;
     // Each episode may switch up once
     this.upgraded = false;
     this.resumePos = 0;
@@ -1800,11 +1824,12 @@ export class PlayerEngine {
     const m = this.meta;
     const duration = this.state.duration;
     // duration is reset while a new source opens, so a late pause event never saves a mix of two sources
-    if (this.destroyed || !this.pid || !this.hash || duration <= 0 || this.state.phase !== 'ready') return;
-    // Nothing played from this source yet: the saved progress stays (a retry or failed start never overwrites it)
-    if (!opts.finished && !this.everPlayed) return;
-    const pos = opts.finished ? duration : this.exact ? Math.min(duration, this.positionNow()) : this.offset;
-    if (pos < 10) return;
+    if (this.destroyed || !this.pid || !this.hash || this.state.phase !== 'ready') return;
+    // Nothing of this item played yet: the saved progress stays (a failed start never overwrites it)
+    const pos = progressToSave({
+      finished: !!opts.finished, itemPlayed: this.itemPlayed, duration, exact: this.exact, position: this.positionNow(), offset: this.offset,
+    });
+    if (pos === null) return;
     saveProgress({
       profile_id: this.pid,
       media_type: m.media_type,
