@@ -319,9 +319,19 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 		}
 	}
 
+	// In a language with a subtitle known to have holes, complete ones go first (except ones
+	// that do not fit the file even when timed)
+	holey := map[string]bool{}
+	for _, c := range cands {
+		if c.Holes > 0 {
+			holey[c.Language] = true
+		}
+	}
+
 	type scored struct {
-		sub  Sub
-		tier int
+		sub   Sub
+		tier  int
+		worse bool // has holes, or does not fit the file
 	}
 	out := make([]scored, 0, len(cands))
 	seen := map[string]bool{}
@@ -385,7 +395,7 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 		if s.Label == "" {
 			s.Label = langLabel(s.Language)
 		}
-		out = append(out, scored{sub: s, tier: tier})
+		out = append(out, scored{sub: s, tier: tier, worse: holey[c.Language] && (c.Holes > 0 || c.AutoSync < 0)})
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
@@ -395,6 +405,9 @@ func rankCandidates(cands []candidate, q Query) []Sub {
 		}
 		if a.sub.Language != b.sub.Language {
 			return a.sub.Language < b.sub.Language
+		}
+		if a.tier < 2 && b.tier < 2 && a.worse != b.worse {
+			return b.worse
 		}
 		if a.tier != b.tier {
 			return a.tier < b.tier

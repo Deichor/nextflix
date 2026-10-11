@@ -66,6 +66,7 @@ type aiJob struct {
 	nextID   int
 	names    map[string]bool
 	done     map[string]string // source text -> checked translation (stored)
+	given    map[string]string // source text -> its translation from elsewhere: only context, never asked (holes)
 	soft     map[string]string // source text -> last answer that failed only a plausibility check
 	doubted  map[string]bool   // an answer of the line itself failed a plausibility check before
 	gaveUp   map[string]bool   // shown as soft[text] or the source text (not stored)
@@ -215,7 +216,16 @@ func (j *aiJob) feed(cues []liveCue) {
 // settledLocked: the line needs no request any more.
 func (j *aiJob) settledLocked(text string) bool {
 	_, ok := j.done[text]
-	return ok || j.gaveUp[text]
+	_, given := j.given[text]
+	return ok || given || j.gaveUp[text]
+}
+
+// setGiven sets the context lines whose translation comes from elsewhere (a human subtitle's line
+// at that time): fed like the others, they are shown to the model but never asked.
+func (j *aiJob) setGiven(given map[string]string) {
+	j.mu.Lock()
+	j.given = given
+	j.mu.Unlock()
 }
 
 // atLocked is the index of the first line at the player's position.
@@ -380,7 +390,11 @@ func (j *aiJob) requestLocked(batch []aiLine) ([]aiInLine, map[int]aiCheck) {
 	for _, k := range at {
 		l := j.lines[k]
 		if !asked[l.id] {
-			lines = append(lines, aiInLine{Context: aiPlain(l.text), Translated: aiPlain(j.done[l.text])})
+			tr := j.done[l.text]
+			if tr == "" {
+				tr = j.given[l.text]
+			}
+			lines = append(lines, aiInLine{Context: aiPlain(l.text), Translated: aiPlain(tr)})
 			continue
 		}
 		lines = append(lines, aiInLine{ID: l.id, Text: aiPlain(l.text)})

@@ -577,7 +577,8 @@ Sub: `{ "id": "<opaque>", "source": "torrent|embedded|opensubtitles|subdl|subsou
 "author": "WoraZ", "fps": 23.976, "downloads": 6527, "live": true, "quota": true }` (`author`, `fps`, `downloads` only when known; `live`: an
 embedded track of a big file, read while it plays, see below; `quota`: an OpenSubtitles item while its download quota is
 used up, listed after the other items of its language; `ai_from`: the language an `ai` item is translated from, see
-[AI translation](#ai-translation))
+[AI translation](#ai-translation); `holes`: lines a reference of the playing file has where this subtitle has none, see
+[Holes](#holes))
 
 | Method | Path | Notes |
 |---|---|---|
@@ -602,6 +603,8 @@ used up, listed after the other items of its language; `ai_from`: the language a
 
 `pending`, `live` and `failed` answers are `no-store`; the final ones may be cached (`max-age=86400`). A partial
 answer has the `NOTE nextflix-partial` line and `X-Subtitle-Partial: 1`; ask again every 15 s and take the new cues.
+A subtitle with holes also carries `X-Subtitle-Holes` (exposed to CORS): `2 holes, 40 lines` (`, 38 filled` with the
+AI translation on), see [Holes](#holes).
 
 Sources: subtitle files inside the torrent and embedded text tracks (whole when the file is small or mostly cached, else
 live: read from the playing position on while it streams, see ARCHITECTURE.md), OpenSubtitles.com
@@ -656,11 +659,38 @@ ones already timed to the playing file that fit (shown `synced: true`), then rel
 against the release name or the file's probed frame rate) and provider quality (downloads, rating, trusted uploader,
 turkcealtyazi quality tier, subf2m / YIFY rating); ones that did not fit even when timed move down. HI is penalised only when the language
 has a regular subtitle; multi-CD subtitles are penalised; forced-only and machine/AI-translated subtitles always come
-last. For an episode, subtitles whose release names (or torrent paths) name only other episodes (`S02E06`, `2x06`)
-are left out; season packs are kept.
+last. In a language with a subtitle known to have holes, the complete ones go ahead of it (a holey one still beats
+one that does not fit the file). For an episode, subtitles whose release names (or torrent paths) name only other
+episodes (`S02E06`, `2x06`) are left out; season packs are kept.
 
 With `hash` + `index`, every item not made for that file gets an id that also names the file, so its file request
 is timed to it; the ids stay the same for the same file.
+
+### Holes
+
+Some subtitles skip whole scenes (seen on Avatar: Seven Havens S01E02: turkcealtyazi's "WEB-DL Fenix", a machine
+translation of the English GRACE subtitle, has nothing at 550-614 s and 1265-1312 s, 40 lines). Every file request of
+a provider subtitle listed for a playing file (timed and fitting: `synced`, `unchanged`, `live`, `replaced`) compares
+it with a reference of the same file in another language: a subtitle made for the file whose cues are on disk (its
+own text track, an OpenSubtitles hash match), else one timed to fit the file, else the best one not timed yet (then
+timed in the background; with the AI translation on it may be downloaded, never from OpenSubtitles); English without
+HI first. A hole is a pause of the subtitle of 15 s or more holding 4 or more of the reference's dialogue lines (HI
+parts and songs left out, the middle of a line 1.5 s inside the pause); the pauses before the first and after the
+last cue count too (a subtitle starting late or ending early). Windows of the file's own text track that cover the
+pause and show almost no lines there (under a third of the reference's), or audio heard there that is silent (under
+3 % speech frames), veto a hole; speech never makes one (music and action reach 70-80 %). The result is kept per
+subtitle and file (`synced/`) for the ranking and the list's `holes`, and logged (`subtitles: <id> on <hash8>:<index>
+has holes against <ref>: 550-614 s (25 lines), …`).
+
+With the AI translation on, the reference's lines in the holes are translated into the subtitle's language (the same
+job and checks as an AI translation, stored under `translations-v2` keyed by reference, language and `holes`; nearest
+to the player first; the reference's other lines go along as context with the subtitle's own line at that time as
+their translation) and served in the reference's timing, cut to the subtitle's pause so they never overlap its own
+cues, which stay as they are. A subtitle without holes is served unchanged. While lines are missing the answer is
+partial (players keep asking), with `NOTE nextflix-ai-translating` while the player is in a hole or 10 s before it
+(the first answer there waits up to 10 s); while the reference is still being timed the answer is partial too. The
+log line adds `filled N lines with AI` once the holes are done. Without the AI translation the holes only count in
+the ranking.
 
 ### AI translation
 
@@ -675,7 +705,8 @@ added to the searched languages. Its file answer is the source exactly as served
 like any provider subtitle, and following later re-timing) with every cue in the source's timing; when the source
 turns out not to fit the file (`poor` timing), another listed subtitle is translated instead (an OpenSubtitles
 download may be used for it). Sound notes, music notes and speaker labels of HI sources are removed before
-translating (an SDH track loses its sound-only cues).
+translating (an SDH track loses its sound-only cues). A language that has a subtitle gets no `ai` item; when that
+subtitle has holes, they are filled instead (see [Holes](#holes)).
 
 Once a player asks, the whole source is translated in the background: the lines from `t` on first (first request 20
 lines, then up to 60; 3 requests at a time, 6 in total), then the lines before `t`, nearest first; a seek moves the

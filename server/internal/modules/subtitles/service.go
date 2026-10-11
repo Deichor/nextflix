@@ -376,7 +376,11 @@ func (s *Service) rank(all []candidate, q Query) []Sub {
 				made[all[i].ID] = true
 			} else {
 				all[i].AutoSync = s.sync.fitOf(all[i].ID, q.Hash, q.Index)
+				all[i].Holes = s.sync.holesOf(all[i].ID, q.Hash, q.Index)
 			}
+		}
+		if q.TmdbID > 0 {
+			s.sync.noteTitle(q.Hash, q.Index, aiMeta{q.MediaType, q.TmdbID, q.Season, q.Episode})
 		}
 	}
 	subs := rankCandidates(all, q)
@@ -480,13 +484,23 @@ func (s *Service) FileAt(ctx context.Context, id string, t float64) ([]byte, boo
 }
 
 // FileFor is FileAt with the timing state: a subtitle listed for the playing file (its id
-// names the file) is timed to it, see sync.go.
+// names the file) is timed to it, see sync.go, and its holes are filled (holes_fill.go).
 func (s *Service) FileFor(ctx context.Context, id string, t float64) (FileAnswer, error) {
+	return s.fileFor(ctx, id, t, true)
+}
+
+// fileFor is FileFor; holes false serves a subtitle without its hole filling (a translation
+// source, a reference).
+func (s *Service) fileFor(ctx context.Context, id string, t float64, holes bool) (FileAnswer, error) {
 	if source, lang, ref, err := decodeID(id); err == nil && source == SourceAI {
 		return s.serveAI(ctx, lang, ref, t)
 	}
 	if inner, hash, index, ok := unwrapSyncID(id); ok {
-		return s.sync.serve(ctx, inner, hash, index)
+		a, err := s.sync.serve(ctx, inner, hash, index)
+		if err != nil || !holes {
+			return a, err
+		}
+		return s.withHoles(ctx, inner, hash, index, a, t), nil
 	}
 	vtt, partial, err := s.fileAt(ctx, id, t)
 	return FileAnswer{VTT: vtt, Partial: partial}, err

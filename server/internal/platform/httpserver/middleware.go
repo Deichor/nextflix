@@ -68,7 +68,7 @@ var (
 	corsHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-User-ID", "x-user-id",
 		"X-Session-ID", "x-session-id", "X-Lang", "Range", "Cache-Control", "Pragma", "Expires"}
 	corsExpose = []string{"Content-Length", "Content-Range", "Accept-Ranges", "Content-Type", "X-Cache", "Connection",
-		"X-Subtitle-Sync", "X-Subtitle-Partial"}
+		"X-Subtitle-Sync", "X-Subtitle-Partial", "X-Subtitle-Holes"}
 )
 
 func corsMiddleware(allowed []string, tvAppKey string) gin.HandlerFunc {

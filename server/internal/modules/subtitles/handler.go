@@ -92,6 +92,9 @@ func (h handler) file(c *gin.Context) {
 		state = syncStateOriginal
 	}
 	c.Header("X-Subtitle-Sync", state)
+	if a.Holes != "" {
+		c.Header("X-Subtitle-Holes", a.Holes)
+	}
 	if partial {
 		// More cues follow while the file plays; the body also carries PartialNote
 		c.Header("Cache-Control", "no-store")

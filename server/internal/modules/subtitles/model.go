@@ -155,6 +155,8 @@ type Sub struct {
 	Quota bool `json:"quota,omitempty"`
 	// An AI translation: the language it is translated from
 	AIFrom string `json:"ai_from,omitempty"`
+	// Lines a reference of the playing file has where this subtitle has none (holes_fill.go)
+	Holes int `json:"holes,omitempty"`
 }
 
 // Query is a subtitle search for one movie or episode.

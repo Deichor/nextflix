@@ -118,6 +118,8 @@ type syncer struct {
 	failed map[string]time.Time
 	lists  map[string][]Sub // file key -> last ranked list (alternatives, full references)
 	probes map[string]mediaProbe
+	holes  map[string]*holeState // result key -> last hole comparison (nil: none on disk)
+	titles map[string]aiMeta     // file key -> the title it plays (hole translations)
 
 	// Live timing (sync_live.go)
 	lives   map[string]*liveFile  // file key -> live reference
@@ -133,7 +135,7 @@ type syncer struct {
 func newSyncer(svc *Service) *syncer {
 	y := &syncer{svc: svc, read: ffmpegSyncWindow, readSubs: ffmpegSubsWindow, probe: probeMedia, sem: make(chan struct{}, syncReads),
 		refs: map[string]*syncRefState{}, metas: map[string]*syncMeta{}, failed: map[string]time.Time{},
-		lists: map[string][]Sub{}, probes: map[string]mediaProbe{},
+		lists: map[string][]Sub{}, probes: map[string]mediaProbe{}, holes: map[string]*holeState{}, titles: map[string]aiMeta{},
 		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{}, early: map[string]bool{},
 		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap}
 	y.onGrow = y.scheduleRefit
@@ -189,6 +191,8 @@ type FileAnswer struct {
 	VTT     []byte
 	Partial bool   // more follows: ask again (live track, timing still running)
 	Sync    string // timing state of a subtitle served for a file ("" when not timed)
+	// Holes describes the holes found against a reference ("2 holes, 40 lines, 38 filled"; "" none)
+	Holes string
 }
 
 // serve answers a file request of a subtitle served for a file.

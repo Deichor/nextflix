@@ -106,7 +106,7 @@ func (s *Service) serveAI(ctx context.Context, lang, ref string, t float64) (Fil
 		}
 	}
 	// The source exactly as the player would get it: its timing (and later re-timing) is the translation's
-	a, err := s.FileFor(ctx, src, t)
+	a, err := s.fileFor(ctx, src, t, false)
 	if err != nil {
 		return FileAnswer{}, err
 	}

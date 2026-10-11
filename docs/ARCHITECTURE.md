@@ -45,7 +45,7 @@ docs/                       this folder
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
-| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL, SubSource, turkcealtyazi.org, subf2m.co (Subscene archive) and YIFY Subtitles (movies); SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings, optional AI translation of missing languages with Claude Haiku 5.5: the whole source in the background, nearest to the player first, every answered line checked against its own line by id and echo (`ai.go`, `ai_job.go`, `ai_prompt.go`; see [API.md](API.md#ai-translation)) | `subtitle_settings`, `ai_translation_usage`, files in `/app/data/subtitles` and `/app/data/ai-subtitles` |
+| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL, SubSource, turkcealtyazi.org, subf2m.co (Subscene archive) and YIFY Subtitles (movies); SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings, optional AI translation of missing languages with Claude Haiku 5.5: the whole source in the background, nearest to the player first, every answered line checked against its own line by id and echo (`ai.go`, `ai_job.go`, `ai_prompt.go`; see [API.md](API.md#ai-translation)), holes (stretches a reference of the file has dialogue in and the subtitle has none) found per served subtitle, ranked down and filled by that translation (`holes*.go`, [API.md](API.md#holes)) | `subtitle_settings`, `ai_translation_usage`, files in `/app/data/subtitles` and `/app/data/ai-subtitles` |
 | `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 | `playbacklog` | `POST /api/playback-log`: playback diagnostics from the TV player (waits, freezes, dropped frames, seeks) written as `playback: ...` log lines and daily files, rate limited per IP; read them with `scripts/playback-log.sh` (see [API.md](API.md#playback-log-modulesplaybacklog)) | daily files in `PLAYBACK_LOG_DIR`, 14 days |
@@ -1312,6 +1312,18 @@ that change at splits), simplified:
   still timed like every provider subtitle (only hash matches are served as they are), and needed it: +1.24 s, then
   +3.26 s after the title sequence.
 - The viewer's manual offset (`subDelay`) still applies on top.
+- Holes (`holes.go`, `holes_fill.go`, see [API.md](API.md#holes)): once timed, a served subtitle is compared on the
+  file's timeline with a reference of the file in another language (its own text track or a hash match on disk, else
+  a subtitle timed to fit). A pause of 15 s or more holding 4 or more reference dialogue lines is a hole, unless the
+  own-track windows or silent heard audio contradict it. Holes demote the subtitle behind complete ones of its
+  language; with the AI translation on, the reference's lines in them are translated (ai_job.go, the subtitle's lines
+  around as context) and merged in the reference's timing without touching the subtitle's cues. Measured on every
+  two subtitles of one episode in the snapshot and the server's cache (one timed onto the other by the aligner, 49
+  pairs both ways, Avatar, The Mentalist, Gilmore Girls, Rurouni Kenshin, a film): 11 holes, all real (Avatar
+  S01E02's two scenes, 25 and 15 lines, against GRACE and the SDH subtitle; a 4-line exchange; an anime ending song
+  and next-episode preview left out; 5 shouted lines), none in a pause of both (Avatar's 175-216, 1071-1110 and
+  1139-1171 s are music and action in both). Speech detection is weak evidence: 68-79 % of the frames of those
+  pauses count as speech, so it only vetoes a hole in silent audio.
 
 Measured on S02E07 (text-matched against the file's English track): the HDTV subtitle had a median error of 3.3 s
 (10 % of lines within 1 s); timed from 10 windows of the file's own track: 0.41 s (83 %; 89 % is the best any timing
