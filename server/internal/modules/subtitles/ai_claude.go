@@ -12,6 +12,9 @@ import (
 
 const aiModel = "claude-haiku-5-5"
 
+// aiMaxTokens bounds an answer; a request holds at most aiBatchChars of source text.
+const aiMaxTokens = 8192
+
 // Claude Haiku 5.5 prices in USD per million tokens (prompts under 100K tokens).
 const (
 	aiInputPrice  = 0.10
@@ -21,7 +24,8 @@ const (
 // aiTokens is the usage of one request.
 type aiTokens struct{ In, Out int64 }
 
-// aiCallFunc sends one prompt and returns the text answer (tests replace it).
+// aiCallFunc sends one prompt and returns the JSON answer (tests replace it). A refused request
+// returns errAIRefused, an answer cut off at the token limit errAITruncated (with what came).
 type aiCallFunc func(ctx context.Context, apiKey, system, user string) (string, aiTokens, error)
 
 // AIKeyError means the key or the account cannot be used (bad key, no credit): retrying soon is pointless.
@@ -33,10 +37,14 @@ func claudeCall(ctx context.Context, apiKey, system, user string) (string, aiTok
 	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(4))
 	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     aiModel,
-		MaxTokens: 8192,
+		MaxTokens: aiMaxTokens,
 		System:    []anthropic.TextBlockParam{{Text: system}},
 		// No thinking: a translation needs none and its tokens would be paid as output
 		Thinking: anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
+		OutputConfig: anthropic.OutputConfigParam{
+			Effort: anthropic.OutputConfigEffortMedium,
+			Format: anthropic.JSONOutputFormatParam{Schema: aiSchema},
+		},
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user))},
 	})
 	if err != nil {
@@ -54,13 +62,16 @@ func claudeCall(ctx context.Context, apiKey, system, user string) (string, aiTok
 	}
 	used := aiTokens{In: resp.Usage.InputTokens, Out: resp.Usage.OutputTokens}
 	if resp.StopReason == anthropic.StopReasonRefusal {
-		return "", used, errors.New("AI translation: Claude declined the lines")
+		return "", used, errAIRefused
 	}
 	var b strings.Builder
 	for _, block := range resp.Content {
 		if t, ok := block.AsAny().(anthropic.TextBlock); ok {
 			b.WriteString(t.Text)
 		}
+	}
+	if resp.StopReason == anthropic.StopReasonMaxTokens {
+		return b.String(), used, errAITruncated
 	}
 	return b.String(), used, nil
 }

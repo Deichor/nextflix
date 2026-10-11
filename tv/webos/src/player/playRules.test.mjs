@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canSeek, cueAnswer, openStart, progressToSave } from './playRules.ts';
+import { canSeek, cueAnswer, openStart, progressToSave, subtitleRetryMs } from './playRules.ts';
+
+test('subtitleRetryMs: a server or network error is asked again after 5 s, doubling up to 5 minutes', () => {
+  assert.deepEqual([1, 2, 3, 4].map(subtitleRetryMs), [5000, 10000, 20000, 40000]);
+  assert.equal(subtitleRetryMs(7), 300000);
+  assert.equal(subtitleRetryMs(30), 300000);
+});
 
 test('openStart: a resume or switch away from the end keeps its position', () => {
   assert.equal(openStart(0, 3600, true), 0);

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { activeCues, type Cue } from '../lib/subtitles';
 import { subStyleClass, useSubtitleStyle } from '../lib/subtitleStyle';
+import { cueCheckDelay } from './cueTiming';
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', lrm: '', rlm: '' };
 const decode = (s: string) => s.replace(/&(#\d+|[a-z]+);/gi, (m, e: string) => {
@@ -41,8 +42,6 @@ function renderCue(text: string, key: number): React.ReactNode {
 }
 
 const SCRIM_HOLD_MS = 1500;
-// Cue lookup rate (~10 Hz): close enough for subtitles, far cheaper than every frame on a TV
-const CUE_CHECK_MS = 100;
 
 /** Static subtitle look for previews (Settings): the sample text with the profile's style. */
 export function SubtitleSample({ text }: { text: string }) {
@@ -57,8 +56,9 @@ export function SubtitleSample({ text }: { text: string }) {
   );
 }
 
-// Same timing rule as the web player: the cue for (stream offset + video time - delay),
-// looked up every CUE_CHECK_MS so it stays right across stream restarts.
+// Same timing rule as the web player: the cue for (stream offset + video time - delay), looked
+// up right after each cue boundary (cueTiming.ts) and at least every 100 ms (seeks, restarts).
+// A fixed 100 ms poll showed cues 50 ms late on average, up to 100 ms; far cheaper than every frame.
 // `sample` shows while no cue does (live preview of the appearance settings).
 export default function SubtitleOverlay({ cues, time, raised, sample, previewing }: {
   cues: Cue[];
@@ -75,17 +75,19 @@ export default function SubtitleOverlay({ cues, time, raised, sample, previewing
   useEffect(() => {
     if (cues.length === 0) { setShown([]); return; }
     let lastKey = '';
+    let id: ReturnType<typeof setTimeout>;
     const tick = () => {
-      const now = activeCues(cues, time());
+      const t = time();
+      const now = activeCues(cues, t);
       const key = now.map(c => c.start).join('|');
       if (key !== lastKey) {
         lastKey = key;
         setShown(now);
       }
+      id = setTimeout(tick, cueCheckDelay(cues, t));
     };
     tick();
-    const id = setInterval(tick, CUE_CHECK_MS);
-    return () => clearInterval(id);
+    return () => clearTimeout(id);
   }, [cues, time]);
 
   // The dimmed band stays through short gaps between cues instead of blinking

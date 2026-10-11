@@ -18,7 +18,7 @@ import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuf
 import { lengthsMatch, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
-import { canSeek, cueAnswer, openStart, progressToSave } from './playRules';
+import { canSeek, cueAnswer, openStart, progressToSave, subtitleRetryMs } from './playRules';
 import { DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy } from './subsLog';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
@@ -372,7 +372,8 @@ export class PlayerEngine {
   /** Exact playback position in the file (seconds). */
   positionNow(): number {
     if (this.splitMode && this.video.buffered.length === 0) return this.startPos;
-    return this.offset + (this.video.currentTime || 0);
+    // (a muxed stream from 0 starts a few frames before 0)
+    return Math.max(0, this.offset + (this.video.currentTime || 0));
   }
 
   /** The file the stream plays (trick play thumbnails). */
@@ -741,18 +742,20 @@ export class PlayerEngine {
     else v.play().catch(e => { if (e?.name !== 'AbortError') this.set({ playing: false }); });
     this.armStall();
     clearTimeout(this.seekRetry);
-    if (target <= 0 || split) return;
+    if (split) return;
 
     // Until the answer comes positions (and subtitles) run up to one keyframe interval ahead. An unknown
     // start (ffprobe waiting for pieces from a slow swarm) is asked again once the stream's data is cached,
-    // instead of keeping the requested time as the offset for the whole stream.
+    // instead of keeping the requested time as the offset for the whole stream. The answer is the file time
+    // of the stream's time 0: the first decode time, up to two frames before the keyframe shows, so at
+    // t=0 too it is slightly negative (positions ran ~80 ms ahead of the picture without it).
     const q = `hash=${this.hash}&index=${this.index}&t=${target.toFixed(3)}&audio=${this.state.audio}${capsQuery()}`;
     const ask = (attempt: number) => {
       const ctrl = new AbortController();
       this.seekCtrl = ctrl;
       const timer = setTimeout(() => ctrl.abort(), 15000);
       getJson(`/api/torrent-stream/seekpoint?${q}`, { signal: ctrl.signal })
-        .then(data => (typeof data?.t === 'number' && data.t >= 0 && data.t <= target + 1 && data.exact !== false ? data.t : NaN))
+        .then(data => (typeof data?.t === 'number' && data.t >= -1 && data.t <= target + 1 && data.exact !== false ? data.t : NaN))
         .catch(() => NaN)
         .then(t => {
           clearTimeout(timer);
@@ -1573,6 +1576,7 @@ export class PlayerEngine {
     if (!id) return;
     const session = this.session;
     let loads = 0;
+    let errors = 0;
     // The answer of the last `subs` event
     let logged: SubsShown | null = null;
     let loggedAt = 0;
@@ -1589,10 +1593,17 @@ export class PlayerEngine {
         // Nothing came (an OpenSubtitles quota answers 429): the next one of the language, another provider first
         const alt = this.subtitleFallback(id);
         console.info(`[subtitles] ${id.slice(0, 16)} gave no cues${alt ? `, trying ${alt.slice(0, 16)}` : ''}`);
-        if (alt) this.applySubtitle(alt, 'fallback');
-        else this.noteSubsNone('failed', { id: logToken(id, 24) });
+        if (alt) {
+          this.applySubtitle(alt, 'fallback');
+          return;
+        }
+        if (errors === 0) this.noteSubsNone('failed', { id: logToken(id, 24) });
+        // A server or network error without another subtitle to show: the same one again soon
+        if (f.failed) this.cueTimer = setTimeout(load, subtitleRetryMs(++errors));
         return;
       }
+      errors = 0;
+      this.subFailed.delete(id);
       loads++;
       // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew)
       const next: SubsShown = { id, cues: f.cues, partial: f.partial, sync: f.sync };

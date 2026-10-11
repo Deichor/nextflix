@@ -366,7 +366,7 @@ GET /api/availability?media_type=movie&tmdb_id=27205                       (Ince
 | GET | `/api/torrent-stream/files?magnet=` | `{hash, name, files: [{id, name, path, size}]}`; adds the torrent to TorrServer, except a TorBox source, whose known files are listed without TorrServer |
 | GET | `/api/torrent-stream/probe?hash=&index=` | `{duration, video_codec, width, height, hdr, dolby_vision, direct, audio_tracks: [{index, language, title, codec, channels, default, direct, split_direct}], split, expected_runtime?, duration_mismatch?}`; `direct` = sent untouched to this client (takes `hevc`, `acodecs` like play); `split_direct` = sent untouched in a `track=audio` stream (`acodecs` plus `split_acodecs`); `split: true` = play takes `track=` (clients detect split support from it); `default` = the track's default disposition in the file. With `type` and `tmdb_id` (plus `season`, `episode`; or `runtime` minutes) it adds `expected_runtime` (minutes) and `duration_mismatch` (same rule as resolve) |
 | GET | `/api/torrent-stream/play?hash=&index=&t=<sec>&audio=<n>&acodecs=&hevc=1` | live fragmented MP4; seeking = new request with a new `t`. Audio tracks whose codec is in `acodecs` and fits MP4 (aac, opus, flac, mp3, ac3, eac3) are copied; others are re-encoded to Opus (when `acodecs` has `opus`) or AAC at 48 kHz, 5.1 for multichannel sources (7.1 → 5.1, 384 kbps), stereo 160 kbps (Opus) / 256 kbps (AAC). Without `acodecs` only AAC is copied. `track=video` / `track=audio` (split mode, see [Split streams](#split-streams)): only that elementary stream (`audio/mp4` for audio), on the file's own timeline; also copies the `split_acodecs` codecs; 400 for another `track` |
-| GET | `/api/torrent-stream/seekpoint?hash=&index=&t=&audio=&acodecs=&hevc=1` | `{t, exact?}`: where a play stream requested at `t` really starts. Streams with copied video or audio start on the keyframe before `t`; times count from the file's start time, like `play` (`exact: false`: unknown, e.g. ffprobe timed out; the TV app asks again) (`track=` and `split_acodecs` as in play: a split pair copies the split-only codecs too) |
+| GET | `/api/torrent-stream/seekpoint?hash=&index=&t=&audio=&acodecs=&hevc=1` | `{t, exact?}`: where a play stream requested at `t` really starts, in file time (from the file's start time, like `play`). Muxed (no `track`): the file time of the stream's time 0, so position = `t` + the element's time; streams with copied video or audio start on the keyframe before `t` (found with play's own seek), and time 0 is the first decode time, up to two frames before that keyframe shows; also answered for `t=0` (then slightly negative, ≥ -1). With `track=`: where the split video starts (the keyframe). `exact: false`: unknown, e.g. ffmpeg timed out or an MPEG-TS seek landed after `t`; the TV app asks again (`track=` and `split_acodecs` as in play: a split pair copies the split-only codecs too). See [ARCHITECTURE.md](ARCHITECTURE.md#playback-timeline-playgo-seekpointgo) |
 | POST | `/api/torrent-stream/keepalive?hash=&index=` | 204; a player paused by the viewer sends it every 15 s. The torrent counts as playing for the stream guard and playback priority (as if its `play` stream had just ended), its title's 15 min hold is renewed, and a TorBox file keeps a fresh link and a live CDN connection (a one-byte read, at most every 20 s), so the restart after a long pause starts at once. Made for `navigator.sendBeacon`; 400 for an invalid hash |
 | GET | `/api/torrent-stream/thumb?hash=&index=&t=<sec>[&w=<px>]` | Trick play frame: `image/jpeg` of the keyframe at or before `t` snapped down to the 10 s grid (`X-Thumb-T` = the grid time), `w` (64-1280, default 320) rounded up to 160 / 240 / 320 / 480 / 640, HDR tone-mapped to SDR. 200 with `Cache-Control: public, max-age=31536000, immutable` and `X-Cache: HIT\|MISS`. 204 + `Retry-After: 2` (`X-Thumb-Wait` says why) when the file's pieces must not be read now: its stream is starting (probe running, or the newest play stream has not sent its first bytes), or another torrent plays or starts; cached frames are always served. 504 + `Retry-After` when the frame is not ready within 6 s (the job goes on up to 15 s, so a retry is usually a hit), 404 when ffmpeg finds no frame there (remembered 1 min), 400 for an invalid hash / index / `t` (not 0-86400, or past the probed end) / `w`. See [ARCHITECTURE.md](ARCHITECTURE.md#trick-play-thumbnails) |
 | POST | `/api/torrent-stream/thumb/prefetch?hash=&index=&t=<sec>,<sec>…[&w=]` | 202 `{queued, cached}` or `{queued: 0, skipped: <why>}`; makes up to 12 frames (grid times) in the background, one at a time and only while no viewer waits for a frame. Only while the torrent's play stream runs steadily (flowing, older than 30 s, no other torrent starting); otherwise nothing is queued. 400 for invalid times or more than 12 |
@@ -666,22 +666,45 @@ is timed to it; the ids stay the same for the same file.
 
 Off by default (`ai_translate_enabled`, key `anthropic_api_key`, languages `ai_translate_langs`: `profile` and/or
 codes). When it is on and a list has no usable subtitle (not forced, not quota-blocked) in a target language, an `ai`
-item (never marked HI) is added in that language's place: Claude Haiku 5.5 translates the best other subtitle (one
-already translated first, then English without HI, then the best one; OpenSubtitles only when its file is on disk or
-nothing else is left, and never one whose timing does not fit the playing file). Targets and English are added to the
-searched languages. Its file answer is the source as served for the player (timed for the file like any provider
-subtitle) with the translated lines; when the source turns out not to fit the file (`poor` timing), another listed
-subtitle is translated instead (an OpenSubtitles download may be used for it). Sound notes, music notes and speaker
-labels of HI sources are removed before translating. Only the lines from `t` to about 15 min ahead are translated
-(first request 20 lines, then 60; 3 requests at a time), so the answer stays partial until every line is done and
-the players keep asking with their position. Answers are numbered lines; a sentence over several lines may come
-back once as `a-b: ...` and is divided over them by length. Skipped lines are asked again; an answer missing its
-last line (numbers possibly shifted) is asked again in halves; lines in Chinese, Japanese or Korean script are
-rejected for other targets. While the lines at `t` are missing the answer also carries `NOTE nextflix-ai-translating` (players ask again
-every 3 s and show a note); the first answer waits up to 10 s for them. Translated lines are stored for good under
-`/app/data/ai-subtitles` (`AI_SUBTITLE_DIR`, outside the swept cache), keyed by source subtitle and language, so a line
-is never paid twice. For an episode the opening (about 3 min) of the next one is translated once in the background.
-Usage per month is kept in `ai_translation_usage`.
+item (never marked HI) is added in that language's place: Claude Haiku 5.5 translates the best other subtitle. The
+source is chosen by timing first: the file's own text tracks and subtitles made for it (a track still being read
+live after a complete one), then subtitles timed to the file, then the rest; within that one already translated
+first, then English without HI, English, without HI, any. OpenSubtitles comes after all others unless its file is on
+disk; forced, quota-blocked and `poor` (not fitting the file) subtitles are never used. Targets and English are
+added to the searched languages. Its file answer is the source exactly as served for the player (timed for the file
+like any provider subtitle, and following later re-timing) with every cue in the source's timing; when the source
+turns out not to fit the file (`poor` timing), another listed subtitle is translated instead (an OpenSubtitles
+download may be used for it). Sound notes, music notes and speaker labels of HI sources are removed before
+translating (an SDH track loses its sound-only cues).
+
+Once a player asks, the whole source is translated in the background: the lines from `t` on first (first request 20
+lines, then up to 60; 3 requests at a time, 6 in total), then the lines before `t`, nearest first; a seek moves the
+order, lines added to a source that is still read live join it. A line not translated yet is left out and the answer
+stays partial (`NOTE nextflix-partial`, the players keep asking with their position) until every line of the source
+is done and the source itself is complete. While the line at `t` is missing the answer also carries `NOTE
+nextflix-ai-translating` (players ask again every 3 s and show a note); the first answer waits up to 10 s for it.
+
+Requests are JSON lines with an id each (two lines around them as context, with their translation when there is
+one); the answer is structured output (one JSON schema): per id the first 3 words of its line copied and the
+translation. Every item is checked before it counts: it must echo its own line, be non-empty and not in Chinese,
+Japanese or Korean script for other targets; two or more items echoing other lines, an id answered twice or no JSON
+discard the whole answer; the neighbours of a skipped, empty or wrongly echoed line are asked again too (they may hold
+its text). Answers that only look off (much longer or shorter than the line, speaker dashes lost, left untranslated, a
+name of a neighbouring line) are asked once more and taken when the second answer looks off too. Failed lines are
+retried after 2 s, 10 s, 30 s and 1 min in smaller requests (8, 3, then 1 line), so a line that is always refused
+isolates itself; after 5 answers it is shown untranslated (not stored, tried again next time). A failed request
+(network, overload) pauses the translation 10 s, doubling up to 5 min, without counting against the lines; a key or
+account error pauses it 2 min. Checked lines are stored for good under `/app/data/ai-subtitles/translations-v2`
+(`AI_SUBTITLE_DIR`, outside the swept cache; `{version: 2, lang, texts}`), keyed by source subtitle and language, so
+a line is never paid twice and a restart goes on where it stopped. The translations of the old numbered-lines
+protocol (`translations/`), some of which belonged to other lines, are deleted at start. For an episode the opening
+(about 3 min) of the next one is translated once in the background. Usage per month is kept in
+`ai_translation_usage`.
+
+Cost (Haiku 5.5, $0.10 / $0.50 per million input / output tokens): a 22 min episode (294 lines after the HI strip)
+took 30 requests, 35k input and 17k output tokens, $0.012, including two discarded 60-line answers. That is about
+$0.02 for a 45 min episode (about 700 lines) and $0.05 for a 2 h film (about 1800 lines). The prompt is too small for
+prompt caching to pay; the cost is mostly the answers' output tokens.
 
 Files are converted to UTF-8 WebVTT once and cached forever under `/app/data/subtitles` (`SUBTITLE_CACHE_DIR`), keyed by
 provider and file id, so a cached file never counts against a provider quota again.

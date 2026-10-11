@@ -200,7 +200,9 @@ func releaseSimilarity(hint, sub releaseInfo) float64 {
 }
 
 // sameRelease: made for the playing release (its group, or its streaming service and source
-// family), so it is timed like one made for the file.
+// family), so it ranks ahead of other timed ones. It is still timed (only a hash match is not):
+// subf2m's "S02.WEBRip.Amazon" pack needed +1.24 s, +3.26 s after the title sequence on The
+// Mentalist S02E10 AMZN.
 func sameRelease(hint, sub releaseInfo) bool {
 	if hint.group != "" && hint.group == sub.group {
 		return true

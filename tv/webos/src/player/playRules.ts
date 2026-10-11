@@ -23,6 +23,14 @@ export function cueAnswer(cues: number, partial: boolean, loads: number): 'show'
   return loads === 0 ? 'fallback' : 'retry';
 }
 
+/**
+ * Wait before asking a subtitle file again after its n-th server or network error in a row (n >= 1):
+ * 5 s, doubling up to 5 minutes. Such errors are often over in seconds (an AI translation's first answer).
+ */
+export function subtitleRetryMs(n: number): number {
+  return Math.min(5 * 60 * 1000, 5000 * 2 ** Math.max(0, n - 1));
+}
+
 /** Seeks act only on an opened source: not while another one is looked up, nor after a fatal error */
 export function canSeek(s: { phase: string; fatal: unknown; duration: number }, hash: string): boolean {
   return !!hash && s.phase === 'ready' && !s.fatal && s.duration > 0;

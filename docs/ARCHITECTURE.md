@@ -45,7 +45,7 @@ docs/                       this folder
 | `providers` | TV shows per streaming provider (TMDB discover across regions) for the TV Shows page rows | – |
 | `notifications` | Redis-backed feed filled by TMDB-only generators | Redis |
 | `streaming` | TorrServer files/probe/play (ffmpeg fMP4), auto-resolve through Jackett (plus Bitsearch and IMDb id search) with swarm warm-up and 4K upgrades, indexer settings, TorBox debrid and its instant-play hints; see [Streaming](#streaming) | `torrent_configs`, `stream_sources`, `debrid_settings` |
-| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL, SubSource, turkcealtyazi.org, subf2m.co (Subscene archive) and YIFY Subtitles (movies); SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings, optional AI translation of missing languages with Claude Haiku 5.5 (see [API.md](API.md#ai-translation)) | `subtitle_settings`, `ai_translation_usage`, files in `/app/data/subtitles` and `/app/data/ai-subtitles` |
+| `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL, SubSource, turkcealtyazi.org, subf2m.co (Subscene archive) and YIFY Subtitles (movies); SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings, optional AI translation of missing languages with Claude Haiku 5.5: the whole source in the background, nearest to the player first, every answered line checked against its own line by id and echo (`ai.go`, `ai_job.go`, `ai_prompt.go`; see [API.md](API.md#ai-translation)) | `subtitle_settings`, `ai_translation_usage`, files in `/app/data/subtitles` and `/app/data/ai-subtitles` |
 | `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
 | `playbacklog` | `POST /api/playback-log`: playback diagnostics from the TV player (waits, freezes, dropped frames, seeks) written as `playback: ...` log lines and daily files, rate limited per IP; read them with `scripts/playback-log.sh` (see [API.md](API.md#playback-log-modulesplaybacklog)) | daily files in `PLAYBACK_LOG_DIR`, 14 days |
@@ -569,6 +569,50 @@ health (`the cached … was measured again: …, playing it`). Starving, dead or
 dropped and the resolve runs fresh with its hash in `avoid` (`the cached … is not played, …: resolving fresh
 without it`). The extra start delay: none for TorBox or a fresh verdict, about 3-5 s for a swarm that keeps up
 (the verdict needs 1.5 s + 3 s of samples; the probe runs meanwhile), 8 s plus the search for one that starves.
+
+### Playback timeline (`play.go`, `seekpoint.go`)
+
+Every time the players show, save and look subtitles up with is file time: pts minus the file's `start_time`, as
+VLC / mpv show it (also the time of embedded subtitle tracks, `-copyts -start_at_zero`, and of the speech tap). A
+cue at T must show while the frame at T is on screen:
+
+- Split streams (`track=video|audio`) carry file times (`-output_ts_offset t`, absolute `tfdt`), so position =
+  the element's time.
+- A muxed stream starts at 0 (`make_zero`), and position = seekpoint answer + the element's time. Its time 0 is the
+  earliest first *decode* time of its packets: for video with B-frames the keyframe is shown two frames later.
+  `seekpoint` therefore answers the file time of that time 0, not the keyframe: it copies the first video and audio
+  packets with the same input options as play (`streamInput`, also `-probesize`, `-noaccurate_seek`) into ffmpeg's
+  `framecrc` output (`firstPackets`, reads from the keyframe to t + 0.5 s) and takes the earliest decode time; a
+  re-encoded video starts at t, shown `tsEncoderDelay` (2) frames after its first decode time. The players also
+  ask it at t = 0 (the answer is then slightly negative, e.g. -0.083).
+- The seek has to be play's own: ffmpeg seeks Matroska / MPEG-TS with B-frames to t - 0.13 s (no
+  `AVFMT_SEEK_TO_PTS`), so a t up to 0.13 s after a keyframe starts on the keyframe before it. ffprobe's
+  `-read_intervals`, used before, answered the later keyframe: the stream's positions and subtitles ran a whole GOP
+  ahead (2-12 s) until the next seek. TV splices request their stream at the seekpoint's t, so a muxed splice was
+  placed a GOP off the same way.
+- No edit lists in muxed streams (`-use_editlist 0`): Chromium ignores an empty first edit (a track's start delay)
+  while Firefox applies it; without them the muxer moves a later track's first sample to 0 in both.
+- A re-encode keeps the source's frame times (`-fps_mode vfr`, `-enc_time_base 1/90000`); the default constant
+  rate with a 1/fps time base put frames on a grid from t, up to 1.5 frames late. With copied audio
+  (`-noaccurate_seek`) the frames between the keyframe and t are squashed into the first frame, which then shows
+  until t while the audio plays from the keyframe (cosmetic; positions stay right).
+
+Measured with `TestPlayTimeline` (`timeline_test.go`: generated files with the frame number drawn into each frame
+and tone bursts at known times; H.264 with B-frames and keyframes 2-12 s apart, MKV / MP4 / MPEG-TS / MKV remuxed
+from TS with `start_time` 11.4 s, audio or video delayed, 23.976 / 25 fps, MPEG-4 re-encoded; played through the real
+`seekpoint` and `play` handlers for t on, just before and just after keyframes; every output frame's position
+computed like the players, `tfdt` + composition offset) and in headless Chrome 155 / Firefox 155 (frame numbers read
+from `requestVideoFrameCallback` frames, plain `src` and MSE). Before: muxed positions +62-88 ms in every stream
+(Chrome, Firefox +83-126 ms), +3.0 / +5.7 s after seeks near keyframes. Now: copied video exact (0-1 ms), re-encoded
+within one frame, split exact, Chrome ≤ 38 ms and Firefox ≤ 49 ms over 140 plays (Firefox's frame callbacks lag by up
+to one frame); audio and the speech tap within 21 ms of file time (the fixtures' own AAC priming). Run it with the
+Go test template in a container with ffmpeg (`TL_FULL=1` for all start times, `TL_KEEP=<dir>` keeps the outputs).
+
+Left open: a split stream from t = 0 shows video with B-frames two frames late until the first seek (its first
+decode time is before 0 and the muxer moves the track, ~83 ms; the split seekpoint answers the file time). MPEG-TS
+sources: ffmpeg's `-ss` on TS lands on the keyframe *after* t (the seekpoint then answers `exact: false`) and
+shifts split streams by 0.13-0.17 s (the seek's 0.13 s heuristic leaks into the timestamps; `-copyts` would avoid
+it but needs another speech tap start); torrents rarely carry `.ts` files.
 
 ### Debrid (TorBox)
 
@@ -1096,6 +1140,12 @@ the file's default track (`default` in the probe answer), the first track. Comme
 from Continue Watching carry no `original_language`, so both players look it up (`/api/tmdb-movie/:id`, cached) and
 the probe step waits up to 1.5 s for it.
 
+Both players draw subtitles themselves: the cue for position - `subDelay` (position = seekpoint offset + the
+element's time, see [Playback timeline](#playback-timeline-playgo-seekpointgo)), the web overlay on every animation
+frame, the TV overlay right after each cue boundary (`cueTiming.ts`, at least every 100 ms for seeks; a fixed 100 ms
+poll showed cues 50 ms late on average). A new cue list (a poll of a partial answer) is looked up at once without
+a blank frame; the delay is applied only there.
+
 Subtitles in the players (web `TorrentStreamPlayer.tsx`, TV `engine.ts`): the list of the playing file is asked
 again 8 s and 20 s after the first answer while the profile's language is missing. When it is still missing after
 those retries and the audio is in another language:
@@ -1113,8 +1163,11 @@ those retries and the audio is in another language:
   daily quota or another rate limit) the next subtitle of the same language from another provider is shown (SubDL, SubSource,
   Türkçe Altyazı, embedded, torrent; that provider is not tried again), after a 5xx another provider first, then the
   same one. A quota failure of the shown subtitle says in a toast either that another source took over or, without
-  one, that no other source has the language and when the quota resets (once per kind). Failed files are remembered (a quota until its `reset_at`, others 5 minutes) and not
-  asked again on seeks; they and the items the server marks `quota: true` are greyed in the panel with the hint
+  one, that no other source has the language and when the quota resets (once per kind). Failed files are remembered (a quota until its `reset_at`, a server or
+  network error 5 s after the first one in a row, doubling up to 5 minutes, others 5 minutes) and not asked again on
+  seeks before then; a shown subtitle that failed with such an error and has no other source is asked again when its
+  wait ends (an AI translation's first answer often fails once; before, every seek logged `why=failed` for 5
+  minutes). The TV does the same (`subtitleRetryMs`); they and the items the server marks `quota: true` are greyed in the panel with the hint
   "giriş yapınca hak artar" / "more after signing in", and the default pick, a remembered pick and late lists only
   take them when nothing else of that language is left. Only the chosen file is ever downloaded.
 
@@ -1155,17 +1208,26 @@ that change at splits), simplified:
   spread to ±0.6 s, not ffsubsync's speech on/off: many subtitles chain cues back to back, and fan subtitles start
   lines up to a second early or late. For each ratio (1, 25/23.976, 24/23.976, 25/24 and back) every offset within
   ±90 s is scored per window by FFT cross-correlation; a Viterbi pass then picks piecewise constant offsets within
-  ±15 s of the best global one, each change costing 4 matched lines and moving at least 0.4 s (smaller steps between
-  neighbouring windows are detector noise), and a change is placed in the subtitle pause that
-  fits both neighbouring windows best (the longest among equals). Up to 2 rounds add windows between neighbours with
-  different offsets more than 150 s apart (12 windows at most). A result fits when its score beats chance (the mean
-  over all offsets) by 0.15 and the best offset away from the chosen ones by 0.08 (matched lines per reference line),
-  and the timed subtitle ends before the video does (+60 s) and covers 40 % of it.
+  ±15 s of the best global one, each change costing 4 matched lines plus 0.5 per second it moves (a far jump needs
+  more evidence) and moving at least 0.4 s (smaller steps between neighbouring windows are detector noise). Then every
+  run of windows with one offset has to beat the offsets of its neighbouring runs by 4 matched lines on its own
+  windows, else it takes the better neighbour's offset: the Viterbi used such runs as bridges. Seen on Avatar: Seven
+  Havens S01E02 (WEB-DL subtitle on the WEB-DL file, one true offset): the played audio's speech starts 0.23 s after
+  the lines of the file's own track, a step the 0.4 s rule forbids, so one live window went +11 to +14 s to get from
+  one to the other and minutes of cues were served 10-14 s off. With windows of both kinds (own track and speech) the
+  speech lag is fitted as well (0 to 0.4 s in 0.1 s steps; measured 0 to 0.4 s by file), so they agree. A change is
+  placed in the subtitle pause that fits both neighbouring windows best (the longest among equals). Up to 2 rounds
+  add windows between neighbours with different offsets more than 150 s apart (12 windows at most). A result fits
+  when its score beats chance (the mean over all offsets) by 0.15 and the best offset away from the chosen ones by
+  0.08 (matched lines per reference line), and the timed subtitle ends before the video does (+60 s) and covers 40 %
+  of it.
 - Live timing (`sync_live.go`, `streaming/speechtap.go`): the play ffmpeg of a stream with audio (muxed, or the
   split `track=audio` request) has a second output: the dialogue of the played audio track as 8 kHz mono PCM on fd 3
   (`pan=mono|c0=FC` for layouts with a centre, else `-ac 1`; `aresample=…:async=1:first_pts=0` trims or pads the start
   so sample 0 is the request's `t` on the file's timeline, also when a copied stream seeks to the keyframe before `t`;
-  checked against tone bursts with ffmpeg 7.1 for copied / re-encoded, muxed / split streams: within 20 ms). Streaming
+  checked against tone bursts with ffmpeg 7.1 for copied / re-encoded, muxed / split streams: within 20 ms, also
+  for files with `start_time` 11.4 s or delayed audio, `TestPlayTimeline`). The players show cues on the same
+  timeline (see [Playback timeline](#playback-timeline-playgo-seekpointgo)). Streaming
   owns the small interface (`SpeechTap.Open(hash, index, start) SpeechSink`), subtitles implements it, `main.go`
   wires it. The tap never costs playback: a goroutine drains the pipe and hands 1 s pieces to the sink through a
   32 s queue, dropping what does not fit (the next piece's offset marks the gap); a sink that panics stops getting
@@ -1181,17 +1243,27 @@ that change at splits), simplified:
   were heard live timing ends for the file (no more tap) and the result is final. Fits with live windows are held to
   stricter rules: on generated episodes, few or contiguous windows let another episode's subtitle pass through the
   other frame rates and the offset changes (5-15 % with 3-20 windows, also with the plain rules above), so a fit needs
-  30 reference line starts, below 8 windows one offset at the file's rate is fitted (from 4 windows also one offset
+  120 s of reference (180 s before: the first 1.5 minutes on screen were untimed, since the tap hears about 90 s
+  ahead of the picture; with 120 s no other episode's subtitle fitted in the first minutes, 0 of 78 real pairs and 0
+  of 300 generated ones, while with 60-90 s this episode's and other episodes' peaks overlapped, even with the offset
+  known within 1 s from a sibling episode, so that prior is not used) and 30 reference line starts, below 8 windows
+  one offset at the file's rate is fitted (from 4 windows also one offset
   change, such as a title sequence cut differently, at a peak bar of 0.20, else the single offset at 0.12), other rates
-  need windows spread over 25 minutes, an offset change costs 4 × windows / 12 lines (at least 4) and the peak bar is
-  0.10 instead of 0.08 (another episode's subtitle with 3-41 contiguous windows: 1 of 480 cases fits, at 20 windows,
-  with the plain rules 46 of 480; with 4-7 windows and the one change: 0 of 632, while 73 % of the true changes are
-  found). Shaped like S02E10 (+0.66 s in the teaser, +3.00 s after the title sequence at ~214 s, a minute of audio at a
-  time), the change is found at the 5th window. A later re-fit of a fitting subtitle keeps its frame rate (fewer FFTs).
+  need windows spread over 25 minutes, or contiguous ones over which they drift by 10 s (25 ↔ 24 fps: 8 minutes; a
+  PAL subtitle of a 23-minute episode never fitted before), and the peak bar is 0.10 instead of 0.08 (another
+  episode's subtitle with 3-41 contiguous windows: 1 of 480 cases fits, at 20 windows, with the plain rules 46 of 480;
+  with 4-7 windows and the one change: 0 of 632, while 73 % of the true changes are found; with 8-20 contiguous
+  windows and the other rates: 0 of 60). An offset change costs as much as with read windows: the cost used to grow
+  with the windows (4 × windows / 12 lines), which dropped a real teaser offset once most of an episode was heard
+  (Mentalist S02E10 KONTRAST and a Gilmore Girls file, 2 s off before the title sequence). Shaped like S02E10
+  (+0.66 s in the teaser, +3.00 s after the title sequence at ~214 s, a minute of audio at a time), the change is found
+  at the 5th window. A later re-fit of a fitting subtitle keeps its frame rate (fewer FFTs).
   Hysteresis: once a provisional fit was accepted, a re-fit that does not fit keeps it served (no alternatives tried;
   logged `kept the last accepted fit (new fit poor: …)`) until a new fit is accepted or the file is covered. On
   S02E10 the fit from 3 windows (one offset) turned poor at 6 windows as they passed the title sequence, so the
-  subtitle was served untimed for two minutes before two offsets fitted at 8.
+  subtitle was served untimed for two minutes before two offsets fitted at 8. A re-fit that fits replaces the served
+  fit only when its offsets match 4 lines more on the current windows than the served ones do (`keepStable`), else
+  the cues moved back and forth by fractions of a second between re-fits (the players logged `moved=` on most polls).
 - Serving (`sync.go`): the file request answers the subtitle as it is at once (marked partial, `NOTE
   nextflix-partial`, so both players ask again every 15 s; a timing ready within 2.5 s is answered directly) and
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
@@ -1207,8 +1279,12 @@ that change at splits), simplified:
   (`original` for subtitles that are never timed); see [API.md](API.md#subtitles-modulessubtitles).
 - Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox
   proxy's first chunk and read-ahead) and need at least 8 windows, so files above about 10 Mbit/s (1080p WEB-DLs of
-  The Mentalist S02E10 at 13.6 Mbit/s, every 4K file) read none and are timed from the played audio only (the first
-  provisional timing about 3-5 minutes into playback, as soon as 30 line starts were heard). The S02E07 file
+  The Mentalist S02E10 at 13.6 Mbit/s, every 4K file) read none and are timed from the played audio (the first
+  provisional timing after 2 minutes of audio with 30 line starts, i.e. about 30 s into playback). One exception:
+  when the first play stream of such a file opens (`readEarly`, once per file), the cues of its own text track (if it
+  has one) in the 2 minutes from the play position are read, after the same 20 s delay and through the same byte
+  cap: the player fetches those bytes anyway, so they come from TorrServer's cache, and exact lines fit sooner and
+  better than the speech heard so far. Such a reference is fitted by the live rules (they are contiguous). The S02E07 file
   (7 Mbit/s, 2.26 GB) gets 10 windows: about 550-600 MB read once per file, shared by every subtitle of it; the CPU part
   (decoding 60 s of audio, the FFTs) takes well under a second per window. The server logs the bytes read per
   reference. The tap reads nothing extra; it decodes the played audio track once more when it is copied (estimated
@@ -1224,13 +1300,35 @@ that change at splits), simplified:
   that do not fit down; the file's probed frame rate is the ranking's fps hint. A subtitle made for the playing
   release (same group, or same streaming service and source family; "WEBRip.Amazon" counts as AMZN) goes ahead of
   the timed ones unless its own timing found it does not fit: on The Mentalist S02E10 (AMZN WEB-DL) the HDTV pack
-  was 3 s late after the title sequence, while subf2m's "S02.WEBRip.Amazon" pack is made for that release.
+  was 3 s late after the title sequence, while subf2m's "S02.WEBRip.Amazon" pack is named for that release. It is
+  still timed like every provider subtitle (only hash matches are served as they are), and needed it: +1.24 s, then
+  +3.26 s after the title sequence.
 - The viewer's manual offset (`subDelay`) still applies on top.
 
 Measured on S02E07 (text-matched against the file's English track): the HDTV subtitle had a median error of 3.3 s
 (10 % of lines within 1 s); timed from 10 windows of the file's own track: 0.41 s (83 %; 89 % is the best any timing
 of this subtitle reaches, its own line timing is loose), from speech detection alone: 0.37 s (83 %). The S02E06
 subtitle (another episode) is rejected.
+
+Evaluation on real data (`sync_eval_test.go`, run with `NFX_TESTDATA` pointing at a copy of `/app/data`; skipped
+otherwise): the truth is the file's own text track (per read window, the subtitle's offset by its line starts and
+ends, independent of the aligner); the played audio (synclive) is replayed a minute at a time through the real
+re-fit path (`decide`), and what the viewer watches (the minute 90-150 s behind the last one heard) is scored. On a
+snapshot of 21 files (The Mentalist, Avatar: Seven Havens, Gilmore Girls), 13 real pairs with read and live windows:
+cues within 0.3 s while watching 85 % → 100 %, re-fits serving a segment more than 1 s off 2.9 % → 0 %, served
+changes 58 → 16; Avatar S01E02 alone: false segments 8 → 0 of 104 re-fits. 28 distortions of the Avatar subtitles with
+known truth (offsets up to ±60 s, PAL and 24 fps rates, title-sequence and ad-break cuts, jitter, early lines, 30 %
+dropped, merged and extra cues) on its real windows: false segments 17 % → 2.5 % of re-fits, within 0.3 s while
+watching 68 % → 95 %; from the audio alone a PAL subtitle now fits after 8 minutes (never before). Other episodes'
+subtitles timed with the read windows: 32 → 6 of 190 fitted (5 of the 6 are this episode's after all: another
+release, which the own-track check missed), live replays 1 → 0 of 43 (18 → 0 re-fits). On The Mentalist S02E10 AMZN
+the subf2m "S02.WEBRip.Amazon" subtitle still needs +1.24 s, +3.26 s after the title sequence (from the audio).
+The first minutes (`sync_early_eval_test.go`: the picture 90 s behind the audio, a re-fit every 30 s): The Mentalist
+S02E10 AMZN (no read, truth from its converged fit) first timed after 120 s of audio instead of 180 s, cues of
+minutes 0-5 within 0.3 s 71 % → 92 %; Avatar S01E02 and its 30 distortions without a read: with the 2 early
+own-track windows 66 % → 81 % (median error 0.29 → 0.00 s), first right minute 2.3 → 1.4.
+`sync_robust_test.go` keeps the Avatar case as a compact fixture (`testdata/sync/avatar_s01e02.json`: cue times and
+speech bits, no text).
 
 `torrserver_tuning.go` raises TorrServer's settings once per start, only writing when a value changes (a write drops
 TorrServer's torrents): `CacheSize` ≥ 2 GB RAM (read-ahead 95 % ≈ 1.9 GB, minutes of a 4K stream),

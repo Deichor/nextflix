@@ -3,6 +3,7 @@ package streaming
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,29 +12,32 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestParseKeyframeProbe(t *testing.T) {
+func TestParseFrameCRC(t *testing.T) {
+	head := "#software: Lavf61.7.100\n#tb 0: 1/1000\n#media_type 0: video\n#codec_id 0: h264\n#dimensions 0: 320x48\n#sar 0: 1/1\n"
+	audio := "#tb 1: 1/48000\n#media_type 1: audio\n"
 	cases := []struct {
-		out  string
-		want float64
-		ok   bool
+		out          string
+		video, audio tsPacketTime
+		hasAudio, ok bool
 	}{
-		{"30.000000\n0.000000\n", 30, true},
-		// start_time 5 s: the packet time is absolute
-		{"35.000000\n5.000000\n", 30, true},
-		// MPEG-TS style: trailing comma and an empty line
-		{"32.566667,\n\n1.483333\n", 31.084, true},
-		{"12.5\nN/A\n", 12.5, true},
-		// Only the format line: no packet after the seek
-		{"0.000000\n", 0, false},
-		{"", 0, false},
+		// Matroska: a keyframe 4.34 s before t (times are file time - t), shown two frames after
+		// its decode time; the audio starts 20 ms after it
+		{head + audio + "0,      -4423,      -4340,       42,     2214, 0x5a2f4e1d, F=0x1\n1,    -207360,    -207360,     1024,      371, 0x1\n" +
+			"1,    -206336,    -206336,     1024,      371, 0x1\n", tsPacketTime{-4.34, -4.423}, tsPacketTime{-4.32, -4.32}, true, true},
+		{"#tb 0: 1/90000\n0,     -11259,      -3750,     3754,     9031, 0x1\n", tsPacketTime{-3750.0 / 90000, -11259.0 / 90000}, tsPacketTime{}, false, true},
+		{head + "0,          0,         83,       42,     2214, 0x5a2f4e1d\n", tsPacketTime{0.083, 0}, tsPacketTime{}, false, true},
+		// No video packet after the seek
+		{head + audio + "1,    -207360,    -207360,     1024,      371, 0x1\n", tsPacketTime{}, tsPacketTime{}, false, false},
+		{"", tsPacketTime{}, tsPacketTime{}, false, false},
 	}
+	near := func(a, b tsPacketTime) bool { return math.Abs(a.pts-b.pts) < 1e-9 && math.Abs(a.dts-b.dts) < 1e-9 }
 	for _, c := range cases {
-		got, err := parseKeyframeProbe(c.out)
+		got, err := parseFrameCRC(c.out)
 		if (err == nil) != c.ok {
 			t.Fatalf("%q: err = %v", c.out, err)
 		}
-		if c.ok && got != c.want {
-			t.Fatalf("%q: got %v, want %v", c.out, got, c.want)
+		if c.ok && (!near(got.video, c.video) || got.hasAudio != c.hasAudio || !near(got.audio, c.audio)) {
+			t.Fatalf("%q: got %+v, want %+v / %+v", c.out, got, c.video, c.audio)
 		}
 	}
 }

@@ -105,10 +105,12 @@ type syncRefState struct {
 }
 
 type syncer struct {
-	svc   *Service
-	read  syncWindowReader
-	probe func(ctx context.Context, url string) (mediaProbe, error)
-	sem   chan struct{}
+	svc  *Service
+	read syncWindowReader
+	// readSubs reads only the own text track (the early windows of a file above the byte budget)
+	readSubs syncWindowReader
+	probe    func(ctx context.Context, url string) (mediaProbe, error)
+	sem      chan struct{}
 
 	mu     sync.Mutex
 	refs   map[string]*syncRefState // file key -> reference
@@ -121,6 +123,7 @@ type syncer struct {
 	lives   map[string]*liveFile  // file key -> live reference
 	served  map[string]*servedSub // result key -> subtitle served for a file
 	noLive  map[string]bool       // file keys timed from a whole subtitle (no tap needed)
+	early   map[string]bool       // file keys whose early own-track windows were asked for
 	liveSem chan struct{}         // re-fits at a time (CPU)
 	onGrow  func(f *liveFile)     // more live audio: re-fit soon (tests replace it)
 
@@ -128,10 +131,10 @@ type syncer struct {
 }
 
 func newSyncer(svc *Service) *syncer {
-	y := &syncer{svc: svc, read: ffmpegSyncWindow, probe: probeMedia, sem: make(chan struct{}, syncReads),
+	y := &syncer{svc: svc, read: ffmpegSyncWindow, readSubs: ffmpegSubsWindow, probe: probeMedia, sem: make(chan struct{}, syncReads),
 		refs: map[string]*syncRefState{}, metas: map[string]*syncMeta{}, failed: map[string]time.Time{},
 		lists: map[string][]Sub{}, probes: map[string]mediaProbe{},
-		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{},
+		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{}, early: map[string]bool{},
 		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap}
 	y.onGrow = y.scheduleRefit
 	return y
@@ -367,7 +370,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		f.mu.Unlock()
 	}
 	if merged := mergeWindows(ref.Windows, live); !ref.Full &&
-		(windowSeconds(merged) < liveMinCover || len(live) > 0 && refLines(prepare(merged)) < liveMinLines) {
+		(windowSeconds(merged) < liveMinCover || (len(live) > 0 || ref.Skipped) && refLines(prepare(merged)) < liveMinLines) {
 		return false // too little to tell yet
 	}
 	prev := y.meta(key)
@@ -375,6 +378,11 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	if y.keepAccepted(key, base, prev, m, complete) {
 		logKept(inner, hash, index, m, len(live), liveSecs)
 		return true
+	}
+	if keepStable(prev, m, base, ref.Probe.Duration, complete) {
+		if _, ok := y.result(key, base); ok {
+			return true
+		}
 	}
 	if !m.fits() {
 		// Did not fit: the best fitting other subtitle of the language, when one fits
@@ -445,6 +453,24 @@ func (y *syncer) keepAccepted(key string, base []byte, prev *syncMeta, m syncMet
 	}
 	_, ok := y.result(key, base)
 	return ok
+}
+
+// keepStable reports whether a provisional fit that was accepted stays served although the new
+// one fits too: unless the new offsets beat it on the current windows by an offset change's
+// worth of matched lines, the cues would only move back and forth between re-fits.
+func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, complete bool) bool {
+	if complete || prev == nil || !prev.Live || !prev.fits() || !m.fits() || len(m.Fit.windows) == 0 ||
+		m.Fit.Scale != prev.Fit.Scale || !fitChanged(prev, m) {
+		return false
+	}
+	cues := vttCues(base)
+	spans := make([]span, len(cues))
+	for i, c := range cues {
+		spans[i] = span{c.start, c.end}
+	}
+	spans = clampSpans(spans, duration)
+	old, lines := rescore(spans, m.Fit.windows, prev.Fit)
+	return m.Fit.Score*lines-old < syncSplitPenalty
 }
 
 func logKept(inner, hash string, index int, m syncMeta, liveWindows int, liveSecs float64) {
@@ -519,7 +545,7 @@ func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef
 	var windows []refWindow
 	fitTo := func() (syncFit, bool) {
 		windows = mergeWindows(ref.Windows, live)
-		if len(live) > 0 {
+		if len(live) > 0 || ref.Skipped { // early windows of a file above the byte budget: the live rules
 			return alignLive(timed, windows, scales)
 		}
 		return alignWith(timed, prepare(windows), scales, syncSplitPenalty, -1)

@@ -2,46 +2,28 @@ package subtitles
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log"
 	"math"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // AI translation: when no source has a subtitle in a wanted language, Claude translates the best
-// other one. Only the lines around the player are translated (cost follows what is watched), every
-// line once: the results stay on disk for good.
-const (
-	aiAhead         = 15 * 60.0 // seconds of the file translated ahead of the player
-	aiPrefetchAhead = 3 * 60.0  // the next episode: its opening only
-	aiFirstBatch    = 20        // lines of the first request at a position (quick start)
-	aiBatch         = 60        // lines of later requests (the prompt is paid once per request)
-	aiSplitMin      = 8         // a shorter request whose answer misses lines is not split again
-	aiWorkers       = 3         // requests at a time per translation
-	aiParallel      = 6         // requests at a time in total
-	aiFirstWait     = 10 * time.Second
-	aiRetryAfter    = time.Minute
-	aiKeyRetryAfter = 2 * time.Minute
-	aiMaxTries      = 3
-	aiCallLimit     = 3 * time.Minute
-	aiJobIdle       = 30 * time.Minute
-	aiStoryMax      = 250 // characters of the story in the prompt
-	// AINote marks an answer whose lines at the player's position are still being translated
-	AINote = "NOTE nextflix-ai-translating"
-)
+// other one (ai_job.go runs it, ai_prompt.go is the request protocol). Every line is paid once:
+// the checked translations stay on disk for good.
+
+// AINote marks an answer whose lines at the player's position are still being translated
+const AINote = "NOTE nextflix-ai-translating"
+
+const aiStoryMax = 250 // characters of the story in the prompt
 
 // ErrAIOff is returned for an AI subtitle while the AI translation is off or has no key.
 var ErrAIOff = errors.New("AI translation is off")
@@ -77,114 +59,6 @@ func aiID(lang string, m aiMeta, src string) string {
 	return encodeID(SourceAI, lang, m.String()+"|"+src)
 }
 
-type aiCue struct {
-	start float64
-	text  string
-}
-
-// aiJob is the translation of one subtitle into one language.
-type aiJob struct {
-	key   string // raw source id | language
-	lang  AILanguage
-	title string
-
-	mu       sync.Mutex
-	cues     []aiCue // first appearance of each text, by start
-	seen     map[string]bool
-	done     map[string]string // source text -> translation
-	inflight map[string]bool
-	failed   map[string]time.Time
-	tries    map[string]int
-	running  int
-	focus    float64 // the player's position
-	ahead    float64 // seconds translated ahead of focus
-	keyErr   error
-	keyErrAt time.Time
-	lastUsed time.Time
-
-	saveMu sync.Mutex
-}
-
-type aiTranslator struct {
-	db    *gorm.DB
-	store diskCache
-	call  aiCallFunc
-	sem   chan struct{}
-
-	mu         sync.Mutex
-	jobs       map[string]*aiJob
-	prefetched map[string]time.Time
-}
-
-func newAITranslator(db *gorm.DB, dir string) *aiTranslator {
-	return &aiTranslator{db: db, store: diskCache{dir: dir}, call: claudeCall, sem: make(chan struct{}, aiParallel),
-		jobs: map[string]*aiJob{}, prefetched: map[string]time.Time{}}
-}
-
-const aiStoreKind = "translations"
-
-type aiFile struct {
-	Lang  string            `json:"lang"`
-	Texts map[string]string `json:"texts"`
-}
-
-// job returns the running translation of key or starts one with the stored lines.
-func (t *aiTranslator) job(key string, lang AILanguage, title func() string) *aiJob {
-	t.mu.Lock()
-	if j, ok := t.jobs[key]; ok {
-		t.mu.Unlock()
-		return j
-	}
-	now := time.Now()
-	for k, j := range t.jobs {
-		j.mu.Lock()
-		idle := j.running == 0 && now.Sub(j.lastUsed) > aiJobIdle
-		j.mu.Unlock()
-		if idle {
-			delete(t.jobs, k)
-		}
-	}
-	j := &aiJob{key: key, lang: lang, seen: map[string]bool{}, done: map[string]string{}, inflight: map[string]bool{},
-		failed: map[string]time.Time{}, tries: map[string]int{}, lastUsed: now}
-	if b, ok := t.store.read(aiStoreKind, key, ".json", 0); ok {
-		var f aiFile
-		if json.Unmarshal(b, &f) == nil && f.Texts != nil {
-			j.done = f.Texts
-		}
-	}
-	t.jobs[key] = j
-	t.mu.Unlock()
-	name := title()
-	j.mu.Lock()
-	j.title = name
-	j.mu.Unlock()
-	return j
-}
-
-// has reports whether some lines of key are translated (a list prefers that source).
-func (t *aiTranslator) has(key string) bool {
-	t.mu.Lock()
-	j, ok := t.jobs[key]
-	t.mu.Unlock()
-	if ok {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		return len(j.done) > 0
-	}
-	return t.store.has(aiStoreKind, key, ".json")
-}
-
-// resetKeyErrors lets the translations try again at once (a new key).
-func (t *aiTranslator) resetKeyErrors() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, j := range t.jobs {
-		j.mu.Lock()
-		j.keyErr = nil
-		j.mu.Unlock()
-	}
-}
-
 func hasLetter(s string) bool {
 	for _, r := range s {
 		if unicode.IsLetter(r) {
@@ -192,206 +66,6 @@ func hasLetter(s string) bool {
 		}
 	}
 	return false
-}
-
-// feed adds the lines of the source (it may grow while a track is read).
-func (j *aiJob) feed(cues []liveCue) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	added := false
-	for _, c := range cues {
-		if j.seen[c.text] {
-			continue
-		}
-		j.seen[c.text] = true
-		if !hasLetter(c.text) {
-			j.done[c.text] = c.text // "♪", numbers: nothing to translate
-			continue
-		}
-		j.cues = append(j.cues, aiCue{c.start, c.text})
-		added = true
-	}
-	if added {
-		sort.SliceStable(j.cues, func(a, b int) bool { return j.cues[a].start < j.cues[b].start })
-	}
-}
-
-// atLocked is the index of the first line at the player's position.
-func (j *aiJob) atLocked(focus float64) int {
-	return sort.Search(len(j.cues), func(i int) bool { return j.cues[i].start >= focus-5 })
-}
-
-// readyLocked: the lines at the position are translated, or nothing more will come for now.
-func (j *aiJob) readyLocked() bool {
-	i := j.atLocked(j.focus)
-	if i >= len(j.cues) || j.keyErr != nil || j.running == 0 {
-		return true
-	}
-	_, ok := j.done[j.cues[i].text]
-	return ok
-}
-
-// takeLocked picks the next lines to translate: from the player's position on, within ahead. The
-// first request at a position is small so the player gets lines quickly.
-func (j *aiJob) takeLocked(now time.Time) []string {
-	if j.keyErr != nil && now.Sub(j.keyErrAt) < aiKeyRetryAfter {
-		return nil
-	}
-	i := j.atLocked(j.focus)
-	size := aiBatch
-	if i < len(j.cues) {
-		first := j.cues[i].text
-		if _, ok := j.done[first]; !ok && !j.inflight[first] {
-			size = aiFirstBatch
-		}
-	}
-	var out []string
-	for ; i < len(j.cues) && len(out) < size; i++ {
-		c := j.cues[i]
-		if len(out) == 0 && c.start > j.focus+j.ahead {
-			break
-		}
-		if _, ok := j.done[c.text]; ok || j.inflight[c.text] || now.Sub(j.failed[c.text]) < aiRetryAfter {
-			continue
-		}
-		out = append(out, c.text)
-	}
-	for _, s := range out {
-		j.inflight[s] = true
-	}
-	return out
-}
-
-// beforeLocked is up to n source lines before text (prompt context).
-func (j *aiJob) beforeLocked(text string, n int) []string {
-	for i, c := range j.cues {
-		if c.text == text {
-			var out []string
-			for k := max(0, i-n); k < i; k++ {
-				out = append(out, j.cues[k].text)
-			}
-			return out
-		}
-	}
-	return nil
-}
-
-func (t *aiTranslator) kick(j *aiJob, apiKey string) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	for j.running < aiWorkers {
-		batch := j.takeLocked(time.Now())
-		if len(batch) == 0 {
-			return
-		}
-		j.running++
-		go t.work(j, apiKey, batch)
-	}
-}
-
-func (t *aiTranslator) work(j *aiJob, apiKey string, batch []string) {
-	for len(batch) > 0 {
-		t.translate(j, apiKey, batch)
-		j.mu.Lock()
-		batch = j.takeLocked(time.Now())
-		if len(batch) == 0 {
-			j.running--
-		}
-		j.mu.Unlock()
-	}
-}
-
-func (t *aiTranslator) translate(j *aiJob, apiKey string, batch []string) {
-	ctx, cancel := context.WithTimeout(context.Background(), aiCallLimit)
-	defer cancel()
-	j.mu.Lock()
-	before := j.beforeLocked(batch[0], 2)
-	title := j.title
-	j.mu.Unlock()
-	system, user := aiPrompt(j.lang, title, before, batch)
-
-	t.sem <- struct{}{}
-	answer, used, err := t.call(ctx, apiKey, system, user)
-	<-t.sem
-
-	got := parseAIAnswer(answer, batch)
-	for n, tr := range got {
-		if foreignScript(tr, j.lang.Code) {
-			delete(got, n) // written in another language
-		}
-	}
-	// Lines missing: with the last line answered the numbers followed the input (some lines were
-	// skipped) and only those are asked again; without it they may be shifted, so halves are.
-	var missing []string
-	var missingNums []int
-	for i, src := range batch {
-		if _, ok := got[i+1]; !ok {
-			missing = append(missing, src)
-			missingNums = append(missingNums, i+1)
-		}
-	}
-	_, lastOK := got[len(batch)]
-	if err == nil && len(missing) > 0 {
-		if !lastOK && len(batch) > aiSplitMin {
-			log.Printf("subtitles: AI translation into %s missed lines %v of %d, asking again in halves", j.lang.Code, missingNums, len(batch))
-			t.recordUsage(used, 0)
-			h := len(batch) / 2
-			t.translate(j, apiKey, batch[:h])
-			t.translate(j, apiKey, batch[h:])
-			return
-		}
-		log.Printf("subtitles: AI translation into %s missed lines %v of %d", j.lang.Code, missingNums, len(batch))
-		if lastOK && len(missing) < len(batch) {
-			defer t.translate(j, apiKey, missing)
-		}
-	}
-	var keyErr AIKeyError
-	isKeyErr := errors.As(err, &keyErr)
-	now := time.Now()
-	n := 0
-	j.mu.Lock()
-	for i, src := range batch {
-		delete(j.inflight, src)
-		if tr, ok := got[i+1]; ok && err == nil {
-			j.done[src] = tr
-			n++
-			continue
-		}
-		if isKeyErr {
-			continue
-		}
-		j.tries[src]++
-		if j.tries[src] >= aiMaxTries {
-			j.done[src] = src // keep the original line rather than ask forever
-			continue
-		}
-		j.failed[src] = now
-	}
-	if isKeyErr {
-		j.keyErr, j.keyErrAt = err, now
-	}
-	j.mu.Unlock()
-	if err != nil {
-		log.Printf("subtitles: AI translation of %d lines into %s: %v", len(batch), j.lang.Code, err)
-	}
-	t.recordUsage(used, n)
-	if n > 0 {
-		t.save(j)
-	}
-}
-
-func (t *aiTranslator) save(j *aiJob) {
-	j.saveMu.Lock()
-	defer j.saveMu.Unlock()
-	j.mu.Lock()
-	b, err := json.Marshal(aiFile{Lang: j.lang.Code, Texts: j.done})
-	j.mu.Unlock()
-	if err == nil {
-		err = t.store.write(aiStoreKind, j.key, ".json", b)
-	}
-	if err != nil {
-		log.Printf("subtitles: AI translation store: %v", err)
-	}
 }
 
 // foreignScript reports Chinese, Japanese or Korean script in a translation into another language.
@@ -405,125 +79,6 @@ func foreignScript(text, lang string) bool {
 		}
 	}
 	return false
-}
-
-func aiSourceText(s string) string {
-	return strings.ReplaceAll(html.UnescapeString(s), "\n", " <br> ")
-}
-
-// aiPrompt builds a request; about is aiTitle's block.
-func aiPrompt(lang AILanguage, about string, before, batch []string) (system, user string) {
-	system = fmt.Sprintf("You translate film and TV subtitles into %[1]s. Write only in %[1]s. Each input line is \"n: text\". "+
-		"Answer only with numbered lines, \"n: translation\", in order, and nothing else. "+
-		"A sentence often runs over several lines: translate each line on its own when you can; when %[1]s word order needs "+
-		"some lines together, answer them once as \"a-b: translation\" (for example \"26-27: ...\"). Cover every number exactly once. "+
-		"<br> marks a line break, keep it. Keep <i>, <b> and <u> tags. "+
-		"Write natural, concise spoken %[1]s that reads well as subtitles. Keep names. "+
-		"Fit word choice and tone to the title's genre and story without changing the meaning.", lang.Name)
-	var b strings.Builder
-	b.WriteString(about)
-	if len(before) > 0 {
-		b.WriteString("Lines before (context only):\n")
-		for _, s := range before {
-			b.WriteString("- " + aiSourceText(s) + "\n")
-		}
-	}
-	b.WriteString("\n")
-	for i, s := range batch {
-		fmt.Fprintf(&b, "%d: %s\n", i+1, aiSourceText(s))
-	}
-	return system, b.String()
-}
-
-var aiAnswerLine = regexp.MustCompile(`^\s*(\d+)(?:\s*[-–]\s*(\d+))?\s*[:.)]\s?(.*)$`)
-
-// aiMaxRange is the most lines one "a-b: translation" answer may cover.
-const aiMaxRange = 6
-
-// parseAIAnswer reads "n: translation" and "a-b: translation" lines as cue texts of batch (1-based); a
-// range is divided over its lines. An empty text means the line shows nothing.
-func parseAIAnswer(answer string, batch []string) map[int]string {
-	out := map[int]string{}
-	for _, line := range strings.Split(answer, "\n") {
-		m := aiAnswerLine.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		a, _ := strconv.Atoi(m[1])
-		b := a
-		if m[2] != "" {
-			b, _ = strconv.Atoi(m[2])
-		}
-		if a < 1 || b < a || b > len(batch) || b-a >= aiMaxRange {
-			continue
-		}
-		if a == b {
-			if text := cleanCueText(m[3]); text != "" {
-				out[a] = text
-			}
-			continue
-		}
-		for i, part := range splitAcross(m[3], batch[a-1:b]) {
-			out[a+i] = cleanCueText(part)
-		}
-	}
-	return out
-}
-
-// splitAcross divides one translation of several source lines over them, by words in proportion
-// to the lengths of the lines.
-func splitAcross(text string, srcs []string) []string {
-	if parts := strings.Split(text, "<br>"); len(parts) == len(srcs) {
-		return parts // one part per line already
-	}
-	words := strings.Fields(strings.ReplaceAll(text, "<br>", " "))
-	total := 0
-	for _, s := range srcs {
-		total += utf8.RuneCountInString(s) + 1
-	}
-	out := make([]string, len(srcs))
-	from, acc := 0, 0
-	for i, s := range srcs {
-		acc += utf8.RuneCountInString(s) + 1
-		to := int(math.Round(float64(len(words)) * float64(acc) / float64(total)))
-		// Every line gets a word, the first ones when there are too few
-		to = max(to, from+1)
-		to = min(to, max(from+1, len(words)-(len(srcs)-1-i)), len(words))
-		if i == len(srcs)-1 {
-			to = len(words)
-		}
-		out[i] = strings.Join(words[from:to], " ")
-		from = to
-	}
-	return out
-}
-
-// renderLocked is the translated cues of the source, how far the translation is and whether the
-// lines at the player's position are still missing.
-func (j *aiJob) renderLocked(src []liveCue) (out []liveCue, complete, translating bool) {
-	for _, c := range src {
-		if tr, ok := j.done[c.text]; ok && tr != "" {
-			out = append(out, liveCue{start: c.start, end: c.end, text: tr})
-		}
-	}
-	complete = true
-	for _, c := range j.cues {
-		if _, ok := j.done[c.text]; !ok {
-			complete = false
-			break
-		}
-	}
-	return out, complete, !j.doneAtLocked() && j.keyErr == nil
-}
-
-// doneAtLocked: the line at the player's position is translated.
-func (j *aiJob) doneAtLocked() bool {
-	i := j.atLocked(j.focus)
-	if i >= len(j.cues) {
-		return true
-	}
-	_, ok := j.done[j.cues[i].text]
-	return ok
 }
 
 // serveAI answers a file request of an AI subtitle: the source as served for the player (timed
@@ -550,6 +105,7 @@ func (s *Service) serveAI(ctx context.Context, lang, ref string, t float64) (Fil
 			src, raw = alt, rawSubID(alt)
 		}
 	}
+	// The source exactly as the player would get it: its timing (and later re-timing) is the translation's
 	a, err := s.FileFor(ctx, src, t)
 	if err != nil {
 		return FileAnswer{}, err
@@ -557,7 +113,7 @@ func (s *Service) serveAI(ctx context.Context, lang, ref string, t float64) (Fil
 	cues := aiCues(a.VTT)
 	j := s.ai.job(raw+"|"+l.Code, l, func() string { return s.aiTitle(meta) })
 	j.mu.Lock()
-	j.focus, j.ahead, j.lastUsed = math.Max(t, 0), aiAhead, time.Now()
+	j.focus, j.lastUsed, j.watched, j.opening = math.Max(t, 0), time.Now(), true, 0
 	j.mu.Unlock()
 	j.feed(cues)
 	s.ai.kick(j, st.AnthropicAPIKey)
@@ -587,10 +143,10 @@ func (s *Service) serveAI(ctx context.Context, lang, ref string, t float64) (Fil
 	if len(out) == 0 && keyErr != nil {
 		return FileAnswer{}, keyErr
 	}
-	// Partial keeps the players asking (with their position) until every line is translated
+	// Partial keeps the players asking (with their position) until every line of the whole source is done
 	partial := a.Partial || !complete
 	vtt := renderVTT(out, partial)
-	if translating && keyErr == nil {
+	if translating {
 		vtt = []byte(strings.Replace(string(vtt), "WEBVTT\n\n", "WEBVTT\n\n"+AINote+"\n\n", 1))
 	}
 	return FileAnswer{VTT: vtt, Partial: partial, Sync: a.Sync}, nil
@@ -672,8 +228,8 @@ func (s *Service) aiPrefetchNext(m aiMeta, lang AILanguage) {
 		next := aiMeta{"tv", m.TmdbID, ns, ne}
 		j := s.ai.job(src+"|"+lang.Code, lang, func() string { return s.aiTitle(next) })
 		j.mu.Lock()
-		if j.ahead == 0 {
-			j.ahead = aiPrefetchAhead
+		if !j.watched {
+			j.opening = aiPrefetchAhead
 		}
 		j.mu.Unlock()
 		j.feed(aiCues(vtt))
@@ -769,36 +325,52 @@ func rawSubID(id string) string {
 	return id
 }
 
-// pickAISource is the subtitle to translate into lang: one already (partly) translated, else
-// English, else the best other one; never forced, live or quota-blocked ones. OpenSubtitles comes
-// last unless its file is on disk: its small daily quota may be used up before the list knows it.
+// aiTimingTier ranks a source by how well its timing is known to fit the playing file: the
+// file's own text tracks and subtitles made for it (0; 1 for a track still being read), then
+// subtitles timed to the file (2), then the rest (3).
+func aiTimingTier(x Sub) int {
+	_, _, _, timed := unwrapSyncID(x.ID)
+	switch {
+	case x.Synced && !timed && !x.Live:
+		return 0
+	case x.Synced && !timed:
+		return 1
+	case x.Synced:
+		return 2
+	}
+	return 3
+}
+
+// pickAISource is the subtitle to translate into lang: the best timing first (aiTimingTier), within
+// it one already (partly) translated, else English, else the best other one; never forced or
+// quota-blocked ones, nor ones whose timing does not fit the file. OpenSubtitles comes after the
+// others unless its file is on disk: its small daily quota may be used up before the list knows it.
 func (s *Service) pickAISource(subs []Sub, lang string) *Sub {
 	var cands []Sub
 	for _, x := range subs {
-		if x.Source != SourceAI && x.Language != "" && x.Language != lang && !x.Forced && !x.Live && !x.Quota {
+		if x.Source != SourceAI && x.Language != "" && x.Language != lang && !x.Forced && !x.Quota {
 			if inner, hash, index, ok := unwrapSyncID(x.ID); ok && s.sync.poorFor(inner, hash, index) {
 				continue // its timing does not fit the playing file
 			}
 			cands = append(cands, x)
 		}
 	}
-	for _, x := range cands {
-		if s.ai.has(rawSubID(x.ID) + "|" + lang) {
-			return &x
-		}
-	}
 	free := func(x Sub) bool { return x.Source != SourceOpenSubtitles || s.hasFile(rawSubID(x.ID)) }
-	for _, pref := range []func(Sub) bool{
-		func(x Sub) bool { return free(x) && x.Language == "en" && !x.HI },
-		func(x Sub) bool { return free(x) && x.Language == "en" },
-		func(x Sub) bool { return free(x) && !x.HI },
-		free,
+	prefs := []func(Sub) bool{
+		func(x Sub) bool { return s.ai.has(rawSubID(x.ID) + "|" + lang) },
+		func(x Sub) bool { return x.Language == "en" && !x.HI },
 		func(x Sub) bool { return x.Language == "en" },
+		func(x Sub) bool { return !x.HI },
 		func(Sub) bool { return true },
-	} {
-		for _, x := range cands {
-			if pref(x) {
-				return &x
+	}
+	for _, needFree := range []bool{true, false} {
+		for tier := 0; tier <= 3; tier++ {
+			for _, pref := range prefs {
+				for _, x := range cands {
+					if aiTimingTier(x) == tier && (!needFree || free(x)) && pref(x) {
+						return &x
+					}
+				}
 			}
 		}
 	}
@@ -938,7 +510,7 @@ func (s *Service) TestAIKey(ctx context.Context, key string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	_, used, err := s.ai.call(ctx, strings.TrimSpace(key), "Answer with OK.", "OK?")
+	_, used, err := s.ai.call(ctx, strings.TrimSpace(key), "Answer with an empty \"lines\" list.", "Test.")
 	s.ai.recordUsage(used, 0)
 	return err
 }

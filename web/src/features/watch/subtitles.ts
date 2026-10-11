@@ -270,8 +270,23 @@ export interface Cue {
 
 const cueCache = new LruCache<string, Promise<{ cues: Cue[]; sync: string }>>(CACHE_MAX);
 // Subtitle files that could not be loaded, by id: not asked again before `until`
-const failedFiles = new Map<string, { why: SubtitleFailure; until: number }>();
+const failedFiles = new Map<string, { why: SubtitleFailure; until: number; errors: number }>();
 const FAILED_FILE_MS = 5 * 60 * 1000;
+
+/**
+ * How long a failed file is not asked again: a server or network error (often over in seconds, e.g. an AI
+ * translation's first answer) 5 s after the first one in a row, doubling up to FAILED_FILE_MS; anything
+ * else FAILED_FILE_MS; a used up quota until it resets.
+ */
+export function failedFileWait(why: SubtitleFailure, errors: number): number {
+  return why === 'error' ? Math.min(FAILED_FILE_MS, 5000 * 2 ** Math.max(0, errors - 1)) : FAILED_FILE_MS;
+}
+
+function rememberFailure(id: string, why: SubtitleFailure, reset = NaN) {
+  const errors = why === 'error' ? (failedFiles.get(id)?.errors ?? 0) + 1 : 0;
+  const until = why === 'quota' && reset > Date.now() ? reset : Date.now() + failedFileWait(why, errors);
+  failedFiles.set(id, { why, until, errors });
+}
 
 /** When a failed subtitle file may be asked again (the quota reset for OpenSubtitles), null if it did not fail. */
 export const subtitleRetryAt = (id: string): number | null => failedFiles.get(id)?.until ?? null;
@@ -312,15 +327,18 @@ export function fetchSubtitleFile(id: string, at?: number, poll = false): Promis
       const sync = syncValue(res.headers.get('X-Subtitle-Sync'), res.type === 'cors');
       if (res.ok) {
         const text = await res.text();
+        failedFiles.delete(id);
         return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE), sync, translating: text.includes(AI_NOTE) };
       }
       const body = await res.json().catch(() => null) as { quota?: boolean; reset_at?: string } | null;
       const why: SubtitleFailure = res.status === 429 ? (body?.quota ? 'quota' : 'limited') : res.status >= 500 ? 'error' : 'missing';
-      const reset = body?.reset_at ? Date.parse(body.reset_at) : NaN;
-      if (!poll) failedFiles.set(id, { why, until: why === 'quota' && reset > Date.now() ? reset : Date.now() + FAILED_FILE_MS });
+      if (!poll) rememberFailure(id, why, body?.reset_at ? Date.parse(body.reset_at) : NaN);
       return { cues: [], partial: false, sync, failed: why };
     })
-    .catch((): SubtitleFile => ({ cues: [], partial: false, sync: SYNC_NONE, failed: 'error' }));
+    .catch((): SubtitleFile => {
+      if (!poll) rememberFailure(id, 'error');
+      return { cues: [], partial: false, sync: SYNC_NONE, failed: 'error' };
+    });
   req.then(f => {
     if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve({ cues: f.cues, sync: f.sync }));
   });

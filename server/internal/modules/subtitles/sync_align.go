@@ -15,8 +15,9 @@ import (
 // subtitles start lines up to a second early or late, so a line counts as on time within 0.6 s
 // (closer is better) and offsets come from many lines. Like alass (simplified), the offset may
 // change between windows (ad breaks or a title sequence cut differently): a Viterbi pass picks
-// piecewise constant offsets, each change costing syncSplitPenalty matched lines, and the
-// change is placed at the subtitle pause that fits best.
+// piecewise constant offsets, each change costing syncSplitPenalty matched lines plus
+// syncChangeCost per second it moves, every run of one offset has to beat its neighbours on its
+// own windows, and the change is placed at the subtitle pause that fits best.
 
 const (
 	syncRate         = 100  // signal frames per second
@@ -26,6 +27,9 @@ const (
 	syncSplitPenalty = 4.0  // matched lines an offset change between windows has to gain
 	syncMinChange    = 40   // frames an offset change moves at least (smaller ones are detector noise)
 	syncMergeGap     = 0.35 // window offsets closer than this count as one (extra windows)
+	syncChangeCost   = 0.5  // matched lines per second an offset change moves, on top of the penalty
+	syncLagStep      = 10   // frames: steps of the speech lag tried
+	syncMaxLag       = 40   // frames detected speech may start after the file's own subtitle lines
 )
 
 // syncScales are subtitle time multipliers: same rate, then 25 <-> 23.976 / 24 conversions.
@@ -110,9 +114,10 @@ type syncSegment struct {
 type syncFit struct {
 	Scale    float64       `json:"scale"`
 	Segments []syncSegment `json:"segments"`
-	Score    float64       `json:"score"` // the result: matched lines per reference line start
-	Base     float64       `json:"base"`  // the same averaged over all offsets (chance)
-	Peak     float64       `json:"peak"`  // how far the result beats the best offset away from it (same unit)
+	Score    float64       `json:"score"`         // the result: matched lines per reference line start
+	Base     float64       `json:"base"`          // the same averaged over all offsets (chance)
+	Peak     float64       `json:"peak"`          // how far the result beats the best offset away from it (same unit)
+	Lag      float64       `json:"lag,omitempty"` // seconds speech windows were taken earlier (own track and speech mixed)
 	// per reference window (sorted by start): the offset it ended up with
 	windowOffsets []float64
 	windows       []refWindow
@@ -184,8 +189,11 @@ func prepare(windows []refWindow) []prepared {
 // 279 such cases fitted another episode, 8 of 141 with fewer lines), below syncMinWindows
 // windows one offset is fitted at the first of scales (from liveSplitWindows also one change,
 // such as a title sequence cut differently, at peak 0.20: none of 264 such cases fitted another
-// episode, 3 at 0.12), other rates need windows spread over 25 minutes, an offset change costs
-// more as windows get denser, and the peak bar is higher.
+// episode, 3 at 0.12), other rates need windows spread over 25 minutes or a plain drift over
+// contiguous ones, and the peak bar is higher. An offset change costs what it costs with read
+// windows: a cost growing with the windows dropped a teaser's own offset once the episode was
+// heard (seen on real files), while the change cost by distance and mergeUnsupported keep
+// detector noise out.
 func alignLive(cues []span, windows []refWindow, scales []float64) (syncFit, bool) {
 	ws := prepare(windows)
 	n := len(ws)
@@ -212,9 +220,16 @@ func alignLive(cues []span, windows []refWindow, scales []float64) (syncFit, boo
 		covered += w.end() - w.Start
 	}
 	if last-first < 1500 && covered > (last-first)/2 {
-		scales = scales[:1]
+		// Contiguous: only rates whose drift over the stretch is plain (25 <-> 24 fps: 20 s in 8 min)
+		keep := []float64{scales[0]}
+		for _, k := range scales[1:] {
+			if math.Abs(k-1)*(last-first) >= liveMinDrift {
+				keep = append(keep, k)
+			}
+		}
+		scales = keep
 	}
-	f, ok := alignWith(cues, ws, scales, syncSplitPenalty*math.Max(1, float64(n)/12), -1)
+	f, ok := alignWith(cues, ws, scales, syncSplitPenalty, -1)
 	f.minPeak = 1.25 * syncMinPeak
 	return f, ok
 }
@@ -262,10 +277,55 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 	}
 	d := int(syncMaxOffset * syncRate)
 	curves := make([][]float64, len(ws))
+	subs, speech := 0, 0
+	for m, w := range ws {
+		curves[m] = windowCurve(w, starts, d)
+		if w.Kind == "subs" {
+			subs++
+		} else {
+			speech++
+		}
+	}
+	// Detected speech starts a little after the lines of the file's own track (0-0.4 s, by file):
+	// with windows of both, that lag is fitted too, else the two kinds look like an offset change
+	lags := []int{0}
+	if subs >= 2 && speech >= 2 {
+		for l := syncLagStep; l <= syncMaxLag; l += syncLagStep {
+			lags = append(lags, l)
+		}
+	}
+	var best syncFit
+	bestRaw := math.Inf(-1)
+	for _, lag := range lags {
+		f, raw := alignLag(cues, ws, k, curves, d, lag, penalty, maxChanges)
+		if raw > bestRaw+0.5 {
+			best, bestRaw = f, raw
+		}
+	}
+	return best
+}
+
+// alignLag fits with speech windows taken lag frames earlier.
+func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d, lag int, penalty float64, maxChanges int) (syncFit, float64) {
+	ws := orig
+	curves := unshifted
+	if lag != 0 {
+		ws = make([]prepared, len(orig))
+		curves = make([][]float64, len(unshifted))
+		for m, w := range orig {
+			ws[m], curves[m] = w, unshifted[m]
+			if w.Kind == "subs" {
+				continue
+			}
+			ws[m].Start -= float64(lag) / syncRate
+			c := make([]float64, len(unshifted[m]))
+			copy(c, unshifted[m][lag:])
+			curves[m] = c
+		}
+	}
 	total := make([]float64, 2*d+1)
 	sumLines := 0.0
 	for m, w := range ws {
-		curves[m] = windowCurve(w, starts, d)
 		sumLines += w.lines
 		for q, v := range curves[m] {
 			total[q] += v
@@ -274,16 +334,18 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 	qg := argmax(total, 0, len(total)-1)
 	offset := func(q int) float64 { return float64(q-d) / syncRate }
 
-	fit := syncFit{Scale: k}
-	for _, w := range ws {
+	fit := syncFit{Scale: k, Lag: float64(lag) / syncRate}
+	for _, w := range orig {
 		fit.windows = append(fit.windows, w.refWindow)
 	}
 	fit.Base = mean(total) / sumLines
 
 	// Offsets per window (alass-like): piecewise constant within syncNearOffset of the global one,
-	// each change costing syncSplitPenalty matched lines (Viterbi over the windows in time order)
+	// each change costing penalty matched lines plus syncChangeCost per second it moves (Viterbi
+	// over the windows in time order)
 	lo, hi := max(qg-syncNearOffset*syncRate, 0), min(qg+syncNearOffset*syncRate, 2*d)
 	states := hi - lo + 1
+	lam := syncChangeCost / syncRate
 	// With maxChanges >= 0, layer l holds paths with l changes so far; otherwise one layer
 	// changes into itself
 	layers := 1
@@ -307,19 +369,20 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 			}
 			change := m > 0 && src >= 0
 			if change {
+				// best previous state below / above, less lam per frame of distance
 				u := v[src]
 				preV[0], preI[0] = u[0], 0
 				for s := 1; s < states; s++ {
 					preV[s], preI[s] = preV[s-1], preI[s-1]
-					if u[s] > preV[s] {
-						preV[s], preI[s] = u[s], int32(s)
+					if x := u[s] + lam*float64(s); x > preV[s] {
+						preV[s], preI[s] = x, int32(s)
 					}
 				}
-				sufV[states-1], sufI[states-1] = u[states-1], int32(states-1)
+				sufV[states-1], sufI[states-1] = u[states-1]-lam*float64(states-1), int32(states-1)
 				for s := states - 2; s >= 0; s-- {
 					sufV[s], sufI[s] = sufV[s+1], sufI[s+1]
-					if u[s] > sufV[s] {
-						sufV[s], sufI[s] = u[s], int32(s)
+					if x := u[s] - lam*float64(s); x > sufV[s] {
+						sufV[s], sufI[s] = x, int32(s)
 					}
 				}
 			}
@@ -334,11 +397,15 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 					stay = v[l][s]
 				}
 				if change {
-					if j := s - syncMinChange; j >= 0 && preV[j]-penalty > stay {
-						stay, back[m][l][s] = preV[j]-penalty, base+preI[j]
+					if j := s - syncMinChange; j >= 0 {
+						if x := preV[j] - lam*float64(s) - penalty; x > stay {
+							stay, back[m][l][s] = x, base+preI[j]
+						}
 					}
-					if j := s + syncMinChange; j < states && sufV[j]-penalty > stay {
-						stay, back[m][l][s] = sufV[j]-penalty, base+sufI[j]
+					if j := s + syncMinChange; j < states {
+						if x := sufV[j] + lam*float64(s) - penalty; x > stay {
+							stay, back[m][l][s] = x, base+sufI[j]
+						}
 					}
 				}
 				next[l][s] = stay + c[lo+s]
@@ -357,6 +424,7 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 		path[m] = cur % states
 		cur = int(back[m][cur/states][cur%states])
 	}
+	mergeUnsupported(path, curves, lo, penalty)
 
 	fit.Segments = []syncSegment{{Offset: offset(lo + path[0])}}
 	fit.windowOffsets = make([]float64, len(ws))
@@ -387,7 +455,60 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 		}
 	}
 	fit.Peak = (raw - other) / sumLines
-	return fit
+	return fit, raw
+}
+
+// mergeUnsupported gives every run of windows with one offset the offset of a neighbouring run
+// when it does not beat that by minGain matched lines on its own windows: the Viterbi may keep
+// such a run as a bridge between two offsets closer than syncMinChange (seen on Avatar: Seven
+// Havens S01E02, where the file's own track and the played audio disagreed by 0.23 s and one
+// live window went +13 s to get there), or for a gain its neighbours bring.
+func mergeUnsupported(path []int, curves [][]float64, lo int, minGain float64) {
+	for {
+		type run struct{ a, b, s int } // windows [a, b) at state s
+		var runs []run
+		for m := range path {
+			if m == 0 || path[m] != path[m-1] {
+				runs = append(runs, run{m, m + 1, path[m]})
+			} else {
+				runs[len(runs)-1].b = m + 1
+			}
+		}
+		if len(runs) < 2 {
+			return
+		}
+		sum := func(r run, s int) float64 {
+			x := 0.0
+			for m := r.a; m < r.b; m++ {
+				x += curves[m][lo+s]
+			}
+			return x
+		}
+		weak, to, weakest := -1, 0, minGain
+		for i, r := range runs {
+			own := sum(r, r.s)
+			gain, best, bestS := math.Inf(1), math.Inf(-1), 0
+			for _, j := range []int{i - 1, i + 1} {
+				if j < 0 || j >= len(runs) {
+					continue
+				}
+				x := sum(r, runs[j].s)
+				gain = math.Min(gain, own-x)
+				if x > best {
+					best, bestS = x, runs[j].s
+				}
+			}
+			if gain < weakest {
+				weak, to, weakest = i, bestS, gain
+			}
+		}
+		if weak < 0 {
+			return
+		}
+		for m := runs[weak].a; m < runs[weak].b; m++ {
+			path[m] = to
+		}
+	}
 }
 
 // windowCurve scores every offset for one window: c[q] is offset (q-d)/syncRate seconds.
@@ -441,6 +562,19 @@ func splitPoint(cues []span, k float64, a, b prepared, d1, d2 float64) float64 {
 	return cands[best].at
 }
 
+// rescore is what an earlier fit scores on the current windows (its scale, offsets and lag), in
+// matched lines, and the windows' line starts.
+func rescore(cues []span, windows []refWindow, f syncFit) (raw, lines float64) {
+	ws := prepare(windows)
+	for i := range ws {
+		if ws[i].Kind != "subs" {
+			ws[i].Start -= f.Lag
+		}
+		lines += ws[i].lines
+	}
+	return piecewiseScore(ws, cues, f.Scale, f.Segments), lines
+}
+
 // piecewiseScore sums what the subtitle's line starts, moved by segs, land on in the windows.
 func piecewiseScore(ws []prepared, cues []span, k float64, segs []syncSegment) float64 {
 	total := 0.0
@@ -470,6 +604,13 @@ func (f syncFit) extraWindows(length float64, max int) []float64 {
 		}
 	}
 	return out
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func argmax(v []float64, lo, hi int) int {

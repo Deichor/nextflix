@@ -1593,7 +1593,8 @@ function PlayerCore({
   const exactRef = useRef(startPoint.exact);
   useSyncRef(exactRef, startPoint.exact);
   // Before the seekpoint answers this may run up to one keyframe interval ahead
-  const position = offset + current;
+  // (a stream from 0 starts a few frames before 0)
+  const position = Math.max(0, offset + current);
   // The session's position (the parent's ref outlives this PlayerCore): only a running stream
   // writes it, so a PlayerCore that is still opening its file never reports 0
   // (kept next to the parent's positionRef; read only without one)
@@ -1606,7 +1607,7 @@ function PlayerCore({
   const stateRef = useRef({ position: 0, saveAt: 0, duration: 0, hash: '', index: 0 });
   // Exact position for the refs above on every commit (onTimeUpdate also writes them between renders)
   useLayoutEffect(() => {
-    const livePos = offset + curRef.current;
+    const livePos = Math.max(0, offset + curRef.current);
     if (stream) {
       ownPosRef.current = livePos;
       if (positionRef) positionRef.current = livePos;
@@ -1733,8 +1734,9 @@ function PlayerCore({
     exactRef.current = target <= 0;
     setStartPoint({ t: target, exact: target <= 0 });
     setStream(s => ({ t: target, n: (s?.n ?? 0) + 1 }));
-    if (target <= 0) return;
 
+    // The answer is the file time of the stream's time 0: its first decode time, up to two frames
+    // before the keyframe shows, so at t=0 too it is slightly negative (positions ran ~80 ms ahead)
     const ctrl = new AbortController();
     seekCtrl.current = ctrl;
     const timer = setTimeout(() => ctrl.abort(), 15000);
@@ -1743,7 +1745,7 @@ function PlayerCore({
       try {
         const res = await fetch(`${apiUrl}/api/torrent-stream/seekpoint?hash=${hash}&index=${file.id}&t=${target.toFixed(3)}&audio=${audioRef.current}${capsQuery()}`, { signal: ctrl.signal });
         const data = await res.json();
-        if (res.ok && typeof data.t === 'number' && data.t >= 0 && data.t <= target + 1) t = data.t;
+        if (res.ok && typeof data.t === 'number' && data.t >= -1 && data.t <= target + 1) t = data.t;
       } catch {
         /* the stream still starts near target, just without the exact offset */
       } finally {
@@ -2048,6 +2050,7 @@ function PlayerCore({
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let errors = 0;
     // Asked again every LIVE_CUES_POLL_MS while partial: a live embedded track (read from the playing position
     // on, it grows) and a subtitle the server still times to the file alike; the final answer stops it
     const load = () => {
@@ -2061,8 +2064,18 @@ function PlayerCore({
             return;
           }
           setCues([]);
-          subtitleFailed(subId, f.failed);
+          // Another subtitle takes over when there is one (this effect then ends); a server or network
+          // error is asked again after its short wait (5 s, doubling) instead of failing for minutes
+          if (errors++ === 0) subtitleFailed(subId, f.failed);
+          const at = subtitleRetryAt(subId);
+          if (f.failed === 'error' && at) timer = setTimeout(load, Math.max(1000, at - Date.now()));
           return;
+        }
+        if (errors > 0 && failedSubsRef.current.has(subId)) {
+          const failed = new Set(failedSubsRef.current);
+          failed.delete(subId);
+          failedSubsRef.current = failed;
+          setFailedSubs(failed);
         }
         noteSubs(subId, f);
         setAiTranslating(!!f.translating);

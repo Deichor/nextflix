@@ -173,29 +173,56 @@ func ffmpegSyncWindow(ctx context.Context, url string, p mediaProbe, start, leng
 	return w, err
 }
 
+// ffmpegSubsWindow reads only the cues of the file's own text track in [start, start+length)
+// (the early windows of a file above the byte budget; no audio fallback).
+func ffmpegSubsWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+	capped, used, stop, err := cappedURL(url, windowByteCap(p, length))
+	if err != nil {
+		return refWindow{}, err
+	}
+	defer stop()
+	w, ok, err := readSubsWindow(ctx, capped, p, start, length)
+	w.Read = used()
+	if !ok && err == nil {
+		err = fmt.Errorf("window at %.0fs: too few lines of its own track", start)
+	}
+	return w, err
+}
+
+// readSubsWindow reads the cues of the text track in the window; ok when there are enough.
+func readSubsWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, bool, error) {
+	if p.TextSub < 0 {
+		return refWindow{}, false, nil
+	}
+	// -copyts: after -ss a subtitle's times count from the keyframe before start, not from start
+	args := withInput([]string{"-nostdin", "-v", "error",
+		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
+		"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-copyts", "-start_at_zero"}, url)
+	args = append(args, "-map", fmt.Sprintf("0:%d", p.TextSub), "-c:s", "webvtt",
+		"-to", strconv.FormatFloat(start+length, 'f', 3, 64), "-f", "webvtt", "pipe:1")
+	out, err := runFFmpeg(ctx, args, 4<<20)
+	if ctx.Err() != nil {
+		return refWindow{}, false, err
+	}
+	w, ok := cueWindow(out, start, int(length*syncRate))
+	return w, ok, nil // also when the cap ended the read: the window's lines are in
+}
+
 func readSyncWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
 	frames := int(length * syncRate)
-	if p.TextSub >= 0 {
-		// -copyts: after -ss a subtitle's times count from the keyframe before start, not from start
-		args := withInput([]string{"-nostdin", "-v", "error",
-			"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-			"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-copyts", "-start_at_zero"}, url)
-		args = append(args, "-map", fmt.Sprintf("0:%d", p.TextSub), "-c:s", "webvtt",
-			"-to", strconv.FormatFloat(start+length, 'f', 3, 64), "-f", "webvtt", "pipe:1")
-		out, err := runFFmpeg(ctx, args, 4<<20)
-		if ctx.Err() != nil {
-			return refWindow{}, err
-		}
-		if w, ok := cueWindow(out, start, frames); ok {
-			return w, nil // also when the cap ended the read: the window's lines are in
-		}
+	if w, ok, err := readSubsWindow(ctx, url, p, start, length); ctx.Err() != nil {
+		return refWindow{}, err
+	} else if ok {
+		return w, nil
 	}
 	if p.Audio < 0 {
 		return refWindow{}, fmt.Errorf("window at %.0fs: no lines and no audio", start)
 	}
-	af := []string{"-ac", "1"}
+	// Pads a late first sample and gaps so sample 0 is start, like the speech tap
+	resample := "aresample=async=1:first_pts=0"
+	af := []string{"-ac", "1", "-af", resample}
 	if p.Center {
-		af = []string{"-af", "pan=mono|c0=FC"}
+		af = []string{"-af", "pan=mono|c0=FC," + resample}
 	}
 	args := withInput([]string{"-nostdin", "-v", "error",
 		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",

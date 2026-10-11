@@ -151,13 +151,10 @@ func (f *tsFirstWrite) Write(b []byte) (int, error) {
 	return f.w.Write(b)
 }
 
-func playArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool) []string {
-	return streamArgs(src, start, audio, plan, aplan, smallProbe, tsTrackBoth)
-}
-
-// streamArgs builds the ffmpeg command of a play stream: muxed (tsTrackBoth) or one elementary
-// track of a split pair (see split.go). The input side is the same for every track.
-func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool, track tsTrack) []string {
+// streamInput is the input side of a play stream up to -i. The seek point answer runs the same
+// options, so both land on the same keyframe: without AVFMT_SEEK_TO_PTS (Matroska, MPEG-TS) and
+// with B-frames ffmpeg seeks to t - 0.13 s, and ffprobe's seek differs from ffmpeg's.
+func streamInput(src string, start float64, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool) []string {
 	args := append([]string{"-hide_banner", "-loglevel", "error"}, tsInputGuard()...)
 	args = append(args, "-fflags", "+genpts",
 		// TorrServer may drop the connection while it waits for pieces
@@ -166,7 +163,6 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 		// Streams are already known from the probe, so restarts after a seek can open faster
 		args = append(args, "-probesize", "2000000", "-analyzeduration", "2000000")
 	}
-	ss := strconv.FormatFloat(start, 'f', 3, 64)
 	if start > 0 {
 		if plan.copy || aplan.copy {
 			// Copied streams start on the keyframe before ?t= (copied audio is never trimmed).
@@ -174,9 +170,20 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 			// the start that browsers handle badly, so both start at the keyframe (see seekPoint).
 			args = append(args, "-noaccurate_seek")
 		}
-		args = append(args, "-ss", ss)
+		args = append(args, "-ss", strconv.FormatFloat(start, 'f', 3, 64))
 	}
-	args = append(args, "-i", src)
+	return append(args, "-i", src)
+}
+
+func playArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool) []string {
+	return streamArgs(src, start, audio, plan, aplan, smallProbe, tsTrackBoth)
+}
+
+// streamArgs builds the ffmpeg command of a play stream: muxed (tsTrackBoth) or one elementary
+// track of a split pair (see split.go). The input side is the same for every track.
+func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool, track tsTrack) []string {
+	args := streamInput(src, start, plan, aplan, smallProbe)
+	ss := strconv.FormatFloat(start, 'f', 3, 64)
 	switch track {
 	case tsTrackVideo:
 		args = append(args, "-map", "0:v:0", "-an", "-sn", "-dn", "-map_chapters", "-1")
@@ -199,8 +206,11 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 				vf += ",zscale=tin=" + plan.tonemap + ":min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le," +
 					"zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
 			}
+			// Frames keep the source's times: vfr and a 90 kHz encoder time base (the default
+			// constant rate and 1/fps time base moved them onto a frame grid from t, up to 1.5
+			// frames late)
 			args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-				"-pix_fmt", "yuv420p", "-vf", vf)
+				"-pix_fmt", "yuv420p", "-vf", vf, "-fps_mode", "vfr", "-enc_time_base:v", "1/90000")
 		}
 	}
 	if track != tsTrackVideo {
@@ -211,9 +221,12 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 		movflags += "+delay_moov"
 	}
 	if track == tsTrackBoth {
-		// make_zero shifts all streams together so the output starts at 0 without edit lists.
+		// make_zero shifts all streams together so the output starts at 0: time 0 is the first
+		// video packet's decode time (B-frames: before the keyframe is shown, see seekPoint). No
+		// edit lists: Chromium ignores an empty first edit (a track's start delay), Firefox does
+		// not; without them the muxer moves a later track's first sample to 0 in both.
 		// 1s fragments so playback starts fast even when source keyframes are far apart.
-		return append(args, "-avoid_negative_ts", "make_zero",
+		return append(args, "-avoid_negative_ts", "make_zero", "-use_editlist", "0",
 			"-movflags", movflags, "-frag_duration", "1000000",
 			"-f", "mp4", "pipe:1")
 	}

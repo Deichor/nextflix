@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,83 +15,180 @@ import (
 	"time"
 )
 
-// fakeAI answers every numbered line with "TR <line>" and records the batch sizes.
+// fastAI shortens the waits of the AI translation for a test.
+func fastAI(t *testing.T) {
+	t.Helper()
+	retry, pause, pauseMax, waitMax, first := aiRetryWait, aiPauseBase, aiPauseMax, aiWaitMax, aiFirstWait
+	aiRetryWait = []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond, 4 * time.Millisecond}
+	aiPauseBase, aiPauseMax, aiWaitMax, aiFirstWait = time.Millisecond, 5*time.Millisecond, 5*time.Millisecond, 2*time.Second
+	t.Cleanup(func() {
+		aiRetryWait, aiPauseBase, aiPauseMax, aiWaitMax, aiFirstWait = retry, pause, pauseMax, waitMax, first
+	})
+}
+
+// aiRequestLines reads a request the way the model does.
+func aiRequestLines(t testing.TB, user string) []aiInLine {
+	t.Helper()
+	i := strings.Index(user, `{"lines"`)
+	if i < 0 {
+		t.Fatalf("no lines in %q", user)
+	}
+	var in struct {
+		Lines []aiInLine `json:"lines"`
+	}
+	if err := json.Unmarshal([]byte(user[i:]), &in); err != nil {
+		t.Fatal(err)
+	}
+	return in.Lines
+}
+
+var fakeLead = regexp.MustCompile(`^((?:<[ibu]>)*-?\s*)`)
+
+// fakeTr is the fake model's translation: every line keeps its tags and speaker dash, so a
+// translation can be told apart from the one of any other line.
+func fakeTr(src string) string {
+	lines := strings.Split(src, "\n")
+	for i, l := range lines {
+		lead := fakeLead.FindString(l)
+		lines[i] = lead + "çev " + l[len(lead):]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wantTr is what the job stores for a source cue text answered by fakeTr.
+func wantTr(text string) string { return cleanCueText(fakeTr(aiPlain(text))) }
+
+func fakeEcho(text string) string {
+	w := strings.Fields(text)
+	return strings.Join(w[:min(len(w), aiEchoWords)], " ")
+}
+
+func fakeItem(l aiInLine) aiOutLine {
+	return aiOutLine{ID: l.ID, Src: fakeEcho(l.Text), Text: fakeTr(l.Text)}
+}
+
+func fakeAnswer(items []aiOutLine) string {
+	b, _ := json.Marshal(map[string]any{"lines": items})
+	return string(b)
+}
+
+func asked(lines []aiInLine) []aiInLine {
+	var out []aiInLine
+	for _, l := range lines {
+		if l.ID != 0 {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// fakeAI answers every line right and records the requests.
 type fakeAI struct {
 	mu    sync.Mutex
-	sizes []int
+	calls [][]aiInLine // the asked lines of each request
 }
 
-func (f *fakeAI) call(_ context.Context, _, _, user string) (string, aiTokens, error) {
-	var out []string
-	for _, line := range strings.Split(user, "\n") {
-		if m := aiAnswerLine.FindStringSubmatch(line); m != nil {
-			out = append(out, m[1]+": TR "+m[3])
+func (f *fakeAI) call(t testing.TB) aiCallFunc {
+	return func(_ context.Context, _, _, user string) (string, aiTokens, error) {
+		lines := asked(aiRequestLines(t, user))
+		f.mu.Lock()
+		f.calls = append(f.calls, lines)
+		f.mu.Unlock()
+		var items []aiOutLine
+		for _, l := range lines {
+			items = append(items, fakeItem(l))
 		}
+		return fakeAnswer(items), aiTokens{In: 100, Out: 100}, nil
 	}
-	f.mu.Lock()
-	f.sizes = append(f.sizes, len(out))
-	f.mu.Unlock()
-	return strings.Join(out, "\n"), aiTokens{In: 100, Out: 100}, nil
 }
 
-func waitIdle(t *testing.T, j *aiJob) {
+func (f *fakeAI) requests() [][]aiInLine {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]aiInLine(nil), f.calls...)
+}
+
+// waitSettled waits until every line of the job is translated or given up on.
+func waitSettled(t *testing.T, j *aiJob) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		j.mu.Lock()
+		left := 0
+		for _, l := range j.lines {
+			if !j.settledLocked(l.text) && (j.opening == 0 || l.start <= j.opening) {
+				left++
+			}
+		}
 		idle := j.running == 0
 		j.mu.Unlock()
-		if idle {
+		if left == 0 && idle {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("translation did not finish")
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	t.Fatalf("translation did not finish: %d of %d lines done, %d given up", len(j.done), len(j.lines), len(j.gaveUp))
 }
 
-func TestAIJobTranslatesAroundThePlayer(t *testing.T) {
+func numberedCues(n int, every float64) []liveCue {
+	var cues []liveCue
+	for i := 0; i < n; i++ {
+		cues = append(cues, liveCue{start: float64(i) * every, end: float64(i)*every + every - 1, text: fmt.Sprintf("Line %d is here", i)})
+	}
+	return cues
+}
+
+func TestAIJobTranslatesTheWholeFileFromThePlayerOn(t *testing.T) {
+	fastAI(t)
 	dir := t.TempDir()
 	fake := &fakeAI{}
 	tr := newAITranslator(nil, dir)
-	tr.call = fake.call
-	var cues []liveCue
-	for i := 0; i < 400; i++ { // a line every 5 s
-		cues = append(cues, liveCue{start: float64(i * 5), end: float64(i*5 + 4), text: fmt.Sprintf("line %d", i)})
-	}
-	cues = append(cues, liveCue{start: 2001, end: 2002, text: "♪"})
+	tr.call = fake.call(t)
+	cues := append(numberedCues(400, 5), liveCue{start: 2001, end: 2002, text: "♪"})
 
 	key := "src|tr"
 	lang, _ := aiLanguage("tr")
 	j := tr.job(key, lang, func() string { return "Show, S01E01" })
 	j.mu.Lock()
-	j.focus, j.ahead = 600, aiAhead
+	j.focus, j.watched = 600, true
 	j.mu.Unlock()
 	j.feed(cues)
 	tr.kick(j, "key")
-	waitIdle(t, j)
+	waitSettled(t, j)
 
 	j.mu.Lock()
-	_, early := j.done["line 0"]
-	at := j.done["line 120"]
-	_, late := j.done["line 398"]
-	music := j.done["♪"]
-	j.mu.Unlock()
-	if early || late || at != "TR line 120" || music != "♪" {
-		t.Fatalf("early %v late %v at %q music %q", early, late, at, music)
+	for _, c := range cues[:400] {
+		if j.done[c.text] != wantTr(c.text) {
+			t.Fatalf("%q -> %q", c.text, j.done[c.text])
+		}
 	}
-	// Requests run in parallel: the small one at the position is among them, whichever ended first
-	fake.mu.Lock()
-	sizes := append([]int(nil), fake.sizes...)
-	fake.mu.Unlock()
+	out, complete, translating := j.renderLocked(cues)
+	j.mu.Unlock()
+	if !complete || translating || len(out) != len(cues) || out[400].text != "♪" {
+		t.Fatalf("complete %v translating %v cues %d", complete, translating, len(out))
+	}
+	// The first request starts at the player (a small one), the lines before it come last
+	reqs := fake.requests()
 	small := false
-	for _, n := range sizes {
-		small = small || n == aiFirstBatch
+	for _, r := range reqs {
+		small = small || (r[0].Text == "Line 119 is here" && len(r) == aiFirstBatch)
 	}
 	if !small {
-		t.Fatalf("request sizes %v", sizes)
+		t.Fatal("no small first request at the player's position")
+	}
+	for _, r := range reqs[:3] {
+		for _, l := range r {
+			var n int
+			fmt.Sscanf(l.Text, "Line %d", &n)
+			if n < 119 {
+				t.Fatalf("a line behind the player was asked among the first requests: %q", l.Text)
+			}
+		}
 	}
 
-	// The lines are kept: a new translator reads them back
+	// The lines are kept: a new translator reads them back without asking
 	tr2 := newAITranslator(nil, dir)
 	tr2.call = func(context.Context, string, string, string) (string, aiTokens, error) {
 		return "", aiTokens{}, errors.New("must not be asked")
@@ -97,22 +197,33 @@ func TestAIJobTranslatesAroundThePlayer(t *testing.T) {
 		t.Fatal("translation not stored")
 	}
 	j2 := tr2.job(key, lang, func() string { return "" })
-	if j2.done["line 120"] != "TR line 120" {
+	if j2.done["Line 120 is here"] != wantTr("Line 120 is here") || len(j2.done) != 400 {
 		t.Fatalf("stored lines %d", len(j2.done))
 	}
 }
 
-func TestAIAnswerKeepsLineBreaks(t *testing.T) {
-	if got := aiSourceText("Hello &amp; bye\n<i>there</i>"); got != "Hello & bye <br> <i>there</i>" {
-		t.Fatalf("source %q", got)
+func TestAIOldStoreIsDropped(t *testing.T) {
+	dir := t.TempDir()
+	old := diskCache{dir: dir}
+	if err := old.write(aiOldStoreKind, "src|tr", ".json", []byte(`{"lang":"tr","texts":{"- Not always.":"Efendim, anlamıyorum."}}`)); err != nil {
+		t.Fatal(err)
 	}
-	got := parseAIAnswer("1: Merhaba & güle güle <br> <i>orada</i>\n2) İki\n9: out of range\nnoise", []string{"a", "b"})
-	if got[1] != "Merhaba &amp; güle güle\n<i>orada</i>" || got[2] != "İki" || len(got) != 2 {
-		t.Fatalf("parsed %v", got)
+	// A file of the new kind without the version is not trusted either
+	if err := old.write(aiStoreKind, "other|tr", ".json", []byte(`{"lang":"tr","texts":{"a":"b"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	tr := newAITranslator(nil, dir)
+	if _, err := os.Stat(filepath.Join(dir, aiOldStoreKind)); !os.IsNotExist(err) {
+		t.Fatalf("old store kept: %v", err)
+	}
+	lang, _ := aiLanguage("tr")
+	if j := tr.job("other|tr", lang, func() string { return "" }); len(j.done) != 0 {
+		t.Fatalf("unversioned lines trusted: %v", j.done)
 	}
 }
 
 func TestAIKeyErrorStopsTheJob(t *testing.T) {
+	fastAI(t)
 	var calls atomic.Int32
 	tr := newAITranslator(nil, t.TempDir())
 	tr.call = func(context.Context, string, string, string) (string, aiTokens, error) {
@@ -121,16 +232,18 @@ func TestAIKeyErrorStopsTheJob(t *testing.T) {
 	}
 	lang, _ := aiLanguage("tr")
 	j := tr.job("k|tr", lang, func() string { return "" })
-	j.mu.Lock()
-	j.ahead = aiAhead
-	j.mu.Unlock()
 	j.feed([]liveCue{{0, 1, "a"}, {2, 3, "b"}})
 	tr.kick(j, "key")
-	waitIdle(t, j)
+	time.Sleep(50 * time.Millisecond)
 	tr.kick(j, "key")
-	waitIdle(t, j)
+	time.Sleep(50 * time.Millisecond)
 	if calls.Load() != 1 {
 		t.Fatalf("asked %d times with a bad key", calls.Load())
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.tries["a"] != 0 || j.gaveUp["a"] {
+		t.Fatal("a key error counted as a failed line")
 	}
 }
 
@@ -178,10 +291,11 @@ func TestAISettings(t *testing.T) {
 	}
 }
 
-func TestServeAITranslatesTheSource(t *testing.T) {
+// aiTestService is a service with the AI translation on, answered by call.
+func aiTestService(t *testing.T, call aiCallFunc) *Service {
+	t.Helper()
 	s := NewService(nil, Config{CacheDir: t.TempDir(), AIDir: t.TempDir()})
-	fake := &fakeAI{}
-	s.ai.call = fake.call
+	s.ai.call = call
 	on, key := true, "KEY"
 	var in SettingsInput
 	in.AI = &struct {
@@ -192,28 +306,35 @@ func TestServeAITranslatesTheSource(t *testing.T) {
 	if _, err := s.UpdateSettings(in); err != nil {
 		t.Fatal(err)
 	}
+	return s
+}
 
-	// An embedded track already on disk is the source
-	hash := strings.Repeat("ab", 20)
-	var cues []liveCue
-	for i := 0; i < 30; i++ {
-		cues = append(cues, liveCue{start: float64(i * 4), end: float64(i*4 + 3), text: fmt.Sprintf("Line %d", i)})
-	}
-	ref := hash + "|1|2"
-	if err := s.files.write(SourceEmbedded, SourceEmbedded+"|"+ref, ".vtt", renderVTT(cues, false)); err != nil {
+// embeddedSource stores vtt as an embedded track of a file and returns its subtitle id.
+func embeddedSource(t *testing.T, s *Service, vtt []byte) string {
+	t.Helper()
+	ref := strings.Repeat("ab", 20) + "|1|2"
+	if err := s.files.write(SourceEmbedded, SourceEmbedded+"|"+ref, ".vtt", vtt); err != nil {
 		t.Fatal(err)
 	}
-	id := aiID("tr", aiMeta{"movie", 5, 0, 0}, encodeID(SourceEmbedded, "en", ref))
+	return encodeID(SourceEmbedded, "en", ref)
+}
+
+func TestServeAITranslatesTheSource(t *testing.T) {
+	fastAI(t)
+	fake := &fakeAI{}
+	s := aiTestService(t, fake.call(t))
+	cues := numberedCues(30, 4)
+	src := embeddedSource(t, s, renderVTT(cues, false))
+	id := aiID("tr", aiMeta{"movie", 5, 0, 0}, src)
 
 	a, err := s.FileFor(context.Background(), id, 0)
-	if err != nil || !strings.Contains(string(a.VTT), "TR Line 0") {
+	if err != nil || !strings.Contains(string(a.VTT), wantTr("Line 0 is here")) {
 		t.Fatalf("first answer %v:\n%s", err, a.VTT)
 	}
-	j := s.ai.jobs[encodeID(SourceEmbedded, "en", ref)+"|tr"]
-	waitIdle(t, j)
+	waitSettled(t, s.ai.jobs[src+"|tr"])
 	a, err = s.FileFor(context.Background(), id, 0)
 	body := string(a.VTT)
-	if err != nil || a.Partial || strings.Contains(body, AINote) || strings.Count(body, "TR Line") != 30 {
+	if err != nil || a.Partial || strings.Contains(body, AINote) || strings.Count(body, "çev Line") != 30 {
 		t.Fatalf("final answer partial=%v %v:\n%s", a.Partial, err, body)
 	}
 }
@@ -253,55 +374,25 @@ func TestPickAISourceAvoidsOpenSubtitles(t *testing.T) {
 	}
 }
 
-func TestAIAnswerRangesAreSplit(t *testing.T) {
-	batch := []string{"Why is no one else\nin the Brigade", "taking today seriously?!", "Well..."}
-	got := parseAIAnswer("1-2: Neden Tugay'da kimse <br> bugünü ciddiye almıyor?!\n3: Şey...", batch)
-	if got[1] != "Neden Tugay'da kimse" || got[2] != "bugünü ciddiye almıyor?!" || got[3] != "Şey..." {
-		t.Fatalf("parsed %v", got)
-	}
-	got = parseAIAnswer("1-3: Yani... Bugün...", []string{"Well...", "I mean...", "Today is..."})
-	if got[1] != "Yani..." || got[2] != "Bugün..." || got[3] != "" {
-		t.Fatalf("parsed %v", got)
-	}
-	// Fewer words than lines: the last line shows nothing
-	if parts := splitAcross("Evet", []string{"Yes", "sir"}); parts[0] != "Evet" || parts[1] != "" {
-		t.Fatalf("parts %q", parts)
-	}
-}
-
-func TestAIAsksOnlyForSkippedLines(t *testing.T) {
-	var mu sync.Mutex
-	var asked []int
-	tr := newAITranslator(nil, t.TempDir())
-	tr.call = func(_ context.Context, _, _, user string) (string, aiTokens, error) {
-		var out []string
-		n := 0
-		for _, line := range strings.Split(user, "\n") {
-			if m := aiAnswerLine.FindStringSubmatch(line); m != nil {
-				n++
-				if m[3] != "line 3" || len(asked) > 0 { // the first answer skips line 3
-					out = append(out, m[1]+": TR "+m[3])
-				}
-			}
+func TestPickAISourcePrefersTheFilesOwnTiming(t *testing.T) {
+	s := NewService(nil, Config{CacheDir: t.TempDir(), AIDir: t.TempDir()})
+	hash := strings.Repeat("ef", 20)
+	timed := Sub{ID: wrapSyncID(encodeID(SourceSubDL, "en", "1"), hash, 1), Source: SourceSubDL, Language: "en", Synced: true}
+	untimed := Sub{ID: wrapSyncID(encodeID(SourceSubDL, "en", "2"), hash, 1), Source: SourceSubDL, Language: "en"}
+	live := Sub{ID: encodeID(SourceEmbedded, "en", hash+"|1|3"), Source: SourceEmbedded, Language: "en", Synced: true, Live: true, HI: true}
+	track := Sub{ID: encodeID(SourceEmbedded, "en", hash+"|1|2"), Source: SourceEmbedded, Language: "en", Synced: true, HI: true}
+	for _, c := range []struct {
+		list []Sub
+		want string
+	}{
+		{[]Sub{untimed, timed, live, track}, track.ID}, // the file's SDH track beats a regular provider subtitle
+		{[]Sub{untimed, timed, live}, live.ID},
+		{[]Sub{untimed, timed}, timed.ID},
+		{[]Sub{untimed}, untimed.ID},
+	} {
+		if got := s.pickAISource(c.list, "tr"); got == nil || got.ID != c.want {
+			t.Fatalf("picked %+v, want %s", got, c.want)
 		}
-		mu.Lock()
-		asked = append(asked, n)
-		mu.Unlock()
-		return strings.Join(out, "\n"), aiTokens{}, nil
-	}
-	lang, _ := aiLanguage("tr")
-	j := tr.job("k|tr", lang, func() string { return "" })
-	var cues []liveCue
-	for i := 0; i < 12; i++ {
-		cues = append(cues, liveCue{start: float64(i), end: float64(i) + 0.5, text: fmt.Sprintf("line %d", i)})
-	}
-	j.feed(cues)
-	batch := []string{"line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8", "line 9"}
-	tr.translate(j, "key", batch)
-	mu.Lock()
-	defer mu.Unlock()
-	if fmt.Sprint(asked) != "[10 1]" || j.done["line 3"] != "TR line 3" || j.done["line 9"] != "TR line 9" {
-		t.Fatalf("asked %v, line 3 %q", asked, j.done["line 3"])
 	}
 }
 

@@ -18,6 +18,8 @@ type tsProbeStream struct {
 	Width         int               `json:"width"`
 	Height        int               `json:"height"`
 	ColorTransfer string            `json:"color_transfer"`
+	AvgFrameRate  string            `json:"avg_frame_rate"`
+	RFrameRate    string            `json:"r_frame_rate"`
 	Channels      int               `json:"channels"`
 	ChannelLayout string            `json:"channel_layout"`
 	Tags          map[string]string `json:"tags"`
@@ -192,6 +194,23 @@ func (p *tsProbe) videoPlan(hevcOK bool) tsVideoPlan {
 
 // copiesVideo reports whether the play stream copies the video (it then starts on a keyframe).
 func (p *tsProbe) copiesVideo(hevcOK bool) bool { return p.videoPlan(hevcOK).copy }
+
+// frameDuration is one frame of the video in seconds (avg_frame_rate, else r_frame_rate), 0 when unknown.
+func (p *tsProbe) frameDuration() float64 {
+	v := p.video()
+	if v == nil {
+		return 0
+	}
+	for _, r := range []string{v.AvgFrameRate, v.RFrameRate} {
+		a, b, ok := strings.Cut(r, "/")
+		n, err1 := strconv.ParseFloat(a, 64)
+		d, err2 := strconv.ParseFloat(b, 64)
+		if ok && err1 == nil && err2 == nil && n > 0 && d > 0 && n/d >= 5 && n/d <= 240 {
+			return d / n
+		}
+	}
+	return 0
+}
 
 // hdrTransfer returns the PQ / HLG transfer of an HDR stream, "" for SDR.
 func (v *tsProbeStream) hdrTransfer() string {

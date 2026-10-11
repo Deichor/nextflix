@@ -127,17 +127,31 @@ func TestSplitSyntheticAlignment(t *testing.T) {
 		return out
 	}
 	const frame = 1.0 / 24
-	srcVideo, srcAudio := allPTS(t, ctx, src, "v:0"), allPTS(t, ctx, src, "a:0")
+	// File time is pts - the format's start_time (E-AC-3 priming starts this file at -5 ms)
+	_, _, srcStart := tlStreamStarts(t, src)
+	fileTimes := func(stream string) []float64 {
+		pts := allPTS(t, ctx, src, stream)
+		for i := range pts {
+			pts[i] -= srcStart
+		}
+		return pts
+	}
+	srcVideo, srcAudio := fileTimes("v:0"), fileTimes("a:0")
 	for _, start := range []float64{0, 7.3, 13.9} {
 		v := firstPTS(t, ctx, run(start, tsTrackVideo), "v:0")
 		a := firstPTS(t, ctx, run(start, tsTrackAudio), "a:0")
 		t.Logf("t=%v: video starts %.3f, audio %.3f", start, v, a)
+		if start == 0 {
+			// Known: from the file's start the muxer moves the video by its B-frame delay (its
+			// first decode time is before 0), so the keyframe at 0.005 starts at 0.088
+			if !hasPTS(srcAudio, a) || v < srcVideo[0] || v > srcVideo[0]+2*frame+0.002 {
+				t.Errorf("t=0: video %.3f / audio %.3f", v, a)
+			}
+			continue
+		}
 		// Both keep the source's own timestamps (the A/V relation of the file)
 		if !hasPTS(srcVideo, v) || !hasPTS(srcAudio, a) {
-			t.Errorf("t=%v: %.3f / %.3f are not source timestamps", start, v, a)
-		}
-		if start == 0 {
-			continue
+			t.Errorf("t=%v: %.3f / %.3f are not file times", start, v, a)
 		}
 		// Copied video starts on the keyframe at or before t (2 s GOP), on the file's timeline
 		if v > start+frame || v < start-2.1 {
