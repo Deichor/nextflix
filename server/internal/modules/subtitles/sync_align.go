@@ -29,7 +29,7 @@ const (
 	syncMergeGap     = 0.35 // window offsets closer than this count as one (extra windows)
 	syncChangeCost   = 0.5  // matched lines per second an offset change moves, on top of the penalty
 	syncLagStep      = 10   // frames: steps of the speech lag tried
-	syncMaxLag       = 40   // frames detected speech may start after the file's own subtitle lines
+	syncMaxLag       = 40   // frames the own track's lines may lead the speech (0-0.35 s measured by file)
 )
 
 // syncScales are subtitle time multipliers: same rate, then 25 <-> 23.976 / 24 conversions.

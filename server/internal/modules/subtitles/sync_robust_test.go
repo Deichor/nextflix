@@ -2,8 +2,11 @@ package subtitles
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +66,49 @@ func TestAvatarLiveNoFalseSegments(t *testing.T) {
 		last := steps[len(steps)-1]
 		if fitted < len(steps)-2 || withRead && math.Abs(last.served.Segments[0].Offset) > 0.05 {
 			t.Fatalf("read=%v: %d of %d steps fitted, last %s", withRead, fitted, len(steps), describeFit(last.served))
+		}
+	}
+}
+
+// Avatar: Seven Havens S01E02 (real data): from the played audio alone the subtitle lands
+// 0.25-0.3 s late against the file's own track, whose lines lead the speech (the detector is not
+// late: its onsets match the acoustic ones within 0.02 s on 9 measured files; the lead is the
+// track's style, 0-0.35 s by file). Two own-track windows, as readEarly reads them, carry that
+// style over to every live window through the fitted lag.
+func TestAvatarOwnWindowsAnchorTheSpeechLag(t *testing.T) {
+	f, sub := loadFixture(t, "avatar_s01e02.json")
+	two := &snapFile{name: f.name, live: f.live, ref: syncRef{Probe: f.ref.Probe, Skipped: true}}
+	for _, w := range f.ref.Windows[:2] {
+		two.ref.Windows = append(two.ref.Windows, w)
+	}
+	only := replayLive(t, &snapFile{name: f.name, live: f.live, ref: syncRef{Probe: f.ref.Probe, Skipped: true}}, sub, false, nil)
+	anchored := replayLive(t, two, sub, true, nil)
+	lastOnly, last := only[len(only)-1].served, anchored[len(anchored)-1].served
+	if math.Abs(lastOnly.Segments[0].Offset) < 0.2 {
+		t.Fatalf("audio only: %s (expected the speech lag)", describeFit(lastOnly))
+	}
+	if len(last.Segments) != 1 || math.Abs(last.Segments[0].Offset) > 0.05 || last.Lag < 0.2 {
+		t.Fatalf("with 2 own windows: %s lag %.2f", describeFit(last), last.Lag)
+	}
+}
+
+// The speech detector on real audio (the tap's frame energies of a stereo downmix and of a
+// centre channel): its onsets lie at the own track's line starts, not later (measured on 9
+// files: at the acoustic onsets within 0.02 s).
+func TestVadOnsetsOnRealAudio(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "sync", "vad_onsets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fx []vadFixture
+	if err := json.Unmarshal(b, &fx); err != nil || len(fx) != 2 {
+		t.Fatalf("fixture: %v", err)
+	}
+	for _, f := range fx {
+		own := f.Own.window()
+		ds, matched := onsetBias(classifyEnergies(f.Energies), vadWin{start: own.Start, own: own})
+		if m := median(ds); matched < 0.35 || m < -0.05 || m > 0.15 {
+			t.Fatalf("%s: onsets at %.0f%% of the lines, median %+.2f s", f.Name, 100*matched, m)
 		}
 	}
 }

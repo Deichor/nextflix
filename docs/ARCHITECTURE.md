@@ -1215,7 +1215,15 @@ that change at splits), simplified:
   Havens S01E02 (WEB-DL subtitle on the WEB-DL file, one true offset): the played audio's speech starts 0.23 s after
   the lines of the file's own track, a step the 0.4 s rule forbids, so one live window went +11 to +14 s to get from
   one to the other and minutes of cues were served 10-14 s off. With windows of both kinds (own track and speech) the
-  speech lag is fitted as well (0 to 0.4 s in 0.1 s steps; measured 0 to 0.4 s by file), so they agree. A change is
+  speech lag is fitted as well (0 to 0.4 s in 0.1 s steps), so they agree. That lag is the own track's style, not
+  the detector's: on 23 audio windows of 9 files (read like the window reads, against their own tracks; stereo
+  downmixes and centre channels) the detected onsets lie at the acoustic ones (the first frame 8 dB above the quiet
+  before it) within 0.02 s, while the tracks' lines lead the speech by +0.03 to +0.12 s on most files and +0.35 s on
+  Gilmore Girls MONOLITH and The Mentalist S02E09. So speech alone times lines to the speech; a band-pass
+  (300-3400 Hz) and onset backtracking did not help (mean |lag| 0.14 s either way), nor did a constant correction
+  (validated leaving each file out: 0.16 s), so neither is used. The own track's style comes in through the fitted
+  lag wherever own-track windows exist: read windows, or the 2 early windows of a file above the byte budget (see
+  `readEarly`; Gilmore MONOLITH replayed: 0.53 s late from the audio only, 0.12 s with 2 own windows). A change is
   placed in the subtitle pause that fits both neighbouring windows best (the longest among equals). Up to 2 rounds
   add windows between neighbours with different offsets more than 150 s apart (12 windows at most). A result fits
   when its score beats chance (the mean over all offsets) by 0.15 and the best offset away from the chosen ones by
