@@ -388,8 +388,11 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			return true
 		}
 	}
-	if !m.fits() {
-		// Did not fit: the best fitting other subtitle of the language, when one fits
+	provisional := !ref.Full && y.svc.cfg.LiveTiming && !complete
+	if !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced)) {
+		// Did not fit: the best fitting other subtitle of the language, when one fits. While
+		// provisional, a lined up subtitle stays served as it is (a few minutes cannot tell
+		// whether another release's offset holds for the whole file).
 		for _, alt := range y.alternatives(hash, index, inner) {
 			altBase, err := y.svc.File(ctx, alt)
 			if err != nil {
@@ -439,7 +442,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			}
 		}
 	}
-	m.Live, m.LiveWindows, m.LiveSeconds = !ref.Full && y.svc.cfg.LiveTiming && !complete, len(live), liveSecs
+	m.Live, m.LiveWindows, m.LiveSeconds = provisional, len(live), liveSecs
 	y.store(key, m, vtt)
 	if read || fitChanged(prev, m) {
 		logSync(inner, hash, index, m, time.Since(start))

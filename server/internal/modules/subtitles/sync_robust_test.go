@@ -371,3 +371,49 @@ func TestKeepStableFit(t *testing.T) {
 		t.Fatal("kept a provisional fit of a covered file")
 	}
 }
+
+// The Mentalist S02E16 (real data): after a stall the player moved to another release (ViSUM
+// AMZN WEB-DL, above the read budget) 37 minutes in. The Amazon subtitle sits on this file
+// within 0.3 s (by the file's own English track), but on the first windows heard its peak
+// stayed under the bar, and it was replaced mid-scene by an HDTV pack subtitle timed -5.3 s
+// from those minutes (2-5 s off before minute 25). While provisional it stays served as it is.
+func TestLiveKeepsALinedUpSubtitle(t *testing.T) {
+	f, sub, alt := loadFixtureAlt(t, "mentalist_s02e16.json")
+	svc := NewService(nil, Config{CacheDir: t.TempDir(), TorrServerURL: "http://torrserver", LiveTiming: true})
+	y := svc.sync
+	y.onGrow = func(*liveFile) {}
+	ref := syncRef{Probe: f.ref.Probe, Windows: f.ref.Windows, Skipped: true}
+	y.probe = func(context.Context, string) (mediaProbe, error) { return ref.Probe, nil }
+	inner := cacheProviderSub(t, svc, "12752767|amzn|2|16|1", sub)
+	other := cacheProviderSub(t, svc, "301213|hdtv|2|16|1", alt)
+	y.listed([]Sub{{ID: inner, Source: SourceTurkceAltyazi, Language: "tr"},
+		{ID: other, Source: SourceTurkceAltyazi, Language: "tr"}}, map[string]bool{}, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	ctx := context.Background()
+	base, _ := svc.File(ctx, inner)
+	lf := y.liveFile(syncHash, 1)
+	lf.setDuration(ref.Probe.Duration)
+	decided := 0
+	for i := range f.live {
+		lf.mu.Lock()
+		lf.done = map[int]liveWin{}
+		for _, w := range f.live[:i+1] {
+			lf.done[int(math.Round(w.Start/syncWindowLen))] = liveWin{Bits: packBits(w.Speech), Frames: len(w.Speech)}
+		}
+		lf.mu.Unlock()
+		if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
+			continue
+		}
+		decided++
+		m := y.meta(key)
+		if m.State == syncStateReplaced {
+			t.Fatalf("%d live windows: replaced by the other subtitle (%s)", i+1, describeFit(m.Fit))
+		}
+		if m.fits() && (len(m.Fit.Segments) != 1 || math.Abs(m.Fit.Segments[0].Offset) > 0.5) {
+			t.Fatalf("%d live windows: %s", i+1, describeFit(m.Fit))
+		}
+	}
+	if decided < 2 {
+		t.Fatalf("decided on %d steps", decided)
+	}
+}

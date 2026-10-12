@@ -1282,7 +1282,12 @@ that change at splits), simplified:
   Cues past the covered range take the offset of the nearest covered segment. Final results answer `synced` (or
   `unchanged`). One that does not fit is replaced by the best fitting other subtitle of its language listed for the
   file (up to 3 tried, OpenSubtitles skipped while its quota is used up; `replaced`, re-checked on every re-fit while
-  provisional), else served as it is (`poor`). A failed read is not tried again for 10 minutes (`failed`), but live
+  provisional), else served as it is (`poor`). While provisional, a subtitle that missed only the peak bar but
+  already sits at its best offset (one offset within 0.5 s, gain over chance met) is not replaced, only served as it
+  is: a few minutes cannot tell whether another release's offset holds for the whole file. Seen on The Mentalist
+  S02E16 (a stall moved playback to a ViSUM AMZN WEB-DL 37 minutes in): the Amazon subtitle (within 0.3 s by the
+  file's own English track) was replaced after 3 live windows by an HDTV pack subtitle timed -5.3 s from them,
+  which was 2-5 s off before minute 25 and swapped the lines mid-scene. A failed read is not tried again for 10 minutes (`failed`), but live
   windows still time it (the answer is `pending` while the file plays). Every answer carries `X-Subtitle-Sync`
   (`original` for subtitles that are never timed); see [API.md](API.md#subtitles-modulessubtitles).
 - Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox

@@ -1141,6 +1141,7 @@ type syncFixture struct {
 	Subs     []fixtureWindow `json:"subs"`
 	Live     []fixtureLive   `json:"live"`
 	Sub      [][2]float64    `json:"sub"`
+	Alt      [][2]float64    `json:"alt,omitempty"` // another subtitle of the language
 }
 
 // fixtureWindow is a read window as runs of frames [from, to) where a cue shows; the third
@@ -1193,6 +1194,11 @@ func (fw fixtureWindow) window() refWindow {
 }
 
 func loadFixture(t *testing.T, name string) (*snapFile, []span) {
+	f, sub, _ := loadFixtureAlt(t, name)
+	return f, sub
+}
+
+func loadFixtureAlt(t *testing.T, name string) (*snapFile, []span, []span) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "sync", name))
 	if err != nil {
@@ -1209,9 +1215,12 @@ func loadFixture(t *testing.T, name string) (*snapFile, []span) {
 	for _, l := range fx.Live {
 		f.live = append(f.live, refWindow{Start: l.Start, Kind: "live", Speech: unpackBits(l.Bits, l.N)})
 	}
-	var sub []span
-	for _, c := range fx.Sub {
-		sub = append(sub, span{c[0], c[1]})
+	spans := func(cs [][2]float64) []span {
+		var out []span
+		for _, c := range cs {
+			out = append(out, span{c[0], c[1]})
+		}
+		return out
 	}
-	return f, sub
+	return f, spans(fx.Sub), spans(fx.Alt)
 }

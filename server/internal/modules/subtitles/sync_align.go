@@ -136,6 +136,18 @@ func (f syncFit) good() bool {
 	return f.Score-f.Base >= syncMinGain && f.Peak >= math.Max(syncMinPeak, f.minPeak)
 }
 
+// linedUp reports a fit that missed only the peak bar while the subtitle as it is already sits
+// at its best offset and well above chance: an ambiguous peak there is loose line timing, not
+// another cut. Seen on The Mentalist S02E16 (ViSUM AMZN WEB-DL, 3 live windows): the Amazon
+// subtitle (within 0.3 s by the file's own track) was replaced by an HDTV one timed -5.3 s from
+// those minutes, 2-5 s off before minute 25.
+func (f syncFit) linedUp() bool {
+	return f.Score-f.Base >= syncMinGain && math.Abs(f.Scale-1) < 1e-6 && len(f.Segments) == 1 &&
+		math.Abs(f.Segments[0].Offset) < syncLinedUpOffset
+}
+
+const syncLinedUpOffset = 0.5
+
 // changes reports whether applying the fit moves anything noticeably.
 func (f syncFit) changes() bool {
 	if math.Abs(f.Scale-1) > 1e-6 || len(f.Segments) > 1 {
