@@ -307,6 +307,39 @@ func TestRankedSearchTurkish(t *testing.T) {
 	}
 }
 
+// A Turkish search typed in English ranks a foreign film by its English title, which only the
+// English answer has, above obscure titles that match literally
+func TestRankedSearchTurkishEnglishTitle(t *testing.T) {
+	lounge := fr{"movie", 998022, "Öğretmenler Odası", "Das Lehrerzimmer", 7, 770, "2023-05-04", []int{18}}
+	loungeEN := lounge
+	loungeEN.title = "The Teachers' Lounge"
+	obscure := fr{"movie", 7001, "The Teacher's Lounge", "", 0.6, 2, "2014-01-01", []int{35}}
+	afterSchool := fr{"movie", 7002, "After School in the Teacher's Lounge", "", 1, 3, "2010-01-01", []int{18}}
+	answers := map[string]map[string][]fr{
+		"tr": {"teachers lounge": {obscure, afterSchool, lounge}},
+		"en": {"teachers lounge": {obscure, afterSchool, loungeEN}},
+	}
+	s, tm, _ := newSearchService(t, answers)
+	ix := NewTitleIndex(append(fixtureTitles(), IndexTitle{kindMovie, 998022, 7, "Das Lehrerzimmer"}))
+	s.SetSearchIndex(ix)
+
+	res, err := s.RankedSearch(tm.WithLang("tr"), "teachers lounge", Filter{Type: "all"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(res); len(got) == 0 || got[0] != lounge.id {
+		t.Fatalf("teachers lounge: %v, want %d first", got, lounge.id)
+	}
+	if res.Results[0].Title != "Öğretmenler Odası" {
+		t.Errorf("shown title %q, want the Turkish one", res.Results[0].Title)
+	}
+	// The English title is learned: Turkish completions offer it too
+	ix.rebuildAliases()
+	if hits := ix.Suggest("teachers lou", "tr", 5); len(hits) == 0 || hits[0].ID != lounge.id {
+		t.Errorf("tr suggest: %+v", hits)
+	}
+}
+
 func TestSearchPoolCachedAndPeopleDropped(t *testing.T) {
 	answers := map[string]map[string][]fr{"en": {"dune": {dune21, {mt: "person", id: 9, title: "Dune Person"}}}}
 	s, tm, calls := newSearchService(t, answers)

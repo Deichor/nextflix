@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"nextflix/internal/platform/tmdb"
 	"nextflix/internal/platform/upstream"
 )
 
@@ -515,8 +516,9 @@ func (ix *TitleIndex) KnownWords(q string) bool {
 }
 
 // Suggest completes a partly typed query: titles starting with it, titles with a word
-// starting with it, then typo-tolerant prefix matches. Names in lang are preferred; one
-// suggestion per title and per display text.
+// starting with it, then typo-tolerant prefix matches. Names in lang are preferred, English
+// names are offered in every language (titles are often typed in English); one suggestion per
+// title and per display text.
 func (ix *TitleIndex) Suggest(q, lang string, limit int) []Hit {
 	d := ix.data.Load()
 	if d == nil || limit <= 0 {
@@ -528,7 +530,17 @@ func (ix *TitleIndex) Suggest(q, lang string, limit int) []Hit {
 		return nil
 	}
 	var hits []Hit
-	inLang := func(n *indexName) bool { return n.lang == "" || n.lang == lang }
+	inLang := func(n *indexName) bool { return n.lang == "" || n.lang == lang || n.lang == tmdb.LangEN }
+	// An English name in another language ranks just below the localized one
+	langAdj := func(n *indexName) float64 {
+		switch {
+		case n.lang == "":
+			return 0
+		case n.lang == lang:
+			return 0.05
+		}
+		return -0.05
+	}
 	// 1. names starting with the query (article ignored)
 	lo := sort.Search(len(d.sorted), func(i int) bool { return d.names[d.sorted[i]].bare >= qb })
 	for i := lo; i < len(d.sorted) && i-lo < 20_000; i++ {
@@ -538,11 +550,7 @@ func (ix *TitleIndex) Suggest(q, lang string, limit int) []Hit {
 			break
 		}
 		if inLang(n) {
-			sim := 1.0
-			if n.lang == lang && lang != "" {
-				sim += 0.05
-			}
-			hits = append(hits, d.hit(ni, sim))
+			hits = append(hits, d.hit(ni, 1+langAdj(n)))
 		}
 	}
 	// 2. a later word starts with the query, 3. fuzzy prefix
@@ -554,7 +562,7 @@ func (ix *TitleIndex) Suggest(q, lang string, limit int) []Hit {
 				continue
 			}
 			if strings.Contains(" "+n.bare, " "+qb) {
-				hits = append(hits, d.hit(ni, 0.85))
+				hits = append(hits, d.hit(ni, 0.85+min(langAdj(n), 0)))
 				continue
 			}
 			if len(qr) < 4 {
@@ -565,7 +573,7 @@ func (ix *TitleIndex) Suggest(q, lang string, limit int) []Hit {
 			cut := min(len(nr), len(qr)+1)
 			prefix := indexName{bare: string(nr[:cut]), phon: phonHash(string(nr[:cut]))}
 			if sim := nameSim(qb, qr, qphon, &prefix); sim >= 0.8 {
-				hits = append(hits, d.hit(ni, 0.6*sim+0.1))
+				hits = append(hits, d.hit(ni, 0.6*sim+0.1+min(langAdj(n), 0)))
 			}
 		}
 	}

@@ -244,50 +244,58 @@ func (s *Service) browsePopular(tm *tmdb.Client, f Filter, page int) (*DiscoverP
 
 type searchEntry struct {
 	results []tmdb.SearchResult
+	en      map[string]string // resultKey -> English title (localized searches only)
 	expires time.Time
 }
 
 // searchPool returns the first n TMDB multi-search pages of query (people and titles without
 // artwork dropped), in TMDB's order and cached for 15 minutes per language, so changing
 // filters does not search again. The pages are asked at once; only page 1 must answer.
-func (s *Service) searchPool(tm *tmdb.Client, query string, n int) ([]tmdb.SearchResult, error) {
+// A localized search reads the English pages too: a query typed in English must match the
+// English titles ("teachers lounge" -> Öğretmenler Odası).
+func (s *Service) searchPool(tm *tmdb.Client, query string, n int) (searchEntry, error) {
 	key := tm.Lang() + "|" + strconv.Itoa(n) + "|" + strings.ToLower(query)
 	now := time.Now()
 	s.searchMu.Lock()
 	if e, ok := s.searches[key]; ok && now.Before(e.expires) {
 		s.searchMu.Unlock()
-		return e.results, nil
+		return e, nil
 	}
 	s.searchMu.Unlock()
 
-	pages := make([][]tmdb.SearchResult, n)
-	errs := make([]error, n)
+	clients := []*tmdb.Client{tm}
+	if tm.Lang() != tmdb.LangEN {
+		clients = append(clients, tm.WithLang(tmdb.LangEN))
+	}
+	pages := make([][]tmdb.SearchResult, len(clients)*n)
+	errs := make([]error, len(pages))
 	var wg sync.WaitGroup
-	for p := 1; p <= n; p++ {
+	for i := range pages {
 		wg.Add(1)
-		go func(p int) {
+		go func(i int) {
 			defer wg.Done()
-			res, err := tm.SearchMulti(query, p)
+			c, p := clients[i/n], i%n+1
+			res, err := c.SearchMulti(query, p)
 			if err != nil {
-				errs[p-1] = err
-				if p > 1 {
-					log.Printf("catalog: search %q page %d: %v", query, p, err)
+				errs[i] = err
+				if i > 0 {
+					log.Printf("catalog: search %q page %d (%s): %v", query, p, c.Lang(), err)
 				}
 				return
 			}
-			pages[p-1] = res.Results
-		}(p)
+			pages[i] = res.Results
+		}(i)
 	}
 	wg.Wait()
 	if errs[0] != nil {
-		return nil, errs[0]
+		return searchEntry{}, errs[0]
 	}
 
 	seen := map[string]bool{}
 	var out []tmdb.SearchResult
-	for _, list := range pages {
+	for _, list := range pages[:n] {
 		for _, r := range list {
-			k := r.MediaType + ":" + strconv.Itoa(r.ID)
+			k := resultKey(r.MediaType, r.ID)
 			if seen[k] || !usable(r) {
 				continue
 			}
@@ -296,14 +304,28 @@ func (s *Service) searchPool(tm *tmdb.Client, query string, n int) ([]tmdb.Searc
 		}
 	}
 	s.learnTitles(tm.Lang(), out)
+	e := searchEntry{results: out, expires: now.Add(searchCacheTTL)}
+	if len(clients) > 1 {
+		var en []tmdb.SearchResult
+		e.en = map[string]string{}
+		for _, list := range pages[n:] {
+			for _, r := range list {
+				if usable(r) {
+					en = append(en, r)
+					e.en[resultKey(r.MediaType, r.ID)] = r.Title
+				}
+			}
+		}
+		s.learnTitles(tmdb.LangEN, en)
+	}
 
 	s.searchMu.Lock()
 	if len(s.searches) >= searchCacheMax {
 		s.searches = map[string]searchEntry{}
 	}
-	s.searches[key] = searchEntry{results: out, expires: now.Add(searchCacheTTL)}
+	s.searches[key] = e
 	s.searchMu.Unlock()
-	return out, nil
+	return e, nil
 }
 
 // GET /api/catalog/discover?type=all|movie|tv&genres=16,878&anime=1&q=&page=

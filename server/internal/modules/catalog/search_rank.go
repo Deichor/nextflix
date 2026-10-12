@@ -192,7 +192,7 @@ func (s *Service) RankedSearch(tm *tmdb.Client, raw string, f Filter, profileID 
 		break
 	}
 	type poolAnswer struct {
-		pool []tmdb.SearchResult
+		pool searchEntry
 		err  error
 	}
 	var corrCh chan poolAnswer
@@ -212,8 +212,8 @@ func (s *Service) RankedSearch(tm *tmdb.Client, raw string, f Filter, profileID 
 	taste := s.taste.affinity(profileID)
 
 	pool, err := s.searchPool(tm, q.raw, pages)
-	in := newRankInput(q, taste, s.index.aliasesOf)
-	ranked := rankPool(in, pool)
+	in := newRankInput(q, taste, s.aliasesWith(pool.en))
+	ranked := rankPool(in, pool.results)
 	// A match only counts when the title has some audience: an obscure film literally named
 	// "Interstelar" must not hide Interstellar
 	best := 0.0
@@ -230,8 +230,8 @@ func (s *Service) RankedSearch(tm *tmdb.Client, raw string, f Filter, profileID 
 		if ans.err != nil {
 			log.Printf("catalog: search correction %q: %v", correction.Title, ans.err)
 		} else {
-			cin := newRankInput(newQuery(correction.Title), taste, s.index.aliasesOf)
-			corr := rankPool(cin, ans.pool)
+			cin := newRankInput(newQuery(correction.Title), taste, s.aliasesWith(ans.pool.en))
+			corr := rankPool(cin, ans.pool.results)
 			corr = append(corr, s.indexExtras(tm, cin, corr, correction)...)
 			for _, r := range corr {
 				if r.text >= matchPrefixWord {
@@ -323,6 +323,17 @@ func titleResult(tm *tmdb.Client, mediaType string, id int) *tmdb.SearchResult {
 	r := tmdb.MovieResult(d.Movie)
 	r.GenreIDs = genreIDs(d.Genres)
 	return &r
+}
+
+// aliasesWith returns the learned localized titles of a title plus its English title in en.
+func (s *Service) aliasesWith(en map[string]string) func(mediaType string, id int) []string {
+	return func(mediaType string, id int) []string {
+		a := s.index.aliasesOf(mediaType, id)
+		if t, ok := en[resultKey(mediaType, id)]; ok {
+			a = append(a, t)
+		}
+		return a
+	}
 }
 
 // aliasesOf returns the localized titles learned for a title.
