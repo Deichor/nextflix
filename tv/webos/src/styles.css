@@ -1172,6 +1172,22 @@ p {
   color: var(--dim);
 }
 
+.search-field-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.search-field-input::placeholder {
+  color: var(--dim);
+}
+
 .search-results {
   position: absolute;
   top: 0;

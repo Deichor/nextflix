@@ -314,6 +314,9 @@ function onMouseOver(e: MouseEvent) {
   const target = e.target as Element | null;
   const el = target && target.closest ? (target.closest('[data-nav]') as HTMLElement | null) : null;
   if (!el || el === document.activeElement || !activeLayer().contains(el)) return;
+  // A focused text field (voice typing) keeps the focus until a click
+  const cur = document.activeElement;
+  if (cur && cur.tagName === 'INPUT') return;
   focusElement(el, { scroll: false });
 }
 

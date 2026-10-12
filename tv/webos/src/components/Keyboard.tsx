@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowBigUp, Delete } from 'lucide-react';
+import { ArrowBigUp, Delete, Mic } from 'lucide-react';
 import { useI18n, type Locale } from '../lib/i18n';
 import { pushKeyHandler } from '../nav/spatial';
 import { KEY } from '../lib/webos';
@@ -13,6 +13,8 @@ interface KeyboardProps {
   onChange: (v: string) => void;
   /** max characters */
   max?: number;
+  /** shows a microphone key that starts voice typing */
+  onVoice?: () => void;
 }
 
 // Rows of equal length where possible, so Up / Down keep the column; the digits get their own narrower row
@@ -34,7 +36,7 @@ function upper(ch: string, locale: Locale): string {
 const autoShift = (v: string) => v === '' || v.charAt(v.length - 1) === ' ';
 
 // On-screen keyboard for the remote. A PC keyboard (or the remote's number keys) types too.
-export default function Keyboard({ layout, value, onChange, max = 120 }: KeyboardProps) {
+export default function Keyboard({ layout, value, onChange, max = 120, onVoice }: KeyboardProps) {
   const { t, locale } = useI18n();
   const valueRef = useRef(value);
   valueRef.current = value;
@@ -57,6 +59,9 @@ export default function Keyboard({ layout, value, onChange, max = 120 }: Keyboar
 
   useEffect(() => pushKeyHandler(e => {
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    // A real text field (voice typing) takes its own keys
+    const el = document.activeElement;
+    if (el && el.tagName === 'INPUT') return false;
     if (e.keyCode === KEY.BACKSPACE) {
       if (!valueRef.current) return false;
       set(valueRef.current.slice(0, -1));
@@ -98,6 +103,11 @@ export default function Keyboard({ layout, value, onChange, max = 120 }: Keyboar
         </div>
       ))}
       <div className="kbd-row">
+        {onVoice && (
+          <button type="button" className="kbd-key kbd-wide kbd-mic" data-nav data-nav-id="kbd-mic" onClick={onVoice} aria-label={t('keyboard.voice')}>
+            <Mic className="kbd-icon" />
+          </button>
+        )}
         {text && (
           <button
             type="button"

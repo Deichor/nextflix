@@ -15,7 +15,7 @@ import { useT } from '../lib/i18n';
 import { useQuery } from '../lib/useQuery';
 import { useEntry, useEntryState, useFocusRestore, useRouter } from '../nav/router';
 import { ensureVisible, focusById, focusElement, onFocusChange, pushKeyHandler } from '../nav/spatial';
-import { direction, type Direction } from '../lib/webos';
+import { KEY, direction, type Direction } from '../lib/webos';
 
 const TYPES: TypeFilter[] = ['all', 'movie', 'tv'];
 // Load the next browse page when focus is this close to the end of the grid
@@ -64,6 +64,8 @@ export default function SearchScreen() {
   const [didYouMean, setDidYouMean] = useEntryState('didYouMean', '');
   const [completions, setCompletions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [voice, setVoice] = useState(false);
+  const voiceRef = useRef<HTMLInputElement>(null);
   const moreRef = useRef(false);
   const entry = useEntry();
   const leftRef = useRef<HTMLDivElement>(null);
@@ -200,6 +202,29 @@ export default function SearchScreen() {
     });
   }, [entry]);
 
+  // Voice typing: a real text field opens the TV keyboard, and its mic (or the remote's mic button)
+  // dictates into the focused field. Enter or Back closes it.
+  useEffect(() => {
+    if (!voice) return;
+    const input = voiceRef.current;
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+    return pushKeyHandler(e => {
+      if (e.keyCode !== KEY.ENTER && e.keyCode !== KEY.BACK && e.keyCode !== KEY.ESC && e.key !== 'GoBack') return false;
+      if (voiceRef.current) voiceRef.current.blur();
+      return true;
+    });
+  }, [voice]);
+
+  const endVoice = () => {
+    // The window losing focus (the TV's voice overlay) keeps the field active
+    if (!voiceRef.current || document.activeElement === voiceRef.current) return;
+    setVoice(false);
+    if (!document.activeElement || document.activeElement === document.body) focusById('kbd-mic');
+  };
+
   // Fade under the left column: after every focus move (the scroll is set by then) and content change
   useEffect(() => onFocusChange(() => updateFade(scrollRef.current)), []);
   useLayoutEffect(() => {
@@ -232,12 +257,27 @@ export default function SearchScreen() {
       >
         <div className="search-field">
           <Search className="search-field-icon" />
-          {query ? <span>{query}</span> : <span className="placeholder">{t('nav.searchPlaceholder')}</span>}
-          <span className="caret" />
+          {voice ? (
+            <input
+              ref={voiceRef}
+              type="text"
+              className="search-field-input"
+              value={query}
+              maxLength={60}
+              placeholder={t('search.voiceHint')}
+              onChange={e => setQuery(e.target.value)}
+              onBlur={() => setTimeout(endVoice, 0)}
+            />
+          ) : (
+            <>
+              {query ? <span>{query}</span> : <span className="placeholder">{t('nav.searchPlaceholder')}</span>}
+              <span className="caret" />
+            </>
+          )}
         </div>
         <div className="search-left-scroll" ref={scrollRef} data-scroll-y="edge" data-scroll-pad="4.5">
           <div data-scroll-content>
-            <Keyboard layout="search" value={query} onChange={setQuery} max={60} />
+            <Keyboard layout="search" value={query} onChange={setQuery} max={60} onVoice={() => setVoice(true)} />
             {completions.length > 0 && (
               <div className="search-suggest">
                 {completions.map((s, i) => (
