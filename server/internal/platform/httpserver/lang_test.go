@@ -39,6 +39,39 @@ func TestLang(t *testing.T) {
 	}
 }
 
+func TestLangQueryFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		header, query, want string
+	}{
+		{"", "tr", "tr"},
+		{"", "tr-TR", "tr"},
+		{"en", "tr", "en"}, // header wins
+		{"tr", "en", "tr"},
+		{" ", "tr", "tr"}, // blank header: query
+		{"", "de", "en"},
+		{"", "", "en"},
+	}
+	for _, tc := range cases {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		path := "/"
+		if tc.query != "" {
+			path += "?x_lang=" + tc.query
+		}
+		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
+		if tc.header != "" {
+			c.Request.Header.Set("X-Lang", tc.header)
+		}
+		if got := Lang(c); got != tc.want {
+			t.Errorf("X-Lang %q, x_lang %q: got %q, want %q", tc.header, tc.query, got, tc.want)
+		}
+		if w.Header().Get("Vary") != "X-Lang" {
+			t.Errorf("X-Lang %q, x_lang %q: Vary = %q", tc.header, tc.query, w.Header().Get("Vary"))
+		}
+	}
+}
+
 func TestCORSAllowsXLang(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

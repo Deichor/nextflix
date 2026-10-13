@@ -13,6 +13,8 @@ const (
 	partialTTL  = 2 * time.Minute // the matcher was not ready for some seeds or TMDB's lists failed
 	fetchers    = 6
 	cacheMaxLen = 200
+	// Expired rows are answered this long while new ones are computed.
+	staleFor = 24 * time.Hour
 )
 
 type cached struct {
@@ -43,6 +45,7 @@ type cacheKey struct {
 
 type call struct {
 	done    chan struct{}
+	gen     uint64 // profile generation it started with
 	resp    *Response
 	err     error
 	partial bool
@@ -102,46 +105,87 @@ func (s *Service) Invalidate(profileID uint) {
 }
 
 // For returns the recommendation rows of a profile with titles in lang ("en" or "tr"),
-// cached for 30 minutes.
+// cached for 30 minutes. Expired rows (up to staleFor) are answered at once while new ones are
+// computed in the background; invalidated rows are gone, so a rating change waits for new rows.
 func (s *Service) For(profileID uint, lang string) (*Response, error) {
 	key := cacheKey{profileID, lang}
 	s.mu.Lock()
-	if c, ok := s.cache[key]; ok && s.now().Before(c.expires) {
-		s.mu.Unlock()
-		return c.resp, nil
+	if c, ok := s.cache[key]; ok {
+		now := s.now()
+		if now.Before(c.expires) {
+			s.mu.Unlock()
+			return c.resp, nil
+		}
+		if now.Before(c.expires.Add(staleFor)) {
+			if cl, ok := s.inflight[key]; !ok || cl.gen != s.gen[profileID] {
+				cl := s.startLocked(key)
+				go s.complete(key, cl, true)
+			}
+			s.mu.Unlock()
+			return c.resp, nil
+		}
 	}
 	s.mu.Unlock()
 	if err := s.checkProfile(profileID); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	if cl, ok := s.inflight[key]; ok {
+	// A computation started before an invalidation would answer with the old ratings
+	if cl, ok := s.inflight[key]; ok && cl.gen == s.gen[profileID] {
 		s.mu.Unlock()
 		<-cl.done
 		return cl.resp, cl.err
 	}
-	cl := &call{done: make(chan struct{})}
-	s.inflight[key] = cl
-	gen := s.gen[profileID]
+	cl := s.startLocked(key)
 	s.mu.Unlock()
-
-	cl.resp, cl.partial, cl.err = s.compute(profileID, lang)
-
-	s.mu.Lock()
-	delete(s.inflight, key)
-	if cl.err == nil && len(cl.resp.Rows) > 0 && s.gen[profileID] == gen {
-		if len(s.cache) >= cacheMaxLen {
-			s.cache = map[cacheKey]cached{}
-		}
-		ttl := cacheTTL
-		if cl.partial {
-			ttl = partialTTL
-		}
-		s.cache[key] = cached{resp: cl.resp, expires: s.now().Add(ttl)}
-	}
-	s.mu.Unlock()
-	close(cl.done)
+	s.complete(key, cl, false)
 	return cl.resp, cl.err
+}
+
+// startLocked registers a computation of key; s.mu must be held.
+func (s *Service) startLocked(key cacheKey) *call {
+	cl := &call{done: make(chan struct{}), gen: s.gen[key.profile], err: errors.New("recommendations: compute failed")}
+	s.inflight[key] = cl
+	return cl
+}
+
+// complete computes the rows of key and caches them unless the profile was invalidated meanwhile.
+// A background run checks the profile first and logs instead of panicking.
+func (s *Service) complete(key cacheKey, cl *call, background bool) {
+	defer func() {
+		if background {
+			if r := recover(); r != nil {
+				log.Printf("recommendations: background compute for profile %d panicked: %v", key.profile, r)
+			}
+		}
+		s.mu.Lock()
+		if s.inflight[key] == cl {
+			delete(s.inflight, key)
+		}
+		if cl.err == nil && len(cl.resp.Rows) > 0 && s.gen[key.profile] == cl.gen {
+			if len(s.cache) >= cacheMaxLen {
+				s.cache = map[cacheKey]cached{}
+			}
+			ttl := cacheTTL
+			if cl.partial {
+				ttl = partialTTL
+			}
+			s.cache[key] = cached{resp: cl.resp, expires: s.now().Add(ttl)}
+		}
+		s.mu.Unlock()
+		close(cl.done)
+	}()
+	if background {
+		if err := s.checkProfile(key.profile); err != nil {
+			cl.err = err
+			log.Printf("recommendations: background compute for profile %d: %v", key.profile, err)
+			return
+		}
+	}
+	cl.resp, cl.partial, cl.err = s.compute(key.profile, key.lang)
+	if background && cl.err != nil {
+		log.Printf("recommendations: background compute for profile %d: %v", key.profile, cl.err)
+	}
 }
 
 // compute builds the rows; partial reports that some seeds fell back to TMDB's lists or lack them.

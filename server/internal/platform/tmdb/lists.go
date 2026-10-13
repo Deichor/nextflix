@@ -116,19 +116,25 @@ func (c *Client) withVideos(movies []Movie) ([]MovieWithVideos, error) {
 	return out, nil
 }
 
-// GetUpcomingMovies bundles daily/weekly trending, now playing and upcoming movies.
+// GetUpcomingMovies bundles daily/weekly trending, now playing and upcoming movies, fetched at once.
 // A failing sub-list becomes empty instead of failing the whole call (see ErrPartial).
 func (c *Client) GetUpcomingMovies() (*UpcomingMovies, error) {
 	if !c.Enabled() {
 		return nil, ErrNoAPIKey
 	}
 	return Cached(c, "upcoming_movies_combined", func() (*UpcomingMovies, error) {
+		if c.localized() {
+			// The gap fallbacks below read the English lists; Cached shares this fetch with them
+			go c.english().GetUpcomingMovies()
+		}
+		lists, errs := fetchAll([]string{"/trending/movie/day", "/trending/movie/week", "/movie/now_playing", "/movie/upcoming"},
+			func(path string) ([]Movie, error) { return c.fetchMovies(path, c.params("page", "1")) })
 		var p partial
 		u := &UpcomingMovies{
-			TrendingDaily:  p.movies(c.fetchMovies("/trending/movie/day", c.params("page", "1"))),
-			TrendingWeekly: p.movies(c.fetchMovies("/trending/movie/week", c.params("page", "1"))),
-			NowPlaying:     p.movies(c.fetchMovies("/movie/now_playing", c.params("page", "1"))),
-			Upcoming:       p.movies(c.fetchMovies("/movie/upcoming", c.params("page", "1"))),
+			TrendingDaily:  p.movies(lists[0], errs[0]),
+			TrendingWeekly: p.movies(lists[1], errs[1]),
+			NowPlaying:     p.movies(lists[2], errs[2]),
+			Upcoming:       p.movies(lists[3], errs[3]),
 			CachedAt:       time.Now(),
 		}
 		if c.localized() {
@@ -150,18 +156,23 @@ func (c *Client) GetUpcomingMovies() (*UpcomingMovies, error) {
 	})
 }
 
-// GetUpcomingTVSeries bundles airing today, on the air and daily/weekly trending TV shows.
+// GetUpcomingTVSeries bundles airing today, on the air and daily/weekly trending TV shows, fetched at once.
 func (c *Client) GetUpcomingTVSeries() (*UpcomingTVSeries, error) {
 	if !c.Enabled() {
 		return nil, ErrNoAPIKey
 	}
 	return Cached(c, "upcoming_tv_series_combined", func() (*UpcomingTVSeries, error) {
+		if c.localized() {
+			go c.english().GetUpcomingTVSeries()
+		}
+		lists, errs := fetchAll([]string{"/tv/airing_today", "/tv/on_the_air", "/trending/tv/day", "/trending/tv/week"},
+			func(path string) ([]TV, error) { return c.fetchTV(path, c.params("page", "1")) })
 		var p partial
 		u := &UpcomingTVSeries{
-			AiringToday:    p.tv(c.fetchTV("/tv/airing_today", c.params("page", "1"))),
-			OnTheAir:       p.tv(c.fetchTV("/tv/on_the_air", c.params("page", "1"))),
-			TrendingDaily:  p.tv(c.fetchTV("/trending/tv/day", c.params("page", "1"))),
-			TrendingWeekly: p.tv(c.fetchTV("/trending/tv/week", c.params("page", "1"))),
+			AiringToday:    p.tv(lists[0], errs[0]),
+			OnTheAir:       p.tv(lists[1], errs[1]),
+			TrendingDaily:  p.tv(lists[2], errs[2]),
+			TrendingWeekly: p.tv(lists[3], errs[3]),
 			CachedAt:       time.Now(),
 		}
 		if c.localized() {
@@ -181,6 +192,22 @@ func (c *Client) GetUpcomingTVSeries() (*UpcomingTVSeries, error) {
 		}
 		return u, p.err()
 	})
+}
+
+// fetchAll fetches every path at once; results and errors keep the order of paths.
+func fetchAll[T any](paths []string, fetch func(path string) ([]T, error)) ([][]T, []error) {
+	lists := make([][]T, len(paths))
+	errs := make([]error, len(paths))
+	var wg sync.WaitGroup
+	for i, path := range paths {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lists[i], errs[i] = fetch(path)
+		}()
+	}
+	wg.Wait()
+	return lists, errs
 }
 
 func (c *Client) fetchMovies(path string, params url.Values) ([]Movie, error) {

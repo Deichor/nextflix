@@ -61,6 +61,13 @@ type Config struct {
 	Upstream string
 	// WarmEvery is the home feed warm-up interval; 0 disables the warmer.
 	WarmEvery time.Duration
+	// Top10 lists the artwork of the home Top 10 rows in lang ("en" or "tr"); nil skips them.
+	Top10 func(lang string) []Art
+}
+
+// Art is the TMDB artwork of one title (paths like "/abc.jpg").
+type Art struct {
+	Poster, Backdrop string
 }
 
 // Service is a disk-cached proxy for TMDB images.

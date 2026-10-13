@@ -23,16 +23,10 @@ var (
 	backdropCardSizes = []string{"w92", "w300", "w500", "w780"}
 	posterCardSizes   = []string{"w92", "w342", "w500"}
 	billboardSizes    = []string{"w300", "w780", "w1280", "original"}
+	// TV apps: the hero of a focused card and the backdrop cards of Coming Soon
+	heroSizes               = []string{"w780"}
+	comingSoonBackdropSizes = []string{"w500", "w780"}
 )
-
-// Mirrors GENRE_ROWS in web/src/features/home/HomeScreen.tsx (plus the defaults of discoverMovies in feeds.ts).
-var homeGenreRows = []map[string]string{
-	{"with_genres": "28|12", "vote_count.gte": "300"},
-	{"with_genres": "35", "vote_count.gte": "300"},
-	{"with_genres": "878|14", "vote_count.gte": "300"},
-	{"with_genres": "27", "vote_count.gte": "200"},
-	{"sort_by": "vote_average.desc", "vote_count.gte": "5000"},
-}
 
 // artwork is one home page title; movieID is 0 for TV shows.
 type artwork struct {
@@ -120,13 +114,14 @@ send:
 		fetched, failed, len(keys)-len(missing), len(keys), time.Since(start).Round(time.Second))
 }
 
-// homeKeys lists the images of the home page in tm's language in roughly the order they appear on screen.
+// homeKeys lists the images of the home page in tm's language in roughly the order they appear on
+// screen: billboard, trending, Top 10, cards, coming soon, genre rows.
 func (s *Service) homeKeys(tm *tmdb.Client) []key {
-	var trending, trendingTV, backdropCards, posterCards []artwork
+	var trending, trendingTV, top10, backdropCards, comingSoon, genres []artwork
 
 	if mv, err := tm.GetUpcomingMovies(); err == nil {
 		trending = movieArt(mv.TrendingDaily)
-		posterCards = movieArt(mv.Upcoming)
+		comingSoon = movieArt(mv.Upcoming)
 	} else {
 		log.Printf("images: warm-up movie lists: %v", err)
 	}
@@ -137,16 +132,17 @@ func (s *Service) homeKeys(tm *tmdb.Client) []key {
 	} else {
 		log.Printf("images: warm-up tv lists: %v", err)
 	}
+	if s.cfg.Top10 != nil {
+		for _, a := range s.cfg.Top10(tm.Lang()) {
+			top10 = append(top10, artwork{poster: a.Poster, backdrop: a.Backdrop})
+		}
+	}
 	if pop, err := tm.GetPopularMovies(1); err == nil {
 		backdropCards = append(backdropCards, movieArt(pop)...)
 	}
-	for _, params := range homeGenreRows {
-		q := map[string]string{"sort_by": "popularity.desc", "include_adult": "false"}
-		for k, v := range params {
-			q[k] = v
-		}
-		if list, err := tm.DiscoverMovies(q); err == nil {
-			backdropCards = append(backdropCards, movieArt(list)...)
+	for _, row := range tmdb.HomeGenreRows {
+		if list, err := tm.DiscoverMovies(row.Query()); err == nil {
+			genres = append(genres, movieArt(list)...)
 		}
 	}
 
@@ -177,14 +173,25 @@ func (s *Service) homeKeys(tm *tmdb.Client) []key {
 		}
 	}
 
-	for _, list := range [][]artwork{trending, trendingTV, backdropCards} {
+	addCards := func(list []artwork) {
 		for _, a := range list {
 			add(firstOf(a.backdrop, a.poster), backdropCardSizes)
 		}
 	}
-	for _, a := range posterCards {
+	addCards(trending)
+	addCards(trendingTV)
+	// Ranked rows show posters; the TV app's hero shows the backdrop of the focused title
+	for _, a := range top10 {
 		add(firstOf(a.poster, a.backdrop), posterCardSizes)
+		add(a.backdrop, heroSizes)
 	}
+	addCards(backdropCards)
+	// The TV apps' Coming Soon cards use the backdrop (w500) and their hero w780
+	for _, a := range comingSoon {
+		add(firstOf(a.poster, a.backdrop), posterCardSizes)
+		add(a.backdrop, comingSoonBackdropSizes)
+	}
+	addCards(genres)
 	return keys
 }
 

@@ -16,6 +16,7 @@ type fakeCatalog struct {
 	trending []Item
 	explore  func(q ExploreQuery) []Item
 	calls    int
+	gate     chan struct{} // Trending waits for it when set
 }
 
 func (f *fakeCatalog) Related(lang, mediaType string, id int) ([]Item, []Item, error) {
@@ -33,7 +34,12 @@ func (f *fakeCatalog) Genres(mediaType string, id int) ([]int, error) {
 	return f.genres[keyOf(mediaType, id)], nil
 }
 
-func (f *fakeCatalog) Trending(lang string) ([]Item, error) { return f.trending, nil }
+func (f *fakeCatalog) Trending(lang string) ([]Item, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
+	return f.trending, nil
+}
 
 func movie(id int, genres ...int) Item {
 	return Item{ID: id, MediaType: "movie", Title: fmt.Sprintf("M%d", id), PosterPath: fmt.Sprintf("/%d.jpg", id),
@@ -241,7 +247,11 @@ func TestCacheAndInvalidate(t *testing.T) {
 	s.now = func() time.Time { return now.Add(cacheTTL + time.Minute) }
 	before := f.calls
 	s.For(1, "en")
-	if f.calls == before {
+	waitIdle(t, s)
+	f.mu.Lock()
+	after := f.calls
+	f.mu.Unlock()
+	if after == before {
 		t.Fatal("expired entry should be recomputed")
 	}
 }
@@ -357,5 +367,92 @@ func TestEmptyMatcherListIsFinal(t *testing.T) {
 	}
 	if ttl := cachedTTL(s); ttl <= partialTTL {
 		t.Errorf("complete rows cached for %v, want %v", ttl, cacheTTL)
+	}
+}
+
+// waitIdle waits until no computation is running.
+func waitIdle(t *testing.T, s *Service) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		n := len(s.inflight)
+		s.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("computation still running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestExpiredRowsServedWhileRecomputing(t *testing.T) {
+	f := &fakeCatalog{trending: movies(700, 25)}
+	s := newTestService(f, nil)
+	start := time.Now()
+	var mu sync.Mutex
+	now := start
+	s.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	first, err := s.For(1, "en")
+	if err != nil || first.Rows[0].Items[0].ID != 700 {
+		t.Fatalf("%+v %v", first, err)
+	}
+
+	mu.Lock()
+	now = start.Add(cacheTTL + time.Minute)
+	mu.Unlock()
+	f.trending = movies(800, 25)
+	gate := make(chan struct{})
+	f.gate = gate
+
+	// The background compute is held at Trending: the old rows must come back at once
+	done := make(chan *Response, 1)
+	go func() {
+		r, _ := s.For(1, "en")
+		done <- r
+	}()
+	select {
+	case r := <-done:
+		if r.Rows[0].Items[0].ID != 700 {
+			t.Fatalf("want the expired rows, got %v", ids(r.Rows[0].Items))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("expired rows waited for the compute")
+	}
+	// Another read meanwhile does not start a second compute
+	if r, _ := s.For(1, "en"); r.Rows[0].Items[0].ID != 700 {
+		t.Fatal("second read while recomputing")
+	}
+	close(gate)
+	waitIdle(t, s)
+	if r, _ := s.For(1, "en"); r.Rows[0].Items[0].ID != 800 {
+		t.Fatalf("rows not replaced: %v", ids(r.Rows[0].Items))
+	}
+
+	// Past staleFor the rows are recomputed before answering
+	mu.Lock()
+	now = now.Add(staleFor + cacheTTL + time.Minute)
+	mu.Unlock()
+	f.gate = nil
+	f.trending = movies(900, 25)
+	if r, _ := s.For(1, "en"); r.Rows[0].Items[0].ID != 900 {
+		t.Fatalf("rows past staleFor served: %v", ids(r.Rows[0].Items))
+	}
+}
+
+func TestInvalidateIsNotServedStale(t *testing.T) {
+	f := &fakeCatalog{trending: movies(700, 25)}
+	s := newTestService(f, nil)
+	s.For(1, "en")
+	s.Invalidate(1)
+	f.trending = movies(800, 25)
+	if r, _ := s.For(1, "en"); r.Rows[0].Items[0].ID != 800 {
+		t.Fatalf("invalidated rows served: %v", ids(r.Rows[0].Items))
 	}
 }

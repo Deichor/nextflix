@@ -6,7 +6,7 @@ import (
 
 // GetTVDetails returns TV details with credits and videos.
 func (c *Client) GetTVDetails(tvID int) (*TVDetails, error) {
-	return Cached(c, fmt.Sprintf("tv_details_%d", tvID), func() (*TVDetails, error) {
+	return CachedFresh(c, fmt.Sprintf("tv_details_%d", tvID), func() (*TVDetails, error) {
 		var d TVDetails
 		params := c.withVideoLanguages(c.params("append_to_response", "credits,videos"))
 		if err := c.Get(fmt.Sprintf("/tv/%d", tvID), params, &d); err != nil {

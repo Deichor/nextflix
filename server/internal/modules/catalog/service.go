@@ -31,6 +31,7 @@ type Service struct {
 	browse   browseOrders
 
 	homeRelease HomeReleaseFinder // nil = TMDB dates only
+	top10       Top10Source       // nil = no Top 10 rows in /api/home
 
 	sim *simState // "More Like This" lists
 }

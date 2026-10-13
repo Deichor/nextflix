@@ -142,10 +142,21 @@ func (c *Client) Get(path string, params url.Values, dst any) error {
 }
 
 // Cached returns the value cached under key, or calls fetch and caches a successful result for 24h.
-// When fetch fails, an expired value (up to 7 days old) is returned instead of the error.
+// An expired value (up to 7 days old) is returned at once while one background call refreshes it
+// (stale-while-revalidate); a miss waits for fetch. When fetch fails, the expired value stays.
 // The key is kept per content language of c. Cached values are shared: callers must not mutate them.
 // Concurrent misses on one key share a single fetch; fetch must not call Cached with its own key.
 func Cached[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
+	return cached(c, key, true, fetch)
+}
+
+// CachedFresh is Cached without stale-while-revalidate: an expired value waits for the refresh
+// and is only returned when it fails. For details whose staleness shows (new seasons, release dates).
+func CachedFresh[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
+	return cached(c, key, false, fetch)
+}
+
+func cached[T any](c *Client, key string, swr bool, fetch func() (T, error)) (T, error) {
 	if c == nil {
 		v, err := fetch()
 		if errors.Is(err, ErrPartial) {
@@ -154,8 +165,11 @@ func Cached[T any](c *Client, key string, fetch func() (T, error)) (T, error) {
 		return v, err
 	}
 	key = c.cacheKey(key)
-	if v, fresh, ok := c.cache.get(key); ok && fresh {
-		if t, ok := v.(T); ok {
+	if v, fresh, ok := c.cache.get(key); ok {
+		if t, ok := v.(T); ok && (fresh || (swr && c.flight != nil)) {
+			if !fresh {
+				c.flight.start(key, func() (any, error) { return refresh(c, key, fetch) })
+			}
 			return t, nil
 		}
 	}
@@ -330,10 +344,16 @@ func (m *memoryCache) evict() {
 	}
 }
 
+// backgroundRefreshes caps stale-while-revalidate calls running at once, so a wave of entries
+// expiring together does not burst TMDB.
+const backgroundRefreshes = 4
+
 // flightGroup lets concurrent callers of one key share a single call (a tiny singleflight).
 type flightGroup struct {
-	mu    sync.Mutex
-	calls map[string]*flightCall
+	mu      sync.Mutex
+	calls   map[string]*flightCall
+	pending map[string]bool // background calls, waiting for a slot or running
+	slots   chan struct{}
 }
 
 type flightCall struct {
@@ -363,4 +383,35 @@ func (g *flightGroup) do(key string, fn func() (any, error)) (any, error) {
 	}()
 	cl.v, cl.err = fn()
 	return cl.v, cl.err
+}
+
+// start runs fn for key in the background unless a call for key is already running or queued.
+// It joins the shared calls only once it holds a slot, so a miss never waits behind the queue.
+func (g *flightGroup) start(key string, fn func() (any, error)) {
+	g.mu.Lock()
+	if g.pending == nil {
+		g.pending = map[string]bool{}
+		g.slots = make(chan struct{}, backgroundRefreshes)
+	}
+	if g.pending[key] || g.calls[key] != nil {
+		g.mu.Unlock()
+		return
+	}
+	g.pending[key] = true
+	g.mu.Unlock()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("tmdb: background refresh of %s panicked: %v", key, r)
+			}
+			g.mu.Lock()
+			delete(g.pending, key)
+			g.mu.Unlock()
+		}()
+		g.slots <- struct{}{}
+		defer func() { <-g.slots }()
+		if _, err := g.do(key, fn); err != nil {
+			log.Printf("tmdb: background refresh of %s: %v", key, err)
+		}
+	}()
 }

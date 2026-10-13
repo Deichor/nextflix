@@ -104,6 +104,13 @@ func run() error {
 	catalogSvc.SetRatings(searchRatings(ratingsSvc))
 	ratingsSvc.OnChange(catalogSvc.InvalidateTaste)
 	catalogSvc.SetLocalSignals(localSignals(profilesSvc, progressSvc, ratingsSvc))
+	catalogSvc.SetTop10(func(region, mediaType, lang string) (any, bool) {
+		list, ok := top10Svc.GetIn(region, mediaType, lang)
+		if !ok {
+			return nil, false
+		}
+		return list, true
+	})
 	progressSvc.SetNextEpisode(catalogSvc.NextEpisode)
 	recommendationsSvc.SetSimilar(similarTitles(catalogSvc))
 	recommendationsSvc.SetProfiles(profilesSvc.Exists)
@@ -111,6 +118,7 @@ func run() error {
 	imagesSvc := images.NewService(images.Config{
 		Dir:       envOr("IMAGE_CACHE_DIR", "/app/data/img-cache"),
 		WarmEvery: 6 * time.Hour,
+		Top10:     top10Art(top10Svc),
 	}, tm)
 	imagesSvc.Start(ctx)
 
@@ -396,6 +404,21 @@ func instantFeed(t *top10.Service, tm *tmdb.Client) streaming.InstantFeed {
 			for i, it := range tv.TrendingWeekly {
 				if i < 10 {
 					add("tv", it.ID, it.Name, it.FirstAirDate)
+				}
+			}
+		}
+		return out
+	}
+}
+
+// top10Art gives the image warmer the artwork of the Turkish Top 10 rows (movies, then shows).
+func top10Art(t *top10.Service) func(lang string) []images.Art {
+	return func(lang string) []images.Art {
+		var out []images.Art
+		for _, typ := range []string{"movie", "tv"} {
+			if l, ok := t.GetIn("TR", typ, lang); ok {
+				for _, it := range l.Items {
+					out = append(out, images.Art{Poster: it.PosterPath, Backdrop: it.BackdropPath})
 				}
 			}
 		}

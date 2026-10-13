@@ -6,7 +6,7 @@ import (
 )
 
 func (c *Client) GetMovieDetails(movieID int) (*MovieDetails, error) {
-	return Cached(c, fmt.Sprintf("movie_details_%d", movieID), func() (*MovieDetails, error) {
+	return CachedFresh(c, fmt.Sprintf("movie_details_%d", movieID), func() (*MovieDetails, error) {
 		var d MovieDetails
 		if err := c.Get(fmt.Sprintf("/movie/%d", movieID), c.params("append_to_response", "credits"), &d); err != nil {
 			return nil, err
@@ -18,7 +18,7 @@ func (c *Client) GetMovieDetails(movieID int) (*MovieDetails, error) {
 
 // GetMovieDetailsWithExtras returns movie details with credits and videos.
 func (c *Client) GetMovieDetailsWithExtras(movieID int) (*MovieDetailsWithExtras, error) {
-	return Cached(c, fmt.Sprintf("movie_details_extras_%d", movieID), func() (*MovieDetailsWithExtras, error) {
+	return CachedFresh(c, fmt.Sprintf("movie_details_extras_%d", movieID), func() (*MovieDetailsWithExtras, error) {
 		var d MovieDetailsWithExtras
 		params := c.withVideoLanguages(c.params("append_to_response", "credits,videos"))
 		if err := c.Get(fmt.Sprintf("/movie/%d", movieID), params, &d); err != nil {

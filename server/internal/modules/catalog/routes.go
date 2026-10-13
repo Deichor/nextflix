@@ -7,6 +7,7 @@ import (
 )
 
 func Register(api *gin.RouterGroup, s *Service) {
+	api.GET("/home", s.home)
 	api.GET("/upcoming-movies", s.upcomingMovies)
 	api.GET("/upcoming-tv-series", s.upcomingTVSeries)
 	api.GET("/tmdb-movie/:id", s.details)

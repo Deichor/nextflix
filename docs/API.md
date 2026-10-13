@@ -13,6 +13,15 @@ missing header -> `en-US`) and send `Vary: X-Lang`. Text TMDB has no Turkish tra
 (see [ARCHITECTURE.md](ARCHITECTURE.md#localization)). CORS allows the header. Streaming always resolves with the
 English title of `tmdb_id`, whatever `title` the client sends.
 
+Query fallbacks: when the `X-Lang` header is missing or empty, `?x_lang=tr|en` is read instead; when `X-User-ID` is
+missing or invalid, `?profile_id=N` is read instead (the header wins when both are sent). A GET without custom
+headers is a CORS "simple" request, so the packaged webOS app skips the preflight. It is `x_lang`, not `lang`,
+because `/api/torrent-stream/subalt` already uses `?lang=` for the subtitle language.
+
+Compression: JSON answers under `/api/` are gzipped when `Accept-Encoding` allows gzip (`Content-Encoding: gzip`,
+`Vary: Accept-Encoding`). HEAD, `Range` requests, `/api/torrent-stream/*` (video, proxies, thumbnails), images,
+event streams and 204/206/304 answers are never compressed.
+
 ## Images (`modules/images`)
 
 Served on the server root, not under `/api`. The web app proxies `/tmdb-img/*` here.
@@ -102,7 +111,7 @@ see [ARCHITECTURE.md](ARCHITECTURE.md#ratings-and-favorites). Migrated rows may 
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/recommendations?profile_id=N` | 200 `{rows: [Row]}`; computed from the profile's ratings and favorites (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#recommendations)), cached 30 min per profile and `X-Lang` (2 min while a "More Like This" list was not ready yet) and recomputed after any rating/favorite change of that profile |
+| GET | `/api/recommendations?profile_id=N` | 200 `{rows: [Row]}`; computed from the profile's ratings and favorites (algorithm in [ARCHITECTURE.md](ARCHITECTURE.md#recommendations)), cached 30 min per profile and `X-Lang` (2 min while a "More Like This" list was not ready yet; after that the old rows are answered for up to 24 h while new ones are computed in the background) and recomputed before answering after any rating/favorite change of that profile |
 
 Row: `{id, title, reason, items: [Item]}`. Item:
 
@@ -192,6 +201,7 @@ the Turkish TMDB details (cached 24 h); ranks are unchanged and titles without a
 
 | Method | Path |
 |---|---|
+| GET | `/api/home` (see [Home](#home)) |
 | GET | `/api/upcoming-movies` |
 | GET | `/api/upcoming-tv-series` |
 | GET | `/api/tmdb-movie/:id` |
@@ -213,9 +223,48 @@ the Turkish TMDB details (cached 24 h); ranks are unchanged and titles without a
 | GET | `/api/catalog/discover` (see [Discover](#discover-search-filters)) |
 | GET | `/api/catalog/suggest` (see [Search](#search-ranking-did-you-mean-suggest)) |
 
-All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search pools 15 min). With `X-Lang: tr`,
+All catalog answers follow `X-Lang`; lists and details are cached 24 h per language (seasons 6 h, search pools 15 min).
+An expired list (up to 7 days old) is answered at once while the server refreshes it in the background; expired
+movie/TV details wait for the refresh. With `X-Lang: tr`,
 `/api/tmdb/movie/:id/images` lists only Turkish, English and language-less images (`include_image_language=tr,en,null`),
 and details videos include English trailers (`include_video_language=tr,en,null`).
+
+### Home
+
+`GET /api/home?x_lang=tr|en` returns the profile-independent home rows in one answer (one request instead of about
+ten). It takes no profile (`X-User-ID` is ignored); the language comes from `X-Lang`, then `x_lang`. Clients send it
+without custom headers.
+
+```json
+{
+  "version": 1,
+  "lang": "en",
+  "generated_at": "2026-10-13T09:00:00Z",
+  "upcoming_movies": { "trending_daily": [], "trending_weekly": [], "now_playing": [], "upcoming": [], "cached_at": "..." },
+  "upcoming_tv_series": { "airing_today": [], "on_the_air": [], "trending_daily": [], "trending_weekly": [], "cached_at": "..." },
+  "popular_movies": { "results": [], "page": 1, "total_results": 20 },
+  "top10_tr_movie": { "region": "TR", "week": "2026-10-04", "type": "movie", "items": [] },
+  "top10_tr_tv": { "region": "TR", "week": "2026-10-04", "type": "tv", "items": [] },
+  "genres": [
+    { "id": "action_adventure", "params": { "with_genres": "28|12", "vote_count.gte": "300" },
+      "data": { "results": [], "total_results": 20, "filters": { "sort_by": "popularity.desc", "include_adult": "false", "...": "..." } } }
+  ]
+}
+```
+
+- Each section is exactly the body of the endpoint it replaces: `GET /api/upcoming-movies`, `GET /api/upcoming-tv-series`,
+  `GET /api/tmdb/movie/popular` (page 1), `GET /api/top10?region=TR&type=movie|tv` and, per genre row,
+  `GET /api/tmdb/discover/movie?sort_by=popularity.desc&include_adult=false&<params>`.
+- `genres` has a fixed order: `action_adventure` (`with_genres=28|12`, `vote_count.gte=300`), `comedies` (`35`, `300`),
+  `scifi_fantasy` (`878|14`, `300`), `horror` (`27`, `200`), `acclaimed` (`sort_by=vote_average.desc`,
+  `vote_count.gte=5000`) (`tmdb.HomeGenreRows`). `params` lists the row's params without the defaults
+  `sort_by=popularity.desc` and `include_adult=false` (the row's params win). Clients look rows up by `id`, ignore unknown
+  ids and treat a missing id as `null`.
+- A section is `null` when it failed or was not ready within 8 s; its fetch keeps running and fills the cache for the
+  next call. Top 10 is `null` before the first download, and every section is `null` without a TMDB key. The answer is
+  still 200.
+- `Cache-Control: private, max-age=60` when no section is `null`, `no-store` otherwise. `Vary: X-Lang, Accept-Encoding`.
+- A 404 or 405 means an older server: clients then call the endpoints above in parallel.
 
 ### More Like This
 

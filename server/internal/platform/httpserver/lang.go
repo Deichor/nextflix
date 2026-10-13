@@ -6,12 +6,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Lang returns the content language of the request from the X-Lang header: "tr" or "en"
-// (the default for a missing or unknown value). The answer then depends on the header,
-// so Vary tells caches about it.
+// Lang returns the content language of the request: "tr" or "en" (the default for a missing or
+// unknown value). It reads the X-Lang header, then ?x_lang= (header-less GETs skip the CORS
+// preflight). The answer then depends on the header, so Vary tells caches about it.
 func Lang(c *gin.Context) string {
 	c.Writer.Header().Add("Vary", "X-Lang")
-	return parseLang(c.GetHeader("X-Lang"))
+	v := c.GetHeader("X-Lang")
+	if strings.TrimSpace(v) == "" {
+		v = c.Query("x_lang")
+	}
+	return parseLang(v)
 }
 
 func parseLang(s string) string {

@@ -6,11 +6,20 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ProfileID returns the active profile from the X-User-ID header, 0 if absent or invalid.
+// ProfileID returns the active profile from the X-User-ID header, then ?profile_id=
+// (header-less GETs skip the CORS preflight); 0 if both are absent or invalid.
 func ProfileID(c *gin.Context) uint {
-	id, err := strconv.ParseUint(c.GetHeader("X-User-ID"), 10, 64)
-	if err != nil {
-		return 0
+	if id, ok := parseProfileID(c.GetHeader("X-User-ID")); ok {
+		return id
 	}
-	return uint(id)
+	id, _ := parseProfileID(c.Query("profile_id"))
+	return id
+}
+
+func parseProfileID(s string) (uint, bool) {
+	id, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return uint(id), true
 }

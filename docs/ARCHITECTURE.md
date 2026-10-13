@@ -28,7 +28,7 @@ docs/                       this folder
 |---|---|
 | `config` | Reads env: `PORT` (8252), `DATABASE_URL`, `REDIS_URL` (empty: no cache, no notifications), `TMDB_API_KEY`, `TORRSERVER_URL`, `JACKETT_URL`, `JACKETT_API_KEY`, `ALLOWED_ORIGINS`, `ALLOWED_HOSTS`, `TV_APP_KEY` |
 | `database` | SQLite open with pragmas and pool settings, `Migrate(db, models...)` |
-| `httpserver` | gin engine, logging/recovery, Host check against DNS rebinding (LAN names and IPs, hosts of `ALLOWED_ORIGINS` and `ALLOWED_HOSTS`; for Host `server`, i.e. the web container, the browser's Host from `X-Forwarded-Host`, none for SSR fetches), `Sec-Fetch-Site: cross-site` block (except LAN CORS origins, `Origin: null` with `?app_key=<TV_APP_KEY>` (the packaged webOS app), GET/HEAD without Origin from a webOS user agent (its images and video) and page navigations outside `/api/`), 1 MB body cap, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check (`Origin: null` only with the app key), `ProfileID(c)` from `X-User-ID`, `GET /api/health`, `http.Server` with graceful shutdown |
+| `httpserver` | gin engine, logging/recovery, Host check against DNS rebinding (LAN names and IPs, hosts of `ALLOWED_ORIGINS` and `ALLOWED_HOSTS`; for Host `server`, i.e. the web container, the browser's Host from `X-Forwarded-Host`, none for SSR fetches), `Sec-Fetch-Site: cross-site` block (except LAN CORS origins, `Origin: null` with `?app_key=<TV_APP_KEY>` (the packaged webOS app), GET/HEAD without Origin from a webOS user agent (its images and video) and page navigations outside `/api/`), 1 MB body cap, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check (`Origin: null` only with the app key), gzip for JSON answers under `/api/` (`gzip.go`, registered last so CORS preflights are untouched; skips HEAD, `Range`, `/api/torrent-stream/` and anything that is not `application/json`, decided when the handler starts writing; pooled `compress/gzip` writers at `BestSpeed`), `Lang(c)` from `X-Lang` then `?x_lang=`, `ProfileID(c)` from `X-User-ID` then `?profile_id=` (header-less GETs skip the CORS preflight), `GET /api/health`, `http.Server` with graceful shutdown |
 | `cache` | go-redis v8 wrapper; a nil `*Cache` is valid and behaves as "no cache" |
 | `tmdb` | TMDB HTTP client (v4 token as Bearer, on `upstream`), types, 24 h in-memory cache shared by catalog, providers and notifications; expired entries are kept 7 days and served when TMDB fails (see [DPI resilience](#dpi-resilience)) |
 | `upstream` | Resilient HTTP client for TMDB API, image CDN, the TMDB export files (search typo index) and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |
@@ -79,7 +79,7 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 5. `progress`, `ratings`, then `profiles` with both as cleaners, plus `EnsureDefault`; `ratings.MigrateMyList()`
    (one time, logged) and `go ratings.Backfill(ctx)`; `recommendations` (ratings adapter + TMDB catalog, hooked to
    `ratings.OnChange`), plus the watch history (`SetHistory(watchHistory(progress))`); `top10` (`Start(ctx)` loads stored lists and refreshes in the background).
-6. `catalog` with `StartSearchIndex(ctx, SEARCH_INDEX_DIR or /app/data)` (loads / refreshes the typo index in the background), `SetRatings(searchRatings(ratings))` + `ratings.OnChange(InvalidateTaste)` (genre taste) and `SetLocalSignals(localSignals(profiles, progress, ratings))` (browse ranking) and `recommendations.SetSimilar(similarTitles(catalog))` (More Like This lists for the "Because you ..." rows); `providers` (on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
+6. `catalog` with `StartSearchIndex(ctx, SEARCH_INDEX_DIR or /app/data)` (loads / refreshes the typo index in the background), `SetRatings(searchRatings(ratings))` + `ratings.OnChange(InvalidateTaste)` (genre taste), `SetLocalSignals(localSignals(profiles, progress, ratings))` (browse ranking) and `SetTop10(top10.GetIn)` (the Top 10 sections of `/api/home`) and `recommendations.SetSimilar(similarTitles(catalog))` (More Like This lists for the "Because you ..." rows); `providers` (on the shared TMDB client), `images` (`Start(ctx)` launches cleanup and the warmer; `Top10: top10Art(top10)` gives it the Top 10 artwork), `notifications` (`go Start(ctx)`, `defer Close()`), `streaming` (also on the shared TMDB client, for the runtimes resolve and probe check files against) plus `EnsureSettings` and `StartInstant(ctx, instantFeed(top10, tmdb))` (instant-play workers and prewarm).
 7. `segments` (chapters from streaming via `fileChapters`, show IMDb ids from TMDB), `httpserver.New`, `images.Register(r, …)` on the root, `api := r.Group("/api")`, every other module's `Register`, `httpserver.Run`.
 
 ## Web
@@ -182,8 +182,10 @@ too:
    `features/catalog/titles.ts`, the recommendation rows (`useRecommendations`) and the notification store (its owner
    is profile + language). Logos are picked by `pickLogo` (`shared/lib/image.ts`): profile language, then English,
    then language-less.
-2. Server: `httpserver.Lang(c)` reads `X-Lang` (`tr`, `tr-TR` -> `tr`; anything else -> `en`) and sets
-   `Vary: X-Lang`. Handlers call `tm.WithLang(lang)`, a view of the shared `tmdb.Client` that sends `language=tr-TR`
+2. Server: `httpserver.Lang(c)` reads `X-Lang`, or `?x_lang=` when the header is missing or empty (`tr`, `tr-TR` ->
+   `tr`; anything else -> `en`) and sets `Vary: X-Lang`. The query form lets the packaged webOS app send header-less
+   GETs without a CORS preflight; it is not `lang` because `/api/torrent-stream/subalt` uses `?lang=` for the
+   subtitle language. Handlers call `tm.WithLang(lang)`, a view of the shared `tmdb.Client` that sends `language=tr-TR`
    (or `en-US`) and keeps its own entries in the 24 h in-memory cache (keys end in `|tr` / `|en`). For `tr`, images
    use `include_image_language=tr,en,null` and videos `include_video_language=tr,en,null` (TMDB lists no trailer for
    most titles in Turkish otherwise).
@@ -202,6 +204,27 @@ too:
    English title of `tmdb_id`, so a Turkish title still finds releases and every endpoint uses the same cache keys.
    Stored titles (ratings, Continue Watching) keep the language they were saved in; the Favorites page shows the
    title from the localized details.
+
+## Home endpoint
+
+`GET /api/home` (`modules/catalog/home.go`, contract in [API.md](API.md#home)) answers the profile-independent home
+rows in one request instead of about ten: upcoming movies and TV, popular movies, the Turkish Top 10 (movies and
+shows) and the genre rows. Clients open many requests on HTTP/1.1 (6 connections per host, shared with images),
+so one gzipped answer arrives much sooner.
+
+- Every section runs in its own goroutine on the cached TMDB lists (`tm.WithLang(lang)`), the Top 10 through the
+  `Top10Source` main.go wires (`top10.GetIn`). After 8 s (`homeDeadline`) unfinished sections are `null`; their
+  fetches go on and fill the cache for the next call. The answer is always 200 (`null` sections without a TMDB key
+  or before the first Top 10 download) with `Cache-Control: private, max-age=60`, or `no-store` when a section is
+  `null`.
+- Each section is byte for byte the body of its old endpoint, so clients map both paths into one `HomeData`. The
+  genre rows come from `tmdb.HomeGenreRows` (`platform/tmdb/home.go`, fixed ids and order); `row.Query()` adds the
+  defaults (`sort_by=popularity.desc`, `include_adult=false`) and equals what `discoverParams` makes of the old
+  `/api/tmdb/discover/movie` query, so both share one TMDB cache entry. The image warmer reads the same list.
+- Clients call `/api/home` first, without custom headers (`?x_lang=`). A 404 or 405 means an older server: they load
+  the old endpoints in parallel, remember "unsupported" for that server until the next launch and try again then.
+  Network errors and 5xx keep the data on screen and retry on the next refresh. A `null` section keeps that section of
+  the previous answer or snapshot.
 
 ## Images
 
@@ -229,12 +252,13 @@ Server (`server/internal/modules/images`):
 - The cache is capped at 2 GB. Every 30 minutes (and right after the cap is crossed) a cleanup deletes the least
   recently used files (by mtime, which hits refresh at most once an hour) down to 90% of the cap.
 - Warmer: 20 s after start and then every 6 hours it reads the home page lists through `platform/tmdb`
-  (trending, popular TV, coming soon, new episodes, popular movies, the genre rows) and downloads the sizes the
-  UI uses (backdrop cards `w92 w300 w500 w780`, poster cards `w92 w342 w500`, the six billboard candidates
-  `w300 w780 w1280 original` plus their `w500` logos), 3 at a time (user requests keep most download slots and
-  the connection bursts stay small), for English and Turkish lists (Turkish posters
-  and logos differ). Keep `homeGenreRows` in `warmer.go` in sync with `GENRE_ROWS` in
-  `web/src/features/home/HomeScreen.tsx`.
+  (trending, the Turkish Top 10, popular TV, new episodes, popular movies, coming soon, the genre rows of
+  `tmdb.HomeGenreRows`) and downloads the sizes the UI uses, in on-screen order: the six billboard candidates
+  `w300 w780 w1280 original` plus their `w500` logos, backdrop cards `w92 w300 w500 w780`, Top 10 posters
+  `w92 w342 w500` (web and TV ranked rows use `w342`) plus their backdrops at `w780` (the TV hero of a focused card),
+  Coming Soon posters `w92 w342 w500` plus their backdrops at `w500` (TV cards) and `w780` (TV hero). 3 at a time
+  (user requests keep most download slots and the connection bursts stay small), for English and Turkish lists
+  (Turkish posters and logos differ). The Top 10 comes from `Config.Top10` (wired in `main.go`, `nil` skips it).
 
 ### DPI resilience
 
@@ -260,10 +284,16 @@ Resets come in bursts: in the measurements all 12 in-flight connections to the C
   HTTP/1.1 had the lower p95 (about 250 ms vs 330-420 ms, h2 suffers head-of-line blocking on one connection);
 - dials IPv4 only when the host has no IPv6 route (Docker's bridge has none; checked once with a UDP "dial").
 
-`platform/tmdb.Cached` serves stale data on errors: entries stay 7 days past their 24 h TTL; when a refresh
-fails the stale value is returned and re-checked after a minute. Combined lists (`GetUpcomingMovies`,
-`GetUpcomingTVSeries`, lists with videos) whose parts failed prefer stale complete data and are otherwise cached
-for only a minute instead of 24 h. Re-measure with
+`platform/tmdb.Cached` keeps entries 7 days past their 24 h TTL. An expired entry is answered at once while one
+background call refreshes it (stale-while-revalidate: `flightGroup.start`, one per key, at most 4 at a time so a
+wave of entries expiring together does not burst TMDB; a background call joins the shared calls only once it has a
+slot, so a miss never waits behind the queue). Only a miss waits for TMDB (concurrent misses share one fetch).
+Movie and TV details use `CachedFresh` instead: an expired entry waits for the refresh, so a new season or release
+date shows at once (details pages, next episode, playback's season counts). When a
+refresh fails the stale value stays and is re-checked after a minute. Combined lists (`GetUpcomingMovies`,
+`GetUpcomingTVSeries`) fetch their four TMDB lists at once (a localized one also starts the English combined list
+right away, which its gap fallbacks read); combined lists whose parts failed (also lists with videos) prefer stale
+complete data and are otherwise cached for only a minute instead of 24 h. Re-measure with
 `go test -tags live -run Live -v ./internal/platform/upstream/` (needs `TMDB_API_KEY`, prints p50/p95/max).
 
 Every network failure that is left after the tries wraps `upstream.ErrTransport`. `Client.Post` sends a body with
@@ -1519,9 +1549,11 @@ modified or dropped. Migrated rows have no title or artwork; `Backfill` fills em
 9. No positive signal (or nothing left after filtering): one `Trending Now` row (`/trending/all/week`, rated titles
    removed, reason `popular`).
 
-Results are cached in memory per profile for 30 minutes (empty results are not cached). `ratings.OnChange`
-invalidates the profile; a computation that started before the change is not cached. Concurrent requests of one
-profile share one computation.
+Results are cached in memory per profile for 30 minutes (empty results are not cached). After that the old rows are
+answered at once for up to 24 h while new ones are computed in the background (one at a time per profile and language).
+`ratings.OnChange` invalidates the profile: its rows are dropped, so the next request waits for new ones; a computation
+that started before the change is neither cached nor shared with later requests. Concurrent requests of one profile
+share one computation.
 
 ## Surprise me
 
@@ -1775,6 +1807,13 @@ playback log `client`.
   at the current position instead of a splice. It ports the webOS rules (resolve, reuse, probe length check,
   seekpoint, stall / sidegrade / upgrade, keepalive, progress, release, next episode, subtitles) and
   logs as client `tv`. It also publishes the profile's Continue Watching to the Android TV home screen (Watch Next).
+
+Home snapshots: both TV apps load the home rows through `GET /api/home` (see [Home endpoint](#home-endpoint)) and
+persist the last answer on the device, so the next launch shows the home rows at once from
+the snapshot and replaces them when the fresh answer arrives (a `null` section keeps the snapshot's). The webOS app
+sends header-less GETs (`?x_lang=`, `?profile_id=` instead of `X-Lang` / `X-User-ID`, so no CORS preflight per
+request) only after `/api/home` answered 200 with `version >= 1` from that server; the flag is kept in
+`localStorage` `nfx-tv:qp:<server>` and cleared on a 404. Until then it keeps sending the headers.
 
 ## Containers
 
