@@ -71,7 +71,8 @@ import {
   Availability,
   StreamApiError,
 } from '@/features/watch/api';
-import { SwitchPrep, type PreparedStream, type SwitchHost, type SwitchKind, type SwitchResult, type VideoInfo } from '@/features/watch/seamlessSwitch';
+import { SwitchPrep, matchAudioTrack, type PreparedStream, type SwitchHost, type SwitchKind, type SwitchResult, type VideoInfo } from '@/features/watch/seamlessSwitch';
+import { lengthsMatch, timeScale } from '@/features/watch/switchLength';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch/bufferHealth';
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
@@ -86,7 +87,7 @@ import {
   DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
 } from '@/features/watch/subsLog';
 import upscaleCss from '@/features/watch/components/upscale.module.css';
-import { useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
+import { useHomeScreenHint, useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
 
 // PlayerCore's seamless switch, for the parent
@@ -103,6 +104,8 @@ interface CoreSwitch {
   failure(): string;
   /** How the last preparation went (timings, restarts) */
   stats(): string;
+  /** Safari: restart the playing element on `next` at the position instead of remounting; false when it can't */
+  replace(next: StreamSource): Promise<boolean>;
 }
 
 interface StreamFile {
@@ -619,10 +622,20 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const hardSwitch = useCallback((next: StreamSource) => {
     lastSwitchRef.current = Date.now();
     pendingStepDownRef.current = null;
-    // Before the first frame of a resume the position is still the start the source opened at
-    const at = positionRef.current > 0 ? positionRef.current : resolvedRef.current.startAt;
-    retryRef.current = { refresh: false, startAt: at, switchTo: next };
-    setAttempt(a => a + 1);
+    const remount = () => {
+      // Before the first frame of a resume the position is still the start the source opened at
+      const at = positionRef.current > 0 ? positionRef.current : resolvedRef.current.startAt;
+      retryRef.current = { refresh: false, startAt: at, switchTo: next };
+      setAttempt(a => a + 1);
+    };
+    // Safari: iOS won't start a remounted player's new <video> elements without a tap
+    const core = coreSwitchRef.current;
+    if (core && usesFedStream()) {
+      const key = itemKeyRef.current;
+      core.replace(next).then(ok => { if (!ok && itemKeyRef.current === key) remount(); });
+      return;
+    }
+    remount();
   }, []);
 
   // A source that was prepared for a seamless switch but never played
@@ -1448,6 +1461,8 @@ function PlayerCore({
   // Pause handling: when the viewer paused (0 = playing), a restart that keeps the element
   // paused, and the resume check after a long pause
   const viewerPausedAtRef = useRef(0);
+  // The next pause event is adopt()'s pause + play (see there), not the viewer's
+  const wakeNudgeRef = useRef(false);
   const startPausedRef = useRef(false);
   const resumeCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Frames must run this far past the 'playing' position before a restart or recovery counts as done
@@ -1885,10 +1900,17 @@ function PlayerCore({
       };
     }, () => filePosRef.current);
     const caps = playbackCaps();
-    subLogRef.current.note('device', { ua: deviceToken(), hevc: caps.hevc, acodecs: caps.audio.join('+'), fed: usesFedStream() });
+    subLogRef.current.note('device', { ua: deviceToken(), hevc: caps.hevc, acodecs: caps.audio.join('+'), fed: usesFedStream(), wakelock: 'wakeLock' in navigator });
+    // When the page was hidden (screen locked, app switched) next to the playback state
+    const onVisibility = () => {
+      const v = videoRef.current;
+      subLogRef.current?.note(document.visibilityState, { paused: v?.paused, muted: v?.muted });
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     const feedNote = (k: string, x?: Record<string, number | string | boolean | undefined>) => subLogRef.current?.note(k, x);
     setFeedNote(feedNote);
     return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
       setFeedNote(null);
       closeSubLog();
     };
@@ -2180,6 +2202,18 @@ function PlayerCore({
     restartAt(stateRef.current.position);
   }, [clearStall, restartAt, sourceFailed, failChain]);
 
+  // Safari refuses play() without a tap on an element no tap started (a source switch that remounts
+  // the player): the play button shows instead of an endless loading screen
+  const playRejected = useCallback((e: unknown) => {
+    const name = (e as Error)?.name;
+    if (name === 'AbortError') return;
+    subLogRef.current?.note('play-rejected', { name: name || String(e) });
+    setPlaying(false);
+    if (name !== 'NotAllowedError') return;
+    setBuffering(false);
+    onRecoveredRef.current?.();
+  }, []);
+
   const armStall = useCallback(() => {
     clearStall();
     if (stallResetTimer.current) clearTimeout(stallResetTimer.current);
@@ -2254,10 +2288,10 @@ function PlayerCore({
       });
       if (!done) return;
       clearHold();
-      v.play().catch(e => { if (e?.name !== 'AbortError') setPlaying(false); });
+      v.play().catch(playRejected);
     }, 250);
     return () => clearInterval(timer);
-  }, [holding, armStall, clearHold]);
+  }, [holding, armStall, clearHold, playRejected]);
 
   useEffect(() => () => {
     clearStall();
@@ -2302,7 +2336,7 @@ function PlayerCore({
       startHold('start');
     } else {
       startHeldRef.current = key;
-      v.play().catch(e => { if (e?.name !== 'AbortError') setPlaying(false); });
+      v.play().catch(playRejected);
     }
     armStall();
     // stream.n restarts the same URL
@@ -2501,6 +2535,7 @@ function PlayerCore({
   }, [doubleTapSeek, toggleControls]);
 
   useWakeLock(touchUi && playing);
+  const [homeScreenHint, dismissHomeScreenHint] = useHomeScreenHint(touchUi);
 
   // Touch: subtitles sit on the picture and scale with its height (portrait shows a small band)
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2566,7 +2601,13 @@ function PlayerCore({
     el.muted = mutedRef.current;
     el.volume = volumeRef.current;
     hasPlayed.current = true;
-    el.play().catch(e => { if (e?.name !== 'AbortError') setPlaying(false); });
+    // WebKit keeps the screen on only for video that starts playing with sound; unmuting a playing
+    // element doesn't count, so the hidden one (it played muted) is restarted
+    if (usesFedStream() && !el.paused && !el.muted) {
+      wakeNudgeRef.current = true;
+      el.pause();
+    }
+    el.play().catch(playRejected);
     // It already plays (its 'playing' fired while hidden): only a stream that still has to start needs the watchdog
     if (el.paused || el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) armStall();
     setPlaying(true);
@@ -2618,7 +2659,7 @@ function PlayerCore({
     };
     const timer = setTimeout(() => finish(true), 250);
     finishFadeRef.current = finish;
-  }, [clearStall, clearHold, armStall, setCur, delayLog, noteDelay]);
+  }, [clearStall, clearHold, armStall, setCur, delayLog, noteDelay, playRejected]);
   const adoptFnRef = useRef(adopt);
   useSyncRef(adoptFnRef, adopt);
 
@@ -2651,8 +2692,78 @@ function PlayerCore({
   // Why the last preparation was dropped (CoreSwitch.failure)
   const lastPrepFailRef = useRef('');
   const lastPrepStatsRef = useRef('');
+
+  // Safari (fed stream): a switch restarts the playing element on the new source at the position.
+  // iOS starts neither the hidden slot nor a remounted player's new elements without a tap.
+  // hard: the parent's switch that would remount.
+  const inPlaceRef = useRef(false);
+  const switchInPlace = useCallback(async (next: StreamSource, kind: SwitchKind | 'hard'): Promise<SwitchResult> => {
+    const v = videoRef.current;
+    const cur = fileRef.current;
+    if (inPlaceRef.current) return 'busy';
+    if (!v || !hashRef.current || !cur || !everPlayed.current || stateRef.current.duration <= 0) return 'unavailable';
+    inPlaceRef.current = true;
+    const from = `${hashRef.current}:${cur.id}`;
+    const hash = next.hash.toLowerCase();
+    const note = (res: SwitchResult, why?: string) => subLogRef.current?.note('switch', { kind, res, to: hash.slice(0, 8), why, inplace: true });
+    try {
+      // TorrServer may have dropped the torrent since the server offered it
+      if (next.magnet && !next.debrid) {
+        await fetch(`${apiUrl}/api/torrent-stream/files?magnet=${encodeURIComponent(next.magnet)}`).catch(() => null);
+      }
+      const res = await fetch(`${apiUrl}/api/torrent-stream/probe?hash=${hash}&index=${next.index}${capsQuery()}${runtimeCheckQuery(metaRef.current)}`);
+      const data = await res.json().catch(() => ({}));
+      // Another source took over meanwhile, or the player closed
+      if (`${hashRef.current}:${fileRef.current?.id}` !== from || videoRef.current !== v) return 'cancelled';
+      const dur = Number(data?.duration) || 0;
+      const playing = stateRef.current.duration;
+      if (!res.ok || data.duration_mismatch || dur <= 0 || !lengthsMatch(playing, dur)) {
+        lastPrepFailRef.current = !res.ok ? `probe failed (${data?.error || res.status})` : 'length does not fit';
+        note('abandoned', lastPrepFailRef.current);
+        return 'abandoned';
+      }
+      const tracks: AudioTrack[] = Array.isArray(data.audio_tracks) ? data.audio_tracks : [];
+      const audio = tracks.length > 0 ? matchAudioTrack(tracks, switchHost.currentAudio(), () => switchHost.defaultAudio(tracks)) : 0;
+      const video: VideoInfo | null = data.width > 0
+        ? { codec: data.video_codec || '', width: data.width, height: data.height || 0, hdr: !!data.hdr, direct: !!data.direct }
+        : null;
+      const file: StreamFile = { id: next.index, name: next.file_name || '', path: '', size: 0 };
+      const at = stateRef.current.position * timeScale(playing, dur);
+      hashRef.current = hash;
+      fileRef.current = file;
+      audioRef.current = audio;
+      if (next.magnet) magnetRef.current = next.magnet;
+      // The probe effect skips this file (probed above); the stream effect starts it on this element
+      adoptRef.current = { hash, fileId: next.index, url: '' };
+      setHash(hash);
+      setFile(file);
+      setDuration(dur);
+      setAudioTracks(tracks);
+      setAudio(audio);
+      setVideoInfo(video);
+      setShownSource(next);
+      subDecided.current = false;
+      setSubDelay(0);
+      clearTimeout(delayTimerRef.current);
+      noteDelay(delayLog().reset(0, Date.now()));
+      if (kind === 'upgrade') setSwitchNote(qualityBadge(tRef.current, video, next)?.label || '');
+      startPausedRef.current = viewerPausedAtRef.current > 0;
+      restartAt(at);
+      note('switched');
+      onSwitchedRef.current?.(next, kind === 'hard' ? 'sidegrade' : kind);
+      return 'switched';
+    } catch {
+      lastPrepFailRef.current = 'probe failed (network)';
+      note('abandoned', lastPrepFailRef.current);
+      return 'abandoned';
+    } finally {
+      inPlaceRef.current = false;
+    }
+  }, [apiUrl, switchHost, restartAt, delayLog, noteDelay]);
+
   // One preparation at a time; only while the visible stream plays (or is paused) smoothly
   const prepareSwitch = useCallback((next: StreamSource, kind: SwitchKind): Promise<SwitchResult> => {
+    if (usesFedStream()) return switchInPlace(next, kind);
     if (prepRef.current || finishFadeRef.current) return Promise.resolve('busy');
     const v = videoRef.current;
     if (!v || !hashRef.current || !fileRef.current || blockedRef.current || !everPlayed.current ||
@@ -2663,22 +2774,25 @@ function PlayerCore({
     prepRef.current = prep;
     return prep.promise.then(res => {
       lastPrepStatsRef.current = prep.stats();
+      subLogRef.current?.note('switch', { kind, res, to: prep.hash.slice(0, 8), why: prep.reason || undefined });
       if (res === 'abandoned') {
         lastPrepFailRef.current = prep.reason || 'unknown';
         console.warn(`[nextflix] ${kind} to ${prep.hash.slice(0, 8)}:${next.index}${next.debrid ? ' (TorBox)' : ''} dropped: ${prep.reason} (${lastPrepStatsRef.current})`);
       }
       return res;
     }).finally(() => { if (prepRef.current === prep) prepRef.current = null; });
-  }, [switchHost]);
+  }, [switchHost, switchInPlace]);
 
   const coreSwitch = useMemo<CoreSwitch>(() => ({
     prepare: prepareSwitch,
     failure: () => lastPrepFailRef.current,
     stats: () => lastPrepStatsRef.current,
     preparing: () => (prepRef.current ? { kind: prepRef.current.kind, ready: prepRef.current.isReady } : null),
-    busy: () => !!prepRef.current || !!finishFadeRef.current,
+    busy: () => !!prepRef.current || !!finishFadeRef.current || inPlaceRef.current,
     cancel: () => prepRef.current?.cancel('cancelled'),
-  }), [prepareSwitch]);
+    // cancelled / busy: the player moved on or switches already, nothing to remount for
+    replace: next => switchInPlace(next, 'hard').then(r => r !== 'unavailable' && r !== 'abandoned'),
+  }), [prepareSwitch, switchInPlace]);
 
   useEffect(() => {
     if (!switchRef) return;
@@ -2700,10 +2814,12 @@ function PlayerCore({
       const dur = stateRef.current.duration;
       const suspended = suspendSeenRef.current;
       suspendSeenRef.current = false;
+      const fed = fedFetching(v);
       const h = healthMon.current.push({
         at: Date.now(), pos, end: fileEnd,
-        fetching: fedFetching(v) ?? (v.networkState === HTMLMediaElement.NETWORK_LOADING && !suspended),
+        fetching: fed ?? (v.networkState === HTMLMediaElement.NETWORK_LOADING && !suspended),
         atEnd: dur > 0 && fileEnd >= dur - 1,
+        paced: fed !== null,
       });
       onBufferHealthRef.current?.(h);
     }, 1000);
@@ -3069,6 +3185,10 @@ function PlayerCore({
             crossOrigin="anonymous"
             onPlay={e => { if (isActive(e)) { savedFinishedRef.current = false; setPlaying(true); resumed(); } }}
             onPause={e => {
+              if (isActive(e) && wakeNudgeRef.current) {
+                wakeNudgeRef.current = false;
+                return;
+              }
               if (!isActive(e) || holdRef.current) return;
               setPlaying(false);
               persist();
@@ -3289,6 +3409,18 @@ function PlayerCore({
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded bg-black/80 border border-white/20 w-max max-w-[90vw] text-center text-white text-sm shadow-lg pointer-events-none" role="status">
           {t(subNotice.key, subNotice.vars)}
         </div>
+      )}
+
+      {homeScreenHint && (
+        <button
+          type="button"
+          onClick={e => { e.stopPropagation(); dismissHomeScreenHint(); }}
+          onPointerUp={e => e.stopPropagation()}
+          className="absolute top-[max(1rem,env(safe-area-inset-top))] left-1/2 -translate-x-1/2 z-20 px-4 py-2.5 rounded-lg bg-black/85 border border-white/20 w-max max-w-[90vw] text-center text-white text-sm shadow-lg"
+          role="status"
+        >
+          {t('player.homeScreenHint')}
+        </button>
       )}
 
       {/* Quiet note after a seamless upgrade, where the quality badge sits */}

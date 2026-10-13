@@ -15,6 +15,8 @@ export interface BufferSample {
   fetching: boolean;
   /** The buffer reaches the end of the file: nothing left to download */
   atEnd?: boolean;
+  /** The server sends at playback speed (Safari's fed stream): growth near 1 is normal there */
+  paced?: boolean;
 }
 
 export interface BufferVerdict {
@@ -45,6 +47,9 @@ export const BUFFER_HEALTH = {
   IDLE_GRACE_MS: 15000,
   /** Fetching with less than this buffered (also within the grace) is critical */
   IDLE_MIN_AHEAD_S: 1,
+  /** Paced streams: the lead never grows back after a skip forward, and growth jitters around 1 */
+  PACED_DRAIN_AHEAD_S: 12,
+  PACED_DRAIN_GROWTH: 0.75,
 };
 
 // End of the buffered range that contains t (a small gap before a range counts), or -1
@@ -96,8 +101,10 @@ export class BufferMonitor {
       known = true;
       if (ahead < H.IDLE_MIN_AHEAD_S) state = 'critical';
     } else if (growth !== null) {
+      const drainGrowth = s.paced ? H.PACED_DRAIN_GROWTH : H.DRAIN_GROWTH;
+      const drainAhead = s.paced ? H.PACED_DRAIN_AHEAD_S : H.DRAIN_AHEAD_S;
       if (growth < 1 && ahead < H.CRITICAL_AHEAD_S) state = 'critical';
-      else if (growth < H.DRAIN_GROWTH || (growth < 1 && ahead < H.DRAIN_AHEAD_S)) state = 'draining';
+      else if (growth < drainGrowth || (growth < 1 && ahead < drainAhead)) state = 'draining';
     }
 
     // A window that is still filling neither starts nor ends a healthy stretch

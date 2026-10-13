@@ -187,3 +187,29 @@ export function useMobileFullscreen(ref: RefObject<HTMLElement | null>, touchUi:
 
   return { supported, canRotate, toggle, rotate };
 }
+
+const HOME_SCREEN_HINT_KEY = 'hfx-home-screen-hint';
+
+/**
+ * iPhone Safari can't hide its bar for the player (no element fullscreen); opened from the home
+ * screen it has none. Shown once, on the first player open in a Safari tab.
+ */
+export function useHomeScreenHint(touchUi: boolean): [boolean, () => void] {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (!touchUi || fullscreenSupported() || !/iPhone|iPod/.test(navigator.userAgent)) return;
+    const standalone = (navigator as Navigator & { standalone?: boolean }).standalone || window.matchMedia('(display-mode: standalone)').matches;
+    try {
+      if (standalone || localStorage.getItem(HOME_SCREEN_HINT_KEY)) return;
+      localStorage.setItem(HOME_SCREEN_HINT_KEY, '1');
+    } catch {
+      return;
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reads browser state only known on the client
+    setShown(true);
+    const timer = setTimeout(() => setShown(false), 12000);
+    return () => clearTimeout(timer);
+  }, [touchUi]);
+  const dismiss = useCallback(() => setShown(false), []);
+  return [shown, dismiss];
+}

@@ -480,10 +480,11 @@ export class SwitchPrep {
     this.stopFrameWatch();
     const gen = this.gen;
     const from = el.currentTime;
-    const fail = () => {
+    const fail = (e?: unknown) => {
       if (gen !== this.gen || this.done) return;
       this.stopHandover();
-      this.abandon('abandoned', 'the hidden video did not play at the handover');
+      const name = (e as Error | undefined)?.name;
+      this.abandon('abandoned', `handover play failed${name ? ` (${name})` : ''}`);
     };
     el.play().catch(fail);
     const timer = setInterval(() => {

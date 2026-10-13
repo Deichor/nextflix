@@ -551,6 +551,7 @@ export const en = {
   'player.forward10Touch': 'Forward 10 seconds',
   'player.fullscreenTouch': 'Fullscreen',
   'player.exitFullscreenTouch': 'Exit fullscreen',
+  'player.homeScreenHint': "For fullscreen without Safari's bar: Share > Add to Home Screen, then open Nextflix from there",
 
   // Mobile tab bar
   'nav.tabBar': 'Main navigation',

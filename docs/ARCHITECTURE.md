@@ -1142,11 +1142,16 @@ picture and sized from its height (5.5 %, 14-40 px, times the Settings size), ab
 No mute / volume (hardware buttons), no long-press 2× (it would read as a draining buffer to the buffer health
 check). Opening the player requests fullscreen on the container (never the `<video>`: the overlay, the controls
 and the hidden switch slot live next to it) and locks landscape where allowed (Chrome Android); a rotate button
-toggles the lock. iPhone Safari has no element fullscreen and `webkitEnterFullscreen` would hide our subtitles and
-break the two-slot switch, so there the fixed full-viewport container is the fullscreen (the fullscreen and rotate
-buttons are hidden; the address bar may stay, Add to Home Screen removes it). While open, the player adds
-`viewport-fit=cover` (safe-area insets pad the bars), stops overscroll / pull-to-refresh (touchmove is cancelled
-outside `[data-scroll]` lists), disables double-tap zoom (`touch-action`) and holds a screen Wake Lock while playing.
+toggles the lock. iPhone Safari has no element fullscreen and `webkitEnterFullscreen` would replace our player
+(controls, skip intro, next episode) with the native one, so there the fixed full-viewport container is the
+fullscreen (the fullscreen and rotate buttons are hidden; the address bar stays). Opened from the home screen
+there is no bar, so the first player open in a Safari tab shows a one-time Add to Home Screen hint
+(`hfx-home-screen-hint`). While open, the player adds `viewport-fit=cover` (safe-area insets pad the bars), stops
+overscroll / pull-to-refresh (touchmove is cancelled outside `[data-scroll]` lists), disables double-tap zoom
+(`touch-action`) and holds a screen Wake Lock while playing. The Wake Lock API needs a secure context, so over
+plain http on the LAN only WebKit's own rule keeps the screen on: playing video that started with sound. An
+element adopted from the hidden slot played muted, so on Safari it is paused and played again once unmuted. The
+log notes `wakelock` on `device` and each `hidden` / `visible` change with the element's paused / muted state.
 
 Safari (every iOS browser too) plays a URL only when the server answers byte ranges, which the live `/play` stream
 cannot, so there `streamSource.ts` fetches the stream and feeds it through `ManagedMediaSource` (`MediaSource` on
@@ -1157,15 +1162,22 @@ screen agree within 0.02 s, so subtitles need nothing extra. What the feed handl
   `QuotaExceededError` until the buffer ran dry). So the request carries `pace=1` and the server reads the input at
   playback speed after a 30 s burst; the feed still appends in 4 MB slices and holds at 45 s ahead (10 s while
   `ManagedMediaSource` is not `streaming`). A hold counts as the browser idling for the buffer health check
-  (`fedFetching`), else the shrinking lead read as a slow source and sidegraded.
+  (`fedFetching`), else the shrinking lead read as a slow source and sidegraded. Paced, growth stays near 1
+  and a skip forward inside the buffer shortens the lead for good, so a fed stream only drains below 0.75
+  growth, or below 1 with < 12 s buffered (critical as usual).
 - iOS evicts buffered media under memory pressure, also ahead of playback. Watched data is removed first (10 s kept
   behind); if the data at the position still ends before what was appended, the stream fails at once (`network`
   error) and the player restarts at the position instead of stalling at the hole.
 - A paced stream keeps coming during a pause: after 20 s paused the feed stops, and playing on restarts the stream
   at the position.
+- iOS refuses `play()` on an element no tap started (the hidden slot, or a remounted player's new elements). So
+  every switch (sidegrade, upgrade, step down, subtitles release) restarts the playing element on the new source
+  at the position (`switchInPlace`: probe, then a restart with a short loading screen). Only a source failure still remounts the player; a refused start there shows the play
+  button instead of the loading screen (`play-rejected` in the log).
 - Playback log (client `web`): `device` (`fed=true`), `feed-hold`, `feed-quota`, `feed-stuck` (where the feed waits
   after 5 s without data), `feed-evicted`, `feed-paused-out`, `feed-end`, `feed-error`, and `timeline` samples for
-  the first 3 minutes (element clock, frame time, stream offset, buffered range).
+  the first 3 minutes (element clock, frame time, stream offset, buffered range); every player also logs `switch`
+  (seamless switch result and why it was dropped) and `play-rejected`.
 
 Release from the web app: an open player marks its title / episode as playing (`holdPlaying` in `api.ts`) and
 `releaseTitle` skips a playing title, so only that player releases it when it closes (or on Next). The detail page

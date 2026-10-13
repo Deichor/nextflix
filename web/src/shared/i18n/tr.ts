@@ -536,6 +536,7 @@ export const tr: Messages = {
   'player.forward10Touch': '10 saniye ileri',
   'player.fullscreenTouch': 'Tam ekran',
   'player.exitFullscreenTouch': 'Tam ekrandan çık',
+  'player.homeScreenHint': "Safari çubuğu olmadan tam ekran için: Paylaş > Ana Ekrana Ekle, sonra Nextflix'i ana ekrandan aç",
 
   'nav.tabBar': 'Ana gezinme',
   'nav.newPopularShort': 'Yeni',
