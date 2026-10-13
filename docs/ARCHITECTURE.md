@@ -13,6 +13,8 @@ web/                        Next.js 16 (App Router), React 19, TypeScript
   src/app/                  thin routes: export { default } from '@/features/...'
   src/features/<domain>/    screens, components, api/store files of one domain
   src/shared/               lib (api, profile, image), i18n, navigation, hooks, ui, types
+tv/webos/                   LG webOS app (Vite + React + TypeScript), see tv/webos/README.md
+tv/android/                 Android TV / Google TV app (Kotlin, Compose for TV, Media3), see tv/android/README.md
 deploy/                     docker-compose.yml, server.Dockerfile, web.Dockerfile, config/*.env.example
 scripts/                    check-backend.sh, check-frontend.sh, tidy-backend.sh, playback-log.sh, migrate-from-homeflix.sh
 docs/                       this folder
@@ -1757,6 +1759,22 @@ and one lookup per title).
   with several seasons only once, at its best rank. They are stored in `top10_lists`, so a restart serves them
   immediately; a refresh runs at startup when any list is missing or older than 12 h, then every 12 h (1 h after a
   failure). A failed download or a list without any match keeps the last good list.
+
+## TV apps
+
+Two TV clients use the same API as the web app. Besides the access rules below, their only client-specific inputs
+are the playback caps they send (`hevc`, `hdr`, `dv`, `atmos`, `acodecs`, `split_acodecs`, see docs/API.md) and the
+playback log `client`.
+
+- `tv/webos/` (LG): a packaged web app served by the `tvapp` container. It is loaded from `file://`, so its
+  requests carry `Origin: null` and need `?app_key=<TV_APP_KEY>`. The player feeds `/play` into Media Source
+  Extensions with byte budgets, split audio and seamless splices (`player/mseStream.ts`).
+- `tv/android/` (Android TV / Google TV): a native app (APK). It sends no `Origin`, so the Host check (LAN
+  addresses, `nextflix.local`) is all that applies. ExoPlayer plays the live fragmented MP4 without its own
+  retries; seeks outside the buffer, audio track changes, subalt and late upgrades become a new `/play` request
+  at the current position instead of a splice. It ports the webOS rules (resolve, reuse, probe length check,
+  seekpoint, stall / sidegrade / upgrade, keepalive, progress, release, next episode, subtitles) and
+  logs as client `tv`. It also publishes the profile's Continue Watching to the Android TV home screen (Watch Next).
 
 ## Containers
 

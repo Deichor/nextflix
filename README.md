@@ -80,9 +80,9 @@ Advanced settings hold the indexer, the optional TorBox account, subtitle provid
 
 ## Watch on every screen
 
-| Laptop and desktop | Phone and tablet | LG TV (webOS) |
-|---|---|---|
-| Open the web app in any modern browser. | The web app turns into a mobile layout with a bottom tab bar and touch controls. | A dedicated TV app made for the remote: arrow keys, on-screen keyboard, the same profiles and progress. |
+| Laptop and desktop | Phone and tablet | LG TV (webOS) | Android TV and Google TV |
+|---|---|---|---|
+| Open the web app in any modern browser. | The web app turns into a mobile layout with a bottom tab bar and touch controls. | A dedicated TV app made for the remote: arrow keys, on-screen keyboard, the same profiles and progress. | A native app with the same screens and remote controls, plus your Continue watching on the TV's home screen and voice search. |
 
 <p>
   <img src="docs/screenshots/web-mobile-home.jpg" alt="Nextflix on a phone" width="220">
@@ -119,6 +119,7 @@ Now open **http://nextflix.local** (or `http://<computer-ip>:3008`) on any devic
 
 - Updating: `git pull`, then run step 4 again. Your profiles and progress are kept.
 - Installing the TV app on an LG TV: [tv/webos/README.md](tv/webos/README.md).
+- Installing the Android TV / Google TV app: [tv/android/README.md](tv/android/README.md).
 - Everything else (ports, backups, troubleshooting): [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ### Titles have no artwork?
@@ -137,9 +138,10 @@ Other devices at home don't need any change: all artwork is served through Nextf
 
 ## For developers
 
-Nextflix is a small modular monolith: one Go server, one Next.js web app, an LG webOS app and a few off-the-shelf
-containers. It was originally based on [azad25/homeflix-wifi](https://github.com/azad25/homeflix-wifi) and has
-since been restructured and largely rewritten.
+Nextflix is a small modular monolith: one Go server, one Next.js web app, an LG webOS app, a native Android TV app
+(`tv/android/`, built into an APK, not a container) and a few off-the-shelf containers. It was originally based on
+[azad25/homeflix-wifi](https://github.com/azad25/homeflix-wifi) and has since been restructured and largely
+rewritten.
 
 | Container | What it does | Port |
 |---|---|---|
@@ -162,6 +164,7 @@ mounted read-only (from Windows, call them through WSL):
 wsl -d Ubuntu-24.04 -- bash /mnt/c/<path>/scripts/check-backend.sh    # prints GO_BUILD=ok|failed
 wsl -d Ubuntu-24.04 -- bash /mnt/c/<path>/scripts/check-frontend.sh   # prints tsc output and TSC_EXIT=<n>
 wsl -d Ubuntu-24.04 -- bash /mnt/c/<path>/scripts/tidy-backend.sh     # go mod tidy in a container
+wsl -d Ubuntu-24.04 -- bash /mnt/c/<path>/tv/android/scripts/check.sh   # Android TV app, prints GRADLE_EXIT=<n>
 ```
 
 `check-backend.sh` takes an optional package list and `check-frontend.sh` an optional regex that counts the type
