@@ -139,7 +139,24 @@ data class HomeFeeds(
     val popularTv: List<Title>,
     val onTheAirTv: List<Title>,
     val airingToday: List<Title>,
-)
+    /** false: the movie feed failed and its lists are empty */
+    val hasMovies: Boolean = true,
+    /** false: the TV feed failed and its lists are empty */
+    val hasTv: Boolean = true,
+) {
+    /** These feeds with a failed side taken from [previous]. */
+    fun over(previous: HomeFeeds?): HomeFeeds {
+        if (previous == null || (hasMovies && hasTv)) return this
+        val m = if (hasMovies) this else previous
+        val t = if (hasTv) this else previous
+        return HomeFeeds(
+            m.trendingMovies, m.trendingWeekMovies, m.nowPlaying, m.upcomingMovies,
+            t.trendingTv, t.popularTv, t.onTheAirTv, t.airingToday,
+            hasMovies = m.hasMovies,
+            hasTv = t.hasTv,
+        )
+    }
+}
 
 /** One server recommendation row (GET /api/recommendations). [reason]: top_picks, popular, because_loved, ... */
 @Immutable

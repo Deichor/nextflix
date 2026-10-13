@@ -3,6 +3,8 @@
 # (arrow keys = D-pad, Enter = OK, Esc = Back). The AVD lives in the volume nextflix-tv-emulator-avd.
 #   emulator.sh start            builds the image on first use, boots the emulator, waits for Android
 #   emulator.sh install [apk]    installs out/nextflix-tv-<version>-debug.apk (or the given path under tv/android)
+#   emulator.sh install-release  installs the release APK (scripts/build.sh) and compiles it with its baseline profile
+#                                at once; measure start-up only on this one (the debug APK runs unoptimized code)
 #   emulator.sh launch           starts the app
 #   emulator.sh shot [name]      screenshot to out/emulator/<name>.png
 #   emulator.sh key <keys...>    sends key events (DPAD_UP, DPAD_CENTER, BACK, ...)
@@ -48,6 +50,12 @@ case "${1:-}" in
     case "$apk" in out/*) ;; *) echo "APK must be under tv/android/out" >&2; exit 2 ;; esac
     dadb install -r "/work/$apk"
     ;;
+  install-release)
+    apk="out/nextflix-tv-$(app_version).apk"
+    # Debug and release are signed with different keys: an installed debug APK must be uninstalled first
+    dadb install -r "/work/$apk" || { echo "install failed; if the debug APK is installed: emulator.sh adb uninstall $APP_ID" >&2; exit 1; }
+    dadb shell cmd package compile -m speed-profile -f "$APP_ID"
+    ;;
   launch) dadb shell monkey -p "$APP_ID" -c android.intent.category.LEANBACK_LAUNCHER 1 >/dev/null; echo launched ;;
   shot)
     mkdir -p "$DIR/out/emulator"
@@ -58,5 +66,5 @@ case "${1:-}" in
   adb) shift; dadb "$@" ;;
   logs) docker logs --tail 50 "$NAME" ;;
   stop) docker rm -f "$NAME" >/dev/null 2>&1 || true; echo stopped ;;
-  *) sed -n '2,12p' "$0"; exit 2 ;;
+  *) sed -n '2,14p' "$0"; exit 2 ;;
 esac

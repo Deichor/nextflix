@@ -19,6 +19,7 @@ coil = "3.6.3"
 datastore = "1.2.1"
 junit = "4.13.2"
 tvprovider = "1.1.0"
+profileinstaller = "1.4.1"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -51,6 +52,7 @@ coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil" 
 coil-network-okhttp = { module = "io.coil-kt.coil3:coil-network-okhttp", version.ref = "coil" }
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-tvprovider = { module = "androidx.tvprovider:tvprovider", version.ref = "tvprovider" }
+androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileinstaller" }
 
 [bundles]
 compose = ["compose-ui", "compose-ui-graphics", "compose-foundation", "compose-animation", "compose-runtime", "compose-ui-tooling-preview", "tv-material"]

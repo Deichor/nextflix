@@ -8,12 +8,14 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.model.Profile
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import java.io.IOException
 
 /** The saved server address and the active profile. */
 @Immutable
@@ -28,7 +30,7 @@ data class SessionState(val server: String?, val profile: Profile?) {
  */
 class Session internal constructor(
     private val store: DataStore<Preferences>,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     private val json: Json,
 ) {
     private val _state = MutableStateFlow<SessionState?>(null)
@@ -59,12 +61,28 @@ class Session internal constructor(
         store.edit { it[SERVER] = normalized }
     }
 
-    /** Makes [profile] active (null: none). Takes effect at once for headers and the UI language. */
-    suspend fun setProfile(profile: Profile?) {
+    /**
+     * Makes [profile] active (null: none) at once for headers and the UI language; saving it runs in the background
+     * (the returned job ends after the write).
+     */
+    fun selectProfile(profile: Profile?): Job {
         _state.value = current.copy(profile = profile)
-        store.edit {
-            if (profile == null) it.remove(PROFILE) else it[PROFILE] = json.encodeToString(Profile.serializer(), profile)
+        return scope.launch {
+            try {
+                store.edit {
+                    // The latest choice wins when two picks overlap
+                    val latest = current.profile
+                    if (latest == null) it.remove(PROFILE) else it[PROFILE] = json.encodeToString(Profile.serializer(), latest)
+                }
+            } catch (_: IOException) {
+                // Kept for this run; the next pick saves again
+            }
         }
+    }
+
+    /** [selectProfile], returning after the write. */
+    suspend fun setProfile(profile: Profile?) {
+        selectProfile(profile).join()
     }
 
     private companion object {

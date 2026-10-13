@@ -38,10 +38,11 @@ internal abstract class LoadingViewModel : ViewModel() {
 
     protected fun <T> query(): MutableStateFlow<Query<T>> = MutableStateFlow(Query())
 
-    protected fun <T> MutableStateFlow<Query<T>>.load(block: suspend () -> T) {
+    /** Loads into this query (cancels its load still running); the job ends when the value is set. */
+    protected fun <T> MutableStateFlow<Query<T>>.load(block: suspend () -> T): Job {
         jobs.remove(this)?.cancel()
         val target = this
-        jobs[this] = viewModelScope.launch {
+        val job = viewModelScope.launch {
             try {
                 val data = block()
                 target.value = Query(data)
@@ -51,5 +52,7 @@ internal abstract class LoadingViewModel : ViewModel() {
                 target.update { if (it.data != null) it else Query(failed = true) }
             }
         }
+        jobs[this] = job
+        return job
     }
 }

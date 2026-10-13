@@ -81,10 +81,12 @@ import com.nextflix.tv.core.ui.components.BackdropCard
 import com.nextflix.tv.core.ui.components.ButtonStyle
 import com.nextflix.tv.core.ui.components.ContentRow
 import com.nextflix.tv.core.ui.components.LoadingBox
+import com.nextflix.tv.core.ui.components.LocalSkeletonPulse
 import com.nextflix.tv.core.ui.components.NfButton
 import com.nextflix.tv.core.ui.components.NfChip
 import com.nextflix.tv.core.ui.components.ProgressBar
 import com.nextflix.tv.core.ui.components.RoundIconButton
+import com.nextflix.tv.core.ui.components.rememberSkeletonPulse
 import com.nextflix.tv.core.ui.components.rememberStartAlignedBringIntoView
 import com.nextflix.tv.core.ui.focus.FocusRestore
 import com.nextflix.tv.core.ui.focus.restorableFocus
@@ -242,14 +244,16 @@ private fun DetailContent(d: Details, vm: DetailViewModel, nav: Navigator, autop
                     modifier = Modifier.section(scroller),
                 )
             }
-            ContentRow(
-                title = detailStrings.current().moreLikeThis,
-                items = related,
-                rowKey = "related",
-                key = { it.key },
-                modifier = Modifier.section(scroller),
-            ) { _, item, itemModifier ->
-                BackdropCard(item, onClick = { nav.push(Route.Detail(item.type, item.id)) }, modifier = itemModifier)
+            CompositionLocalProvider(LocalSkeletonPulse provides rememberSkeletonPulse(related == null)) {
+                ContentRow(
+                    title = detailStrings.current().moreLikeThis,
+                    items = related,
+                    rowKey = "related",
+                    key = { it.key },
+                    modifier = Modifier.section(scroller),
+                ) { _, item, itemModifier ->
+                    BackdropCard(item, onClick = { nav.push(Route.Detail(item.type, item.id)) }, modifier = itemModifier)
+                }
             }
             Spacer(Modifier.height(320.dp))
         }
@@ -519,7 +523,10 @@ private fun EpisodesSection(
         }
         key(activeSeason) {
             val state = rememberLazyListState()
-            CompositionLocalProvider(LocalBringIntoViewSpec provides rememberStartAlignedBringIntoView(Dimens.ScreenPadH)) {
+            CompositionLocalProvider(
+                LocalBringIntoViewSpec provides rememberStartAlignedBringIntoView(Dimens.ScreenPadH),
+                LocalSkeletonPulse provides rememberSkeletonPulse(episodes == null),
+            ) {
                 LazyRow(
                     state = state,
                     modifier = Modifier.focusRestorer(),

@@ -1,10 +1,13 @@
 package com.nextflix.tv.core.data
 
+import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.model.Availability
 import com.nextflix.tv.core.model.AvailabilityStatus
 import com.nextflix.tv.core.model.Details
 import com.nextflix.tv.core.model.EpisodeInfo
+import com.nextflix.tv.core.model.HomeData
 import com.nextflix.tv.core.model.HomeFeeds
+import com.nextflix.tv.core.model.HomeGenres
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.model.RecommendationRow
 import com.nextflix.tv.core.model.SeasonInfo
@@ -13,99 +16,144 @@ import com.nextflix.tv.core.model.Top10Region
 import com.nextflix.tv.core.model.placeholderEpisodes
 import com.nextflix.tv.core.model.toDetails
 import com.nextflix.tv.core.model.toEpisodes
-import com.nextflix.tv.core.model.toTitle
 import com.nextflix.tv.core.model.toTitles
 import com.nextflix.tv.core.net.AnswerCache
 import com.nextflix.tv.core.net.ApiClient
 import com.nextflix.tv.core.net.ApiException
 import com.nextflix.tv.core.net.arr
-import com.nextflix.tv.core.net.int
 import com.nextflix.tv.core.net.obj
 import com.nextflix.tv.core.net.str
+import com.nextflix.tv.core.session.Session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 
 /**
  * TMDB catalog through the server (docs/API.md "Catalog"), shared by Browse, Detail, Search and the player.
- * Answers follow the profile language (X-Lang). Cached answers are scoped by server, profile and language.
+ * Answers follow the profile language (X-Lang). Cached answers are scoped by server, profile and language; lists
+ * that do not depend on the profile only by server and language.
  */
-class CatalogRepository internal constructor(private val api: ApiClient, private val cache: AnswerCache) {
+class CatalogRepository internal constructor(
+    private val api: ApiClient,
+    private val cache: AnswerCache,
+    private val session: Session,
+) {
 
     private suspend fun <T> cached(key: String, ttl: Duration = 10.minutes, load: suspend () -> T): T =
         cache.get(cache.scoped(key), ttl, load = load)
 
+    /** For answers that do not depend on the profile (only server and language). */
+    private suspend fun <T> shared(key: String, ttl: Duration = 10.minutes, load: suspend () -> T): T =
+        cache.get(cache.langScoped(key), ttl, load = load)
+
+    /** Servers that answered 404 / 405 to GET /api/home in this run (asked again after a restart). */
+    @Volatile
+    private var oldServers: Set<String> = emptySet()
+
     // ---- Lists ----
 
+    /**
+     * Home's catalog rows in one call (GET /api/home), shared by every profile with [language]. A server without
+     * that endpoint gets the same data from the single endpoints. Answers with null sections are not cached.
+     */
+    suspend fun home(language: AppLanguage = session.language): HomeData {
+        val server = session.server ?: throw ApiException.NoServer()
+        return cache.get(cache.langScoped("home", language), 10.minutes, keep = { it.complete }) {
+            if (server in oldServers) {
+                legacyHome(language)
+            } else {
+                try {
+                    api.getJson("/api/home", mapOf("x_lang" to language.code)).toHomeData().also { seed(language, it) }
+                } catch (e: ApiException.Http) {
+                    if (!e.isOldServer()) throw e
+                    oldServers = oldServers + server
+                    legacyHome(language)
+                }
+            }
+        }
+    }
+
+    /** Fills the single endpoints' cache entries (Movies tab) from a GET /api/home answer (same bodies). */
+    private fun seed(language: AppLanguage, data: HomeData) {
+        fun put(key: String, value: Any?) {
+            if (value != null) cache.store(cache.langScoped(key, language), 10.minutes, value)
+        }
+        put("feeds", data.feeds?.takeIf { it.hasMovies && it.hasTv })
+        put("popular-movies", data.popular)
+        put(top10Key(Top10Region.Turkey, MediaType.Movie), data.top10Movie)
+        put(top10Key(Top10Region.Turkey, MediaType.Tv), data.top10Tv)
+        HomeGenres.forEach { (id, params) -> put(discoverKey(params), data.genres[id]) }
+    }
+
+    private fun top10Key(region: Top10Region, type: MediaType) = "top10-${region.apiName}-${type.apiName}"
+
+    private fun discoverKey(params: Map<String, String>) = "discover-movie-${params.entries.sortedBy { it.key }.joinToString("&")}"
+
+    /** GET /api/home of an old server: the single endpoints in parallel. */
+    private suspend fun legacyHome(language: AppLanguage): HomeData {
+        // The single endpoints follow the profile language (X-Lang)
+        if (language != session.language) throw ApiException.Decode(IllegalStateException("old server: home in $language"))
+        val data = coroutineScope {
+            val feeds = async { orNull { homeFeeds() } }
+            val popular = async { orNull { popularMovies() } }
+            val trMovie = async { orNull { top10(Top10Region.Turkey, MediaType.Movie) } }
+            val trTv = async { orNull { top10(Top10Region.Turkey, MediaType.Tv) } }
+            val genres = HomeGenres.mapValues { (_, params) -> async { orNull { discoverMovies(params) } } }
+            HomeData(feeds.await(), popular.await(), trMovie.await(), trTv.await(), genres.mapValues { it.value.await() })
+        }
+        if (data.empty) throw ApiException.Decode(IllegalStateException("home unavailable"))
+        return data
+    }
+
     /** Home feeds; throws only when both feed requests fail. */
-    suspend fun homeFeeds(): HomeFeeds = cached("feeds") {
+    suspend fun homeFeeds(): HomeFeeds = shared("feeds") {
         coroutineScope {
             val movies = async { orNull { api.getJson("/api/upcoming-movies") } }
             val tv = async { orNull { api.getJson("/api/upcoming-tv-series") } }
-            val m = movies.await()?.obj
-            val t = tv.await()?.obj
-            if (m == null && t == null) throw ApiException.Decode(IllegalStateException("feeds unavailable"))
-            HomeFeeds(
-                trendingMovies = m?.get("trending_daily").toTitles(MediaType.Movie),
-                trendingWeekMovies = m?.get("trending_weekly").toTitles(MediaType.Movie),
-                nowPlaying = m?.get("now_playing").toTitles(MediaType.Movie),
-                upcomingMovies = m?.get("upcoming").toTitles(MediaType.Movie),
-                trendingTv = t?.get("trending_daily").toTitles(MediaType.Tv),
-                popularTv = t?.get("trending_weekly").toTitles(MediaType.Tv),
-                onTheAirTv = t?.get("on_the_air").toTitles(MediaType.Tv),
-                airingToday = t?.get("airing_today").toTitles(MediaType.Tv),
-            )
+            feedsOf(movies.await()?.obj, tv.await()?.obj) ?: throw ApiException.Decode(IllegalStateException("feeds unavailable"))
         }
     }
 
     /** Netflix Top 10 of a region; titles carry [Title.rank]. 503 before the first download. */
-    suspend fun top10(region: Top10Region, type: MediaType): List<Title> = cached("top10-${region.apiName}-${type.apiName}") {
-        val items = api.getJson("/api/top10", mapOf("region" to region.apiName, "type" to type.apiName)).obj?.arr("items").orEmpty()
-        items.mapIndexedNotNull { i, raw ->
-            raw.toTitle(type)?.takeIf { it.poster.isNotEmpty() || it.backdrop.isNotEmpty() }?.let { it.copy(rank = it.rank ?: (i + 1)) }
-        }
+    suspend fun top10(region: Top10Region, type: MediaType): List<Title> = shared(top10Key(region, type)) {
+        top10Of(api.getJson("/api/top10", mapOf("region" to region.apiName, "type" to type.apiName)), type)
     }
 
     /** Personal rows (top picks, because you loved ...); not cached, rows change after ratings. */
-    suspend fun recommendations(profileId: Int): List<RecommendationRow> {
-        val rows = api.getJson("/api/recommendations", mapOf("profile_id" to profileId)).obj?.arr("rows").orEmpty()
-        return rows.mapNotNull { raw ->
-            val r = raw.obj ?: return@mapNotNull null
-            val id = r.str("id").orEmpty()
-            val items = r["items"].toTitles(MediaType.Movie)
-            if (id.isEmpty() || items.isEmpty()) null else RecommendationRow(id, r.str("title").orEmpty(), r.str("reason").orEmpty(), items)
-        }
-    }
+    suspend fun recommendations(profileId: Int): List<RecommendationRow> =
+        recommendationRowsOf(api.getJson("/api/recommendations", mapOf("profile_id" to profileId)).obj?.get("rows"))
+
+    /** Home's recommendations: cached briefly per progress / ratings version (shared with the Home prefetch). */
+    suspend fun homeRecommendations(profileId: Int, progressVersion: Int, ratingsVersion: Int): List<RecommendationRow> =
+        cached("browse-recs-$profileId-p$progressVersion-r$ratingsVersion", 5.minutes) { recommendations(profileId) }
 
     /** The profile's favorites, most recently added first. */
-    suspend fun favorites(profileId: Int): List<Title> {
-        val list = api.getJson("/api/favorites", mapOf("profile_id" to profileId)).arr.orEmpty()
-        return list.mapNotNull { raw ->
-            val o = raw.obj ?: return@mapNotNull null
-            o.toTitleWith(idKey = "tmdb_id")?.takeIf { it.poster.isNotEmpty() || it.backdrop.isNotEmpty() }
-        }
-    }
+    suspend fun favorites(profileId: Int): List<Title> =
+        favoritesOf(api.getJson("/api/favorites", mapOf("profile_id" to profileId)))
 
-    suspend fun popularMovies(): List<Title> = cached("popular-movies") {
-        api.getJson("/api/tmdb/movie/popular").obj?.get("results").toTitles(MediaType.Movie)
+    /** Home's favorites: cached briefly per ratings version (shared with the Home prefetch). */
+    suspend fun homeFavorites(profileId: Int, ratingsVersion: Int): List<Title> =
+        cached("browse-favs-$profileId-r$ratingsVersion", 1.minutes) { favorites(profileId) }
+
+    suspend fun popularMovies(): List<Title> = shared("popular-movies") {
+        resultsOf(api.getJson("/api/tmdb/movie/popular"), MediaType.Movie)
     }
 
     /** TMDB discover for movies; [params] like `with_genres=28|12`, `vote_count.gte=300`, `sort_by=...`. */
     suspend fun discoverMovies(params: Map<String, String>): List<Title> =
-        cached("discover-movie-${params.entries.sortedBy { it.key }.joinToString("&")}") {
+        shared(discoverKey(params)) {
             val q = mapOf("sort_by" to "popularity.desc", "include_adult" to "false") + params
-            api.getJson("/api/tmdb/discover/movie", q).obj?.get("results").toTitles(MediaType.Movie)
+            resultsOf(api.getJson("/api/tmdb/discover/movie", q), MediaType.Movie)
         }
 
     /** Shows on one streaming provider (TV Shows page rows). */
     suspend fun providerTv(providerId: Int, sortBy: String = "popularity.desc"): List<Title> =
-        cached("provider-$providerId-$sortBy") {
-            api.getJson("/api/providers/$providerId/tv", mapOf("sort_by" to sortBy, "page" to 1)).obj?.get("results").toTitles(MediaType.Tv)
+        shared("provider-$providerId-$sortBy") {
+            resultsOf(api.getJson("/api/providers/$providerId/tv", mapOf("sort_by" to sortBy, "page" to 1)), MediaType.Tv)
         }
 
     // ---- Details ----
@@ -174,13 +222,6 @@ fun JsonElement?.toAvailability(): Availability? {
         else -> return null
     }
     return Availability(status, o.str("release_date"), o.str("theatrical_date"), o.str("digital_date"))
-}
-
-private fun JsonObject.toTitleWith(idKey: String): Title? {
-    val id = int(idKey) ?: return null
-    val type = MediaType.of(str("media_type")) ?: MediaType.Movie
-    val name = str("title")?.takeIf { it.isNotEmpty() } ?: return null
-    return Title(id = id, type = type, title = name, poster = str("poster_path").orEmpty(), backdrop = str("backdrop_path").orEmpty())
 }
 
 /** Runs [block], null on any failure except cancellation. */

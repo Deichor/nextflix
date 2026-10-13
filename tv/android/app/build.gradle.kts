@@ -56,6 +56,8 @@ dependencies {
     implementation(project(":feature:search"))
     implementation(project(":feature:account"))
     implementation(libs.androidx.tvprovider)
+    // Installs the baseline profile (src/main/baseline-prof.txt) so the first launch runs precompiled code
+    implementation(libs.androidx.profileinstaller)
 
     debugImplementation(libs.compose.ui.tooling)
 }

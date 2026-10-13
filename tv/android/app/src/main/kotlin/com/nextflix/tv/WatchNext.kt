@@ -26,7 +26,7 @@ import java.time.OffsetDateTime
 /**
  * Feeds the Android TV / Google TV home screen's "Continue watching" (Watch Next) row from the active profile's
  * Continue Watching list. Cards open the player (resume, or the next episode) through [AppLink.Open].
- * Synced when the profile changes, a while after progress was saved, and when the app goes to the background.
+ * Synced a while after the profile changed or progress was saved, and when the app goes to the background.
  * A card the viewer removed from the row stays hidden until that title is watched again.
  */
 class WatchNext(private val context: Context, private val core: Core) {
@@ -38,7 +38,10 @@ class WatchNext(private val context: Context, private val core: Core) {
     fun start() {
         if (!enabled) return
         core.scope.launch {
-            core.session.state.map { it?.server to it?.profile?.id }.distinctUntilChanged().collect { syncNow() }
+            // Waits until Home has loaded (it fills the shared Continue Watching cache)
+            core.session.state.map { it?.server to it?.profile?.id }.distinctUntilChanged()
+                .debounce(SESSION_DEBOUNCE_MS)
+                .collect { syncNow() }
         }
         core.scope.launch {
             core.progress.version.drop(1).debounce(PROGRESS_DEBOUNCE_MS).collect { syncNow() }
@@ -63,7 +66,7 @@ class WatchNext(private val context: Context, private val core: Core) {
     }
 
     private suspend fun sync(server: String, profileId: Int) {
-        val items = core.progress.continueWatching(profileId).take(MAX_PROGRAMS)
+        val items = core.progress.continueWatchingCached(profileId).take(MAX_PROGRAMS)
         if (core.session.server != server || core.session.profileId != profileId) return
         val helper = PreviewChannelHelper(context)
         val resolver = context.contentResolver
@@ -146,5 +149,6 @@ class WatchNext(private val context: Context, private val core: Core) {
         const val TAG = "Nextflix"
         const val MAX_PROGRAMS = 12
         const val PROGRESS_DEBOUNCE_MS = 30_000L
+        const val SESSION_DEBOUNCE_MS = 15_000L
     }
 }

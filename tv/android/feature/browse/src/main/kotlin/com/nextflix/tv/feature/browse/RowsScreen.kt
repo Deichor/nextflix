@@ -49,8 +49,10 @@ import com.nextflix.tv.core.ui.components.ButtonStyle
 import com.nextflix.tv.core.ui.components.ContentRow
 import com.nextflix.tv.core.ui.components.ContinueCard
 import com.nextflix.tv.core.ui.components.ErrorMessage
+import com.nextflix.tv.core.ui.components.LocalSkeletonPulse
 import com.nextflix.tv.core.ui.components.NfButton
 import com.nextflix.tv.core.ui.components.RankCard
+import com.nextflix.tv.core.ui.components.rememberSkeletonPulse
 import com.nextflix.tv.core.ui.focus.FocusRestore
 import com.nextflix.tv.core.ui.focus.onPreviewKeyDown
 import com.nextflix.tv.core.ui.focus.rescueFocus
@@ -185,7 +187,11 @@ internal fun RowsScreen(
         val drop by animateDpAsState(if (inRows || featured == null) 0.dp else RowsDrop, tween(300), label = "rows-drop")
         if (nothing) {
             ErrorMessage(s.errorNetwork, onRetry, Modifier.padding(top = RowsTop))
-        } else CompositionLocalProvider(LocalBringIntoViewSpec provides NoAutoScroll) {
+        } else CompositionLocalProvider(
+            LocalBringIntoViewSpec provides NoAutoScroll,
+            // One pulse for every skeleton card, running only while a row loads
+            LocalSkeletonPulse provides rememberSkeletonPulse(loading),
+        ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
@@ -202,7 +208,16 @@ internal fun RowsScreen(
                         }
                     },
             ) {
-                itemsIndexed(shown, key = { _, row -> row.id }) { index, row ->
+                itemsIndexed(
+                    shown,
+                    key = { _, row -> row.id },
+                    contentType = { _, row ->
+                        when (row) {
+                            is ContinueRow -> "continue"
+                            is TitleRow -> if (row.rank) "rank" else "titles"
+                        }
+                    },
+                ) { index, row ->
                     val rowModifier = Modifier
                         .padding(bottom = 8.dp)
                         .onFocusChanged {
@@ -226,7 +241,7 @@ internal fun RowsScreen(
                     }
                 }
                 if (surprise) {
-                    item(key = FOOTER_ID) {
+                    item(key = FOOTER_ID, contentType = "footer") {
                         Box(
                             Modifier
                                 .fillMaxWidth()
@@ -258,7 +273,7 @@ internal fun RowsScreen(
                         }
                     }
                 }
-                item(key = "rows-end") { Spacer(Modifier.height(RowsEnd)) }
+                item(key = "rows-end", contentType = "rows-end") { Spacer(Modifier.height(RowsEnd)) }
             }
         }
     }

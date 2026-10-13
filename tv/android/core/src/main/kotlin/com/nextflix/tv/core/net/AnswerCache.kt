@@ -1,6 +1,7 @@
 package com.nextflix.tv.core.net
 
 import android.os.SystemClock
+import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.session.Session
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -26,6 +27,9 @@ class AnswerCache internal constructor(
         val s = session.current
         return "${s.server}|${s.profile?.id ?: 0}|${s.language.code}|$key"
     }
+
+    /** Key of a profile independent answer: server and language only, so every profile shares it. */
+    fun langScoped(key: String, language: AppLanguage = session.language): String = "${session.server}|${language.code}|$key"
 
     /** The cached answer, or null when missing or expired. */
     @Suppress("UNCHECKED_CAST")

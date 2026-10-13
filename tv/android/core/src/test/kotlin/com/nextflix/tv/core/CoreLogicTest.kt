@@ -1,22 +1,39 @@
 package com.nextflix.tv.core
 
+import com.nextflix.tv.core.data.favoritesOf
+import com.nextflix.tv.core.data.feedsOf
+import com.nextflix.tv.core.data.isOldServer
+import com.nextflix.tv.core.data.recommendationRowsOf
+import com.nextflix.tv.core.data.resultsOf
+import com.nextflix.tv.core.data.toFavoriteJson
+import com.nextflix.tv.core.data.toHomeData
+import com.nextflix.tv.core.data.toJson
+import com.nextflix.tv.core.data.top10Of
+import com.nextflix.tv.core.model.HomeData
+import com.nextflix.tv.core.model.HomeGenres
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.model.SeasonInfo
 import com.nextflix.tv.core.model.StreamProgress
+import com.nextflix.tv.core.model.Title
 import com.nextflix.tv.core.model.toDetails
 import com.nextflix.tv.core.model.toPlayRequest
 import com.nextflix.tv.core.model.toTitles
 import com.nextflix.tv.core.nav.PlayRequest
 import com.nextflix.tv.core.nav.Route
+import com.nextflix.tv.core.net.ApiException
 import com.nextflix.tv.core.net.NextflixJson
+import com.nextflix.tv.core.net.obj
 import com.nextflix.tv.core.net.TmdbImages
 import com.nextflix.tv.core.prefs.SubtitleSize
 import com.nextflix.tv.core.prefs.SubtitleStyle
 import com.nextflix.tv.core.session.ServerAddress
 import com.nextflix.tv.core.stream.PlaybackCaps
 import com.nextflix.tv.core.stream.ResolveParams
+import kotlinx.serialization.json.JsonArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CoreLogicTest {
@@ -118,5 +135,87 @@ class CoreLogicTest {
         val style = SubtitleStyle(size = SubtitleSize.XLarge)
         assertEquals(SubtitleSize.Small, style.cycle(SubtitleStyle.Option.Size).size)
         assertEquals(SubtitleSize.Large, style.cycle(SubtitleStyle.Option.Size, -1).size)
+    }
+
+    // ---- GET /api/home ----
+
+    private val moviesBody = """{"trending_daily": [{"id": 1, "title": "M1", "backdrop_path": "/b.jpg", "overview": "o"}],
+        "trending_weekly": [], "now_playing": [], "upcoming": [{"id": 2, "title": "M2", "poster_path": "/p.jpg"}], "cached_at": "x"}"""
+    private val tvBody = """{"airing_today": [], "on_the_air": [{"id": 3, "name": "S3", "poster_path": "/p.jpg"}],
+        "trending_daily": [{"id": 4, "name": "S4", "backdrop_path": "/b.jpg"}], "trending_weekly": [], "cached_at": "x"}"""
+    private val popularBody = """{"results": [{"id": 5, "title": "M5", "poster_path": "/p.jpg", "genre_ids": [28]}], "page": 1}"""
+    private val top10Body = """{"region": "TR", "week": "w", "type": "movie",
+        "items": [{"id": 6, "title": "M6", "poster_path": "/p.jpg"}, {"id": 7, "title": "No image"}, {"id": 8, "title": "M8", "poster_path": "/p.jpg", "rank": 9}]}"""
+    private val genreBody = """{"results": [{"id": 10, "title": "M10", "backdrop_path": "/b.jpg"}], "total_results": 1, "filters": {}}"""
+
+    private fun homeBody(genres: String = "[]", tv: String = tvBody, top10Tv: String = "null") = """
+        {"version": 1, "lang": "en", "generated_at": "2026-10-13T10:00:00Z",
+         "upcoming_movies": $moviesBody, "upcoming_tv_series": $tv, "popular_movies": $popularBody,
+         "top10_tr_movie": $top10Body, "top10_tr_tv": $top10Tv, "genres": $genres}
+    """
+
+    private fun json(text: String) = NextflixJson.parseToJsonElement(text)
+
+    @Test
+    fun homeNullSectionsStayNull() {
+        val home = json(homeBody(tv = "null")).toHomeData()
+        assertEquals(listOf("movie-1"), home.feeds?.trendingMovies?.map { it.key })
+        assertEquals(false, home.feeds?.hasTv)
+        assertEquals(emptyList<Title>(), home.feeds?.trendingTv)
+        assertNull(home.top10Tv)
+        assertEquals(listOf(1, 9), home.top10Movie?.map { it.rank })
+        assertFalse(home.complete)
+
+        // A later answer keeps what the earlier one had
+        val earlier = json(homeBody(top10Tv = top10Body)).toHomeData()
+        val merged = home.over(earlier)
+        assertEquals(listOf("tv-4"), merged.feeds?.trendingTv?.map { it.key })
+        assertEquals(listOf("movie-1"), merged.feeds?.trendingMovies?.map { it.key })
+        assertEquals(listOf(6, 8), merged.top10Tv?.map { it.id })
+        assertTrue(json("""{"version": 1}""").toHomeData().empty)
+    }
+
+    @Test
+    fun homeGenresGoById() {
+        val genres = """[{"id": "comedies", "params": {"with_genres": "35"}, "data": $genreBody},
+            {"id": "horror", "params": {}, "data": null}, {"id": "future_row", "params": {}, "data": $genreBody}]"""
+        val home = json(homeBody(genres)).toHomeData()
+        assertEquals(listOf(10), home.genres["comedies"]?.map { it.id })
+        assertNull(home.genres["horror"])
+        assertNull(home.genres["acclaimed"])
+        assertEquals(listOf("action_adventure", "comedies", "scifi_fantasy", "horror", "acclaimed"), HomeGenres.keys.toList())
+        assertFalse(home.complete)
+    }
+
+    @Test
+    fun legacyEndpointsGiveTheSameHome() {
+        val genreRows = HomeGenres.keys.joinToString(",", "[", "]") { """{"id": "$it", "params": {}, "data": $genreBody}""" }
+        val home = json(homeBody(genreRows, top10Tv = top10Body)).toHomeData()
+        // What the old server path builds from the single endpoints
+        val legacy = HomeData(
+            feeds = feedsOf(json(moviesBody).obj, json(tvBody).obj),
+            popular = resultsOf(json(popularBody), MediaType.Movie),
+            top10Movie = top10Of(json(top10Body), MediaType.Movie),
+            top10Tv = top10Of(json(top10Body), MediaType.Tv),
+            genres = HomeGenres.mapValues { resultsOf(json(genreBody), MediaType.Movie) },
+        )
+        assertEquals(legacy, home)
+        assertTrue(home.complete)
+        assertTrue(ApiException.Http(404, "", null).isOldServer())
+        assertTrue(ApiException.Http(405, "", null).isOldServer())
+        assertFalse(ApiException.Http(503, "", null).isOldServer())
+    }
+
+    @Test
+    fun homeSnapshotReadsBackTheSame() {
+        val genreRows = HomeGenres.keys.joinToString(",", "[", "]") { """{"id": "$it", "params": {}, "data": $genreBody}""" }
+        val home = json(homeBody(genreRows, tv = "null")).toHomeData()
+        assertEquals(home, json(home.toJson().toString()).toHomeData())
+
+        val recs = recommendationRowsOf(json("""[{"id": "top", "title": "Top", "reason": "top_picks", "items": [{"id": 1, "title": "A", "poster_path": "/p.jpg", "original_language": "ko"}]}]"""))
+        assertEquals(recs, recommendationRowsOf(JsonArray(recs.map { it.toJson() })))
+        val favs = favoritesOf(json("""[{"tmdb_id": 3, "media_type": "tv", "title": "S", "backdrop_path": "/b.jpg"}]"""))
+        assertEquals(listOf("tv-3"), favs.map { it.key })
+        assertEquals(favs, favoritesOf(JsonArray(favs.map { it.toFavoriteJson() })))
     }
 }

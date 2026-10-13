@@ -81,9 +81,9 @@ fun <T> ContentRow(
                 horizontalArrangement = Arrangement.spacedBy(Dimens.CardGap),
             ) {
                 if (items == null) {
-                    this.items(6) { skeleton() }
+                    this.items(6, contentType = { "skeleton" }) { skeleton() }
                 } else {
-                    itemsIndexed(items, key = { _, item -> key(item) }) { index, item ->
+                    itemsIndexed(items, key = { _, item -> key(item) }, contentType = { _, _ -> "card" }) { index, item ->
                         itemContent(index, item, Modifier.restorableFocus("$rowKey:${key(item)}"))
                     }
                 }

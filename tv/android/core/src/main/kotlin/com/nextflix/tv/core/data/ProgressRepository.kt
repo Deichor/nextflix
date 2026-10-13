@@ -2,6 +2,7 @@ package com.nextflix.tv.core.data
 
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.model.StreamProgress
+import com.nextflix.tv.core.net.AnswerCache
 import com.nextflix.tv.core.net.ApiClient
 import com.nextflix.tv.core.net.ApiException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,12 +12,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonNull
 import java.time.OffsetDateTime
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Watch progress (docs/API.md "Continue watching"). [version] grows after every save / delete, so screens below
  * the player (Home's Continue Watching, Detail's episode bars) reload when they come back and see a newer value.
  */
-class ProgressRepository internal constructor(private val api: ApiClient) {
+class ProgressRepository internal constructor(private val api: ApiClient, private val cache: AnswerCache) {
     private val _version = MutableStateFlow(0)
     val version: StateFlow<Int> = _version.asStateFlow()
 
@@ -27,6 +29,10 @@ class ProgressRepository internal constructor(private val api: ApiClient) {
         val data = api.getJson("/api/stream-progress", mapOf("profile_id" to profileId))
         return if (data == JsonNull) emptyList() else api.decode(listSerializer, data)
     }
+
+    /** [continueWatching] cached for 15 s per progress version (Home, its prefetch and Watch Next share it). */
+    suspend fun continueWatchingCached(profileId: Int): List<StreamProgress> =
+        cache.get(cache.scoped("cw-$profileId-p${version.value}"), 15.seconds) { continueWatching(profileId) }
 
     /** Every entry of one title (finished ones too), newest first; [] on failure. */
     suspend fun forTitle(profileId: Int, type: MediaType, tmdbId: Int): List<StreamProgress> =

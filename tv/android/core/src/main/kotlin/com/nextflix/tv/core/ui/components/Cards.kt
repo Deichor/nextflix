@@ -1,9 +1,8 @@
 package com.nextflix.tv.core.ui.components
 
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -20,18 +19,22 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -103,16 +106,35 @@ fun CardImage(url: String, modifier: Modifier = Modifier, contentScale: ContentS
     )
 }
 
-/** Placeholder card while a row loads (pulses). */
+private object FullAlpha : State<Float> {
+    override val value: Float = 1f
+}
+
+/** Alpha of the skeleton cards' pulse. A screen provides one [rememberSkeletonPulse]; the default does not pulse. */
+val LocalSkeletonPulse = staticCompositionLocalOf<State<Float>> { FullAlpha }
+
+/**
+ * One pulse for every skeleton of a screen, running only while [active] (something loads). The State stays the
+ * same object, so providing it never recomposes the screen; the cards read it while drawing.
+ */
+@Composable
+fun rememberSkeletonPulse(active: Boolean): State<Float> {
+    val pulse = remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(active) {
+        if (active) {
+            animate(1f, 0.55f, animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse)) { value, _ -> pulse.floatValue = value }
+        } else {
+            pulse.floatValue = 1f
+        }
+    }
+    return pulse
+}
+
+/** Placeholder card while a row loads (pulses with [LocalSkeletonPulse], redrawn without recomposing). */
 @Composable
 fun CardSkeleton(width: Dp = Dimens.BackdropCardWidth, height: Dp = Dimens.BackdropCardHeight, modifier: Modifier = Modifier) {
-    val pulse by rememberInfiniteTransition(label = "skeleton").animateFloat(
-        initialValue = 1f,
-        targetValue = 0.55f,
-        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
-        label = "pulse",
-    )
-    Box(modifier.size(width, height).alpha(pulse).background(NfColors.Skeleton, CardShape))
+    val pulse = LocalSkeletonPulse.current
+    Box(modifier.size(width, height).graphicsLayer { alpha = pulse.value }.background(NfColors.Skeleton, CardShape))
 }
 
 /** True when the title plays at once from the TorBox cache (asked only while [enabled]). */

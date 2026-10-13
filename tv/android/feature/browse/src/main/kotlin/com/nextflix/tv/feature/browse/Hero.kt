@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
@@ -180,7 +181,7 @@ internal fun Hero(
             Modifier
                 .padding(start = Dimens.ScreenPadH, top = 56.dp)
                 .width(416.dp)
-                .offset(y = lift),
+                .offset { IntOffset(0, lift.roundToPx()) },
         ) {
             if (item != null) {
                 if (!item.kicker.isNullOrEmpty() && !inRows) {

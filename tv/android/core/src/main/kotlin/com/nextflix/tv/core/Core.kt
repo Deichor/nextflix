@@ -14,10 +14,12 @@ import coil3.ImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import com.nextflix.tv.core.data.CatalogRepository
+import com.nextflix.tv.core.data.HomeSnapshotStore
 import com.nextflix.tv.core.data.InstantRepository
 import com.nextflix.tv.core.data.ProfileRepository
 import com.nextflix.tv.core.data.ProgressRepository
 import com.nextflix.tv.core.data.RatingsRepository
+import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.nav.PendingSearch
 import com.nextflix.tv.core.net.AnswerCache
 import com.nextflix.tv.core.net.ApiClient
@@ -30,13 +32,16 @@ import com.nextflix.tv.core.prefs.PlayerPrefsStore
 import com.nextflix.tv.core.session.Session
 import com.nextflix.tv.core.stream.PlaybackCapsProvider
 import com.nextflix.tv.core.stream.StreamWarmup
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.launch
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -91,21 +96,59 @@ class Core(
     val cache = AnswerCache(session, scope)
 
     val profiles = ProfileRepository(api)
-    val catalog = CatalogRepository(api, cache)
-    val progress = ProgressRepository(api)
+    val catalog = CatalogRepository(api, cache, session)
+    val progress = ProgressRepository(api, cache)
     val ratings = RatingsRepository(api)
     val instant = InstantRepository(api, scope)
     val warmup = StreamWarmup(api, playbackCaps, scope)
 
+    /** Home as last loaded (painted on a cold start before the refresh). */
+    val homeSnapshots = HomeSnapshotStore(File(appContext.filesDir, "home"), NextflixJson, scope)
+
     /** Query from system search for the Search screen. */
     val pendingSearch = PendingSearch()
+
+    /**
+     * Starts Home's loads for the active profile (right after a pick), so Home finds them in flight or cached:
+     * the same calls and cache keys as HomeViewModel.
+     */
+    fun prefetchHome() {
+        val pid = session.profileId ?: return
+        val pv = progress.version.value
+        val rv = ratings.version.value
+        background { catalog.home() }
+        background { progress.continueWatchingCached(pid) }
+        background { catalog.homeRecommendations(pid, pv, rv) }
+        background { catalog.homeFavorites(pid, rv) }
+    }
+
+    /** Starts GET /api/home in [language] (Profiles screen, before a profile is picked). */
+    fun prefetchHomeCatalog(language: AppLanguage) {
+        background { catalog.home(language) }
+    }
+
+    private fun background(block: suspend () -> Unit) {
+        scope.launch {
+            try {
+                block()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+        }
+    }
 
     /** `<server>/tmdb-img/t/p/<size><path>`; "" without a path or server. Sizes: [TmdbImages]. */
     fun imageUrl(path: String?, size: String): String = TmdbImages.url(session.server, path, size)
 
-    /** Coil loader over the shared client (images are not /api requests, so no profile headers). */
+    /**
+     * Coil loader over the shared connection pool (images are not /api requests, so no profile headers). Its own
+     * dispatcher, so API calls never queue behind card images.
+     */
     fun newImageLoader(context: Context): ImageLoader {
-        val images = okHttp.newBuilder().readTimeout(20, TimeUnit.SECONDS).build()
+        val images = okHttp.newBuilder()
+            .dispatcher(Dispatcher().apply { maxRequestsPerHost = 6 })
+            .readTimeout(20, TimeUnit.SECONDS)
+            .build()
         return ImageLoader.Builder(context)
             .components { add(OkHttpNetworkFetcherFactory(callFactory = { images })) }
             .crossfade(false)

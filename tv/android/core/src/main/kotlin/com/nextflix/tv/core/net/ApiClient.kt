@@ -167,7 +167,7 @@ class ApiClient internal constructor(
     }
 }
 
-/** Adds X-Lang and X-User-ID to /api requests for the configured server (not to other hosts). */
+/** Adds X-Lang (unless ?x_lang= is set) and X-User-ID to /api requests for the configured server (not to other hosts). */
 internal class ApiHeadersInterceptor(private val session: Session) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -178,7 +178,8 @@ internal class ApiHeadersInterceptor(private val session: Session) : Interceptor
             return chain.proceed(request)
         }
         val builder = request.newBuilder()
-        if (request.header("X-Lang") == null) builder.header("X-Lang", state.language.code)
+        // ?x_lang= names the language itself (GET /api/home for a profile not picked yet); the header would win
+        if (request.header("X-Lang") == null && url.queryParameter("x_lang") == null) builder.header("X-Lang", state.language.code)
         val pid = state.profile?.id
         if (pid != null && request.header("X-User-ID") == null) builder.header("X-User-ID", pid.toString())
         return chain.proceed(builder.build())

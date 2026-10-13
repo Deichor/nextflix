@@ -1,0 +1,8 @@
+HSPLcom/nextflix/tv/**->**(**)**
+Lcom/nextflix/tv/**;
+HSPLokhttp3/**->**(**)**
+Lokhttp3/**;
+HSPLokio/**->**(**)**
+Lokio/**;
+HSPLkotlinx/serialization/json/**->**(**)**
+Lkotlinx/serialization/json/**;

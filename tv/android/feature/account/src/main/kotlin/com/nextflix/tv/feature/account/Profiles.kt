@@ -42,6 +42,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.nextflix.tv.core.Core
 import com.nextflix.tv.core.core
+import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.i18n.strings
 import com.nextflix.tv.core.model.Profile
 import com.nextflix.tv.core.nav.Navigator
@@ -101,9 +102,15 @@ internal class ProfilesViewModel(private val core: Core) : ViewModel() {
 
     private fun load() {
         job?.cancel()
+        // Home's catalog rows in the language of the profile picked last, while the viewer chooses
+        core.session.profile?.let { core.prefetchHomeCatalog(AppLanguage.of(it.language)) }
         job = viewModelScope.launch {
             try {
                 val list = core.profiles.list()
+                if (core.session.profile == null) {
+                    // No profile yet: the one language every profile shares, if any
+                    list.map { AppLanguage.of(it.language) }.distinct().singleOrNull()?.let(core::prefetchHomeCatalog)
+                }
                 val before = seen
                 seen = list.map { it.id }.toSet()
                 val created = before?.let { ids -> list.firstOrNull { it.id !in ids }?.id }
@@ -115,11 +122,11 @@ internal class ProfilesViewModel(private val core: Core) : ViewModel() {
         }
     }
 
+    /** Goes on at once: the profile is saved in the background and Home's loads start before Home shows. */
     fun pick(profile: Profile, then: () -> Unit) {
-        viewModelScope.launch {
-            core.session.setProfile(profile)
-            then()
-        }
+        core.session.selectProfile(profile)
+        core.prefetchHome()
+        then()
     }
 }
 

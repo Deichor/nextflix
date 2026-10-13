@@ -1,6 +1,7 @@
 package com.nextflix.tv.feature.browse
 
 import com.nextflix.tv.core.i18n.AppLanguage
+import com.nextflix.tv.core.model.HomeData
 import com.nextflix.tv.core.model.HomeFeeds
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.model.RecommendationRow
@@ -98,14 +99,18 @@ class BrowseLogicTest {
 
     @Test
     fun homeRowsFollowLoadState() {
-        val feeds = Query(
-            HomeFeeds(listOf(movie(1)), emptyList(), emptyList(), emptyList(), listOf(show(2)), emptyList(), emptyList(), emptyList()),
+        val feeds = HomeFeeds(listOf(movie(1)), emptyList(), emptyList(), emptyList(), listOf(show(2)), emptyList(), emptyList(), emptyList())
+        val home = Query(
+            HomeData(
+                feeds = feeds,
+                popular = listOf(movie(3)),
+                top10Movie = null,
+                top10Tv = emptyList(),
+                genres = mapOf("comedies" to listOf(movie(4)), "horror" to null, "unknown" to listOf(movie(5))),
+            ),
         )
         val recs = Query(listOf(RecommendationRow("trending", "Trending Now", "popular", listOf(movie(9)))))
-        val rows = homeRows(
-            BrowseEn, "Ann", feeds, Query(failed = true), recs, Query(), Query(emptyList()), Query(emptyList()),
-            Query(emptyList()), Query(failed = true),
-        )
+        val rows = homeRows(BrowseEn, "Ann", home, Query(failed = true), recs, Query())
         val byId = rows.associateBy { it.id }
         assertEquals("Continue Watching for Ann", byId.getValue("cw").title)
         assertEquals(emptyList<Any>(), byId.getValue("cw").items)
@@ -113,7 +118,23 @@ class BrowseLogicTest {
         assertTrue("trending" !in byId)
         assertEquals("Trending Now", byId.getValue("rec-trending").title)
         assertNull(byId.getValue("favorites").items)
-        assertEquals(emptyList<Any>(), byId.getValue("genre-0").items)
         assertTrue("recs-loading" !in byId)
+        assertEquals(listOf(3), (byId.getValue("popular-movies").items as List<*>).map { (it as Title).id })
+        // Null sections hide their rows; genre rows go by id, unknown ids are ignored
+        assertEquals(emptyList<Any>(), byId.getValue("top10-tr-movie").items)
+        assertEquals(listOf(4), (byId.getValue("genre-comedies").items as List<*>).map { (it as Title).id })
+        assertEquals(emptyList<Any>(), byId.getValue("genre-horror").items)
+        assertEquals(emptyList<Any>(), byId.getValue("genre-action_adventure").items)
+        assertEquals(GENRE_ROWS.map { "genre-${it.id}" }, rows.map { it.id }.filter { it.startsWith("genre-") })
+    }
+
+    @Test
+    fun homeRowsWhileLoading() {
+        val rows = homeRows(BrowseEn, "Ann", Query(), Query(), Query(), Query())
+        val byId = rows.associateBy { it.id }
+        assertTrue("recs-loading" in byId)
+        assertNull(byId.getValue("trending").items)
+        assertNull(byId.getValue("genre-acclaimed").items)
+        assertEquals(mapOf("sort_by" to "vote_average.desc", "vote_count.gte" to "5000"), GENRE_ROWS.last().params)
     }
 }
