@@ -57,6 +57,9 @@ func (h handler) play(c *gin.Context) {
 	}
 	aplan := probe.audioPlan(audio, playAudioCodecs(c, track))
 	args := streamArgs(h.s.fileURL(hash, index), start, audio, plan, aplan, smallProbe, track)
+	if c.Query("pace") == "1" {
+		args = pacedInput(args)
+	}
 
 	// A video re-encode takes a transcode slot; when all stay busy the player gets 503
 	if track != tsTrackAudio && !plan.copy {
@@ -175,6 +178,20 @@ func streamInput(src string, start float64, plan tsVideoPlan, aplan tsAudioPlan,
 	return append(args, "-i", src)
 }
 
+// pacedInput reads the input at playback speed after a 30 s burst (and faster while behind, after a
+// slow read). For players that fetch the stream themselves (Safari's MediaSource feed): WebKit keeps
+// downloading whatever the server sends, so an unpaced stream piles up in the phone's memory.
+func pacedInput(args []string) []string {
+	for i, a := range args {
+		if a == "-i" {
+			out := append([]string{}, args[:i]...)
+			out = append(out, "-readrate", "1", "-readrate_initial_burst", "30")
+			return append(out, args[i:]...)
+		}
+	}
+	return args
+}
+
 func playArgs(src string, start float64, audio int, plan tsVideoPlan, aplan tsAudioPlan, smallProbe bool) []string {
 	return streamArgs(src, start, audio, plan, aplan, smallProbe, tsTrackBoth)
 }
@@ -190,7 +207,8 @@ func streamArgs(src string, start float64, audio int, plan tsVideoPlan, aplan ts
 	case tsTrackAudio:
 		args = append(args, "-map", fmt.Sprintf("0:a:%d", audio), "-vn", "-sn", "-dn", "-map_chapters", "-1")
 	default:
-		args = append(args, "-map", "0:v:0", "-map", fmt.Sprintf("0:a:%d?", audio), "-sn", "-dn")
+		// No chapter text track: MediaSource players (Safari) may reject it; chapters come from the probe
+		args = append(args, "-map", "0:v:0", "-map", fmt.Sprintf("0:a:%d?", audio), "-sn", "-dn", "-map_chapters", "-1")
 	}
 	if track != tsTrackAudio {
 		switch {

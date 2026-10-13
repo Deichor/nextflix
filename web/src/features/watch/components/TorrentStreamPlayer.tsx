@@ -80,7 +80,8 @@ import { savePosition } from '@/features/watch/progressSave';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
 import { Upscaler, upscaleSupported, type UpscaleMode, type UpscaleStop } from '@/features/watch/upscale';
 import { UpscaleLog } from '@/features/watch/upscaleLog';
-import { PlaybackNotes } from '@/features/watch/playbackLog';
+import { PlaybackNotes, deviceToken } from '@/features/watch/playbackLog';
+import { attachStream, detachStream, fedFetching, fedStoppedByPause, setFeedNote, usesFedStream } from '@/features/watch/streamSource';
 import {
   DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
 } from '@/features/watch/subsLog';
@@ -1643,6 +1644,8 @@ function PlayerCore({
 
   // Stall tracking for adaptive quality (only after this source has played once)
   const everPlayed = useRef(false);
+  // A picture of this source is on screen: subtitles wait for it instead of showing over black
+  const [pictureShown, setPictureShown] = useState(false);
   const stall = useRef<{ start: number; seek: boolean } | null>(null);
   const stallTimes = useRef<number[]>([]);
   const longStallTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1725,10 +1728,7 @@ function PlayerCore({
     // frame stays on screen (dimmed) until the new stream's frames run
     const v = videoRef.current;
     freezeFrameRef.current?.(v);
-    if (v && v.getAttribute('src')) {
-      v.removeAttribute('src');
-      v.load();
-    }
+    if (v) detachStream(v);
     setCur(0);
     offsetRef.current = target;
     exactRef.current = target <= 0;
@@ -1771,6 +1771,7 @@ function PlayerCore({
   // the last frame meanwhile); false when it is out of tries
   const sourceFailed = useCallback((why: string, position = stateRef.current.position): boolean => {
     console.info(`[nextflix] restart: ${why}: trying another source`);
+    subLogRef.current?.note('source-failed', { why });
     freezeFrameRef.current?.(videoRef.current);
     onRecoveringRef.current?.();
     return onSourceFailedRef.current(position, true);
@@ -1883,8 +1884,46 @@ function PlayerCore({
         src: h && f ? `${h.slice(0, 8)}:${f.id}` : '', dur: Math.round(durationRef.current),
       };
     }, () => filePosRef.current);
-    return closeSubLog;
+    const caps = playbackCaps();
+    subLogRef.current.note('device', { ua: deviceToken(), hevc: caps.hevc, acodecs: caps.audio.join('+'), fed: usesFedStream() });
+    const feedNote = (k: string, x?: Record<string, number | string | boolean | undefined>) => subLogRef.current?.note(k, x);
+    setFeedNote(feedNote);
+    return () => {
+      setFeedNote(null);
+      closeSubLog();
+    };
   }, [closeSubLog]);
+
+  // Fed streams (Safari): how the element's clock relates to the shown frame and the stream offset,
+  // every 5 s for the first 3 minutes
+  useEffect(() => {
+    if (!usesFedStream()) return;
+    let n = 0;
+    const timer = setInterval(() => {
+      const v = videoRef.current;
+      if (++n > 36) clearInterval(timer);
+      if (!v) return;
+      if (!hasPlayed.current || v.paused) {
+        subLogRef.current?.note('timeline-wait', { played: hasPlayed.current, paused: v.paused, rs: v.readyState });
+        return;
+      }
+      const b = v.buffered;
+      const fields = {
+        ct: Math.round(v.currentTime * 1000) / 1000, off: Math.round(offsetRef.current * 1000) / 1000, ex: exactRef.current,
+        b0: b.length ? Math.round(b.start(0) * 1000) / 1000 : undefined, b1: b.length ? Math.round(b.end(b.length - 1)) : undefined,
+      };
+      if (!('requestVideoFrameCallback' in v)) {
+        subLogRef.current?.note('timeline', fields);
+        return;
+      }
+      v.requestVideoFrameCallback((_, meta) => {
+        // mt - ct: how far the frame on screen is from the clock the subtitles follow
+        const lag = Math.round((meta.mediaTime - v.currentTime) * 1000) / 1000;
+        subLogRef.current?.note('timeline', { ...fields, mt: Math.round(meta.mediaTime * 1000) / 1000, lag });
+      });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   // 3) Subtitles for the playing file: listed once its hash/index are known (a new source or
   // episode mounts a new PlayerCore and lists again)
@@ -2136,6 +2175,7 @@ function PlayerCore({
     }
     recoveries.current++;
     console.info(`[nextflix] restart: ${why}`);
+    subLogRef.current?.note('restart', { why });
     startPausedRef.current = viewerPausedAtRef.current > 0;
     restartAt(stateRef.current.position);
   }, [clearStall, restartAt, sourceFailed, failChain]);
@@ -2242,7 +2282,7 @@ function PlayerCore({
     hasPlayed.current = false;
     advanceFromRef.current = null;
     lastDataRef.current = Date.now();
-    v.src = debugFailPlay() ? src.replace(/hash=[0-9a-f]+/, 'hash=debug-fail') : src;
+    attachStream(v, debugFailPlay() ? src.replace(/hash=[0-9a-f]+/, 'hash=debug-fail') : src);
     // A source change must never leave the element muted or at another volume
     v.muted = mutedRef.current;
     v.volume = volumeRef.current;
@@ -2318,8 +2358,7 @@ function PlayerCore({
       finishFadeRef.current?.(false);
       els.forEach(v => {
         v.pause();
-        v.removeAttribute('src');
-        v.load();
+        detachStream(v);
       });
     };
   }, [persist]);
@@ -2570,8 +2609,7 @@ function PlayerCore({
       clearTimeout(timer);
       finishFadeRef.current = null;
       if (old) {
-        old.removeAttribute('src');
-        old.load();
+        detachStream(old);
         old.muted = true;
       }
       if (!notify) return;
@@ -2664,7 +2702,7 @@ function PlayerCore({
       suspendSeenRef.current = false;
       const h = healthMon.current.push({
         at: Date.now(), pos, end: fileEnd,
-        fetching: v.networkState === HTMLMediaElement.NETWORK_LOADING && !suspended,
+        fetching: fedFetching(v) ?? (v.networkState === HTMLMediaElement.NETWORK_LOADING && !suspended),
         atEnd: dur > 0 && fileEnd >= dur - 1,
       });
       onBufferHealthRef.current?.(h);
@@ -2710,6 +2748,11 @@ function PlayerCore({
     resumedAtRef.current = Date.now();
     const v = videoRef.current;
     if (!v || blockedRef.current) return;
+    // A fed stream (Safari) stopped downloading during the pause
+    if (fedStoppedByPause(v)) {
+      restartAt(stateRef.current.position);
+      return;
+    }
     if (v.error || (v.readyState === HTMLMediaElement.HAVE_NOTHING && v.networkState !== HTMLMediaElement.NETWORK_LOADING)) {
       recover('dead after a long pause');
       return;
@@ -2730,7 +2773,7 @@ function PlayerCore({
       if (Date.now() - t0 < 20000) resumeCheckRef.current = setTimeout(check, 500);
     };
     resumeCheckRef.current = setTimeout(check, 500);
-  }, [clearResumeCheck, recover]);
+  }, [clearResumeCheck, recover, restartAt]);
 
   useEffect(() => {
     if (!switchNote) return;
@@ -2807,6 +2850,9 @@ function PlayerCore({
   const handleError = () => {
     const v = videoRef.current;
     if (!src || !v?.getAttribute('src')) return;
+    subLogRef.current?.note('media-error', {
+      code: v.error?.code, msg: v.error?.message || undefined, played: hasPlayed.current, ready: v.readyState,
+    });
     if (hasPlayed.current) {
       recover('stream error');
       return;
@@ -3055,6 +3101,7 @@ function PlayerCore({
               endStall();
               hasPlayed.current = true;
               everPlayed.current = true;
+              setPictureShown(true);
               // A minute of smooth playback forgets earlier recoveries
               if (stallResetTimer.current) clearTimeout(stallResetTimer.current);
               stallResetTimer.current = setTimeout(() => { recoveries.current = 0; }, 60000);
@@ -3066,6 +3113,8 @@ function PlayerCore({
               v.volume = volumeRef.current;
               setVideoAspect(aspectOf(v));
             }}
+            // A paused start shows its first frame without a 'playing' event
+            onLoadedData={e => { if (isActive(e) && e.currentTarget.videoWidth > 0) setPictureShown(true); }}
             onResize={e => { if (isActive(e)) setVideoAspect(aspectOf(e.currentTarget)); }}
             onEmptied={e => { if (isActive(e)) setVideoAspect(0); }}
             onSeeked={e => { if (isActive(e) && nativeSeekTimer.current) clearTimeout(nativeSeekTimer.current); }}
@@ -3119,7 +3168,7 @@ function PlayerCore({
       </div>
 
       {/* Subtitles are drawn here (the stream restarts with offsets, so native tracks would drift) */}
-      {playable && !!subId && cues.length > 0 && (
+      {playable && pictureShown && !!subId && cues.length > 0 && (
         <SubtitleOverlay videoRef={videoRef} offsetRef={offsetRef} cues={cues} delay={subDelay} raised={controlsVisible} scale={subScale} layout={subLayout} />
       )}
 

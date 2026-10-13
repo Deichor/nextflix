@@ -1148,6 +1148,25 @@ buttons are hidden; the address bar may stay, Add to Home Screen removes it). Wh
 `viewport-fit=cover` (safe-area insets pad the bars), stops overscroll / pull-to-refresh (touchmove is cancelled
 outside `[data-scroll]` lists), disables double-tap zoom (`touch-action`) and holds a screen Wake Lock while playing.
 
+Safari (every iOS browser too) plays a URL only when the server answers byte ranges, which the live `/play` stream
+cannot, so there `streamSource.ts` fetches the stream and feeds it through `ManagedMediaSource` (`MediaSource` on
+macOS); other browsers get the URL as `src`. Measured on an iPhone (iOS 18.7): the element's clock and the frame on
+screen agree within 0.02 s, so subtitles need nothing extra. What the feed handles:
+
+- WebKit keeps downloading while reading waits (21 s of waiting handed over 227 MB in one read, which never fit:
+  `QuotaExceededError` until the buffer ran dry). So the request carries `pace=1` and the server reads the input at
+  playback speed after a 30 s burst; the feed still appends in 4 MB slices and holds at 45 s ahead (10 s while
+  `ManagedMediaSource` is not `streaming`). A hold counts as the browser idling for the buffer health check
+  (`fedFetching`), else the shrinking lead read as a slow source and sidegraded.
+- iOS evicts buffered media under memory pressure, also ahead of playback. Watched data is removed first (10 s kept
+  behind); if the data at the position still ends before what was appended, the stream fails at once (`network`
+  error) and the player restarts at the position instead of stalling at the hole.
+- A paced stream keeps coming during a pause: after 20 s paused the feed stops, and playing on restarts the stream
+  at the position.
+- Playback log (client `web`): `device` (`fed=true`), `feed-hold`, `feed-quota`, `feed-stuck` (where the feed waits
+  after 5 s without data), `feed-evicted`, `feed-paused-out`, `feed-end`, `feed-error`, and `timeline` samples for
+  the first 3 minutes (element clock, frame time, stream offset, buffered range).
+
 Release from the web app: an open player marks its title / episode as playing (`holdPlaying` in `api.ts`) and
 `releaseTitle` skips a playing title, so only that player releases it when it closes (or on Next). The detail page
 sends `release?<title>&delay=60` when it is left (route change or `pagehide`); the player sends `release?<title>` plus `hash=<every torrent it played>` when it closes, drops a replaced

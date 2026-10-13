@@ -1,8 +1,8 @@
 import { getApiUrl } from '@/shared/lib/api';
 
 // Player diagnostics for the server's playback log (POST /api/playback-log, see docs/API.md): a few
-// events sent every 30 s and on close; read with scripts/playback-log.sh. Clients: "web" (subtitles),
-// "web-a4k" (upscaler).
+// events sent every 30 s and on close; read with scripts/playback-log.sh. Clients: "web" (subtitles,
+// device, restarts and media errors), "web-a4k" (upscaler).
 
 type Val = number | string | boolean;
 export type LogNote = (k: string, x?: Record<string, Val | undefined>) => void;
@@ -16,6 +16,19 @@ export interface PlaybackLogCtx {
   /** "<hash8>:<index>" of the playing file */
   src?: string;
   dur?: number;
+}
+
+// Short device label for the log (values are cut at 40 chars): "iPhone-iOS18.1-Safari", "Android14-Chrome130"
+export function deviceToken(ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''): string {
+  const ios = ua.match(/(iPhone|iPad|iPod).*? OS (\d+)_(\d+)/);
+  const android = ua.match(/Android (\d+(?:\.\d+)?)/);
+  const os = ios ? `${ios[1]}-iOS${ios[2]}.${ios[3]}`
+    : android ? `Android${android[1]}`
+    : /Macintosh/.test(ua) ? (navigator.maxTouchPoints > 1 ? 'iPad-mac' : 'Mac')
+    : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'other';
+  const b = ua.match(/(SamsungBrowser|EdgA?|OPR|Firefox|FxiOS|CriOS|Chrome)\/(\d+)/);
+  const safari = ua.match(/Version\/(\d+)[.\d]* .*Safari/);
+  return `${os}-${b ? b[1] + b[2] : safari ? 'Safari' + safari[1] : 'other'}`;
 }
 
 const FLUSH_MS = 30000;

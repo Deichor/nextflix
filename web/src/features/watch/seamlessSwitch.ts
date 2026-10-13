@@ -6,6 +6,7 @@ import { capsQuery, runtimeCheckQuery, type StreamMeta, type StreamSource } from
 import { normLang, type AudioTrackInfo } from '@/features/watch/subtitles';
 import { bufferedEnd } from '@/features/watch/bufferHealth';
 import { lengthsMatch, timeScale } from '@/features/watch/switchLength';
+import { attachStream, detachStream } from '@/features/watch/streamSource';
 
 // subtitles: a release that carries the profile's subtitle, picked by the viewer
 export type SwitchKind = 'upgrade' | 'sidegrade' | 'subtitles';
@@ -295,7 +296,7 @@ export class SwitchPrep {
     this.seekingHidden = false;
     el.muted = true;
     el.preload = 'auto';
-    el.src = url;
+    attachStream(el, url);
     const onCheck = () => this.check();
     const onSuspend = () => { this.suspended = true; this.check(); };
     const onSeeked = () => { this.seekingHidden = false; this.check(); };
@@ -347,10 +348,7 @@ export class SwitchPrep {
     this.ready = false;
     this.seekingHidden = false;
     const el = this.host.hidden();
-    if (el && el.getAttribute('src')) {
-      el.removeAttribute('src');
-      el.load();
-    }
+    if (el) detachStream(el);
   }
 
   private check() {
@@ -533,10 +531,7 @@ export class SwitchPrep {
     this.why = why;
     this.cleanup();
     const el = this.host.hidden();
-    if (el && el.getAttribute('src')) {
-      el.removeAttribute('src');
-      el.load();
-    }
+    if (el) detachStream(el);
     this.finish(result);
   }
 
