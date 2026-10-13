@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocale, type TFunction } from '@/shared/i18n';
 import { getTitleRating, onRatingsChanged, useRatingsVersion } from '@/features/favorites/store';
 import { RecommendationRow, fetchRecommendations } from '@/features/home/feeds';
+import { readRecsSnapshot, writeRecsSnapshot } from '@/features/home/homeSnapshot';
 
 // Last rows per profile and language, so coming back to Home paints them at once
 const lastRows = new Map<string, RecommendationRow[]>();
@@ -12,14 +13,39 @@ const NO_ROWS: RecommendationRow[] = [];
 // A rating change refreshes the rows after a short pause (the server recomputes them).
 // The swap waits while a hover preview is open, so the card under the mouse does not vanish.
 const REFRESH_DELAY_MS = 1500;
+const PREVIEW_POLL_MS = 1000;
 
-function previewOpen(): boolean {
+export function previewOpen(): boolean {
   return !!document.querySelector('.nf-preview[data-expanded="true"]');
+}
+
+/** Runs fn once no hover preview is open; returns a cancel function. */
+export function whenPreviewClosed(fn: () => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tryRun = () => {
+    if (previewOpen()) timer = setTimeout(tryRun, PREVIEW_POLL_MS);
+    else fn();
+  };
+  tryRun();
+  return () => clearTimeout(timer);
+}
+
+// Memory first, then the snapshot of the last launch
+// Keys whose snapshot was already read (or missing), so renders do not parse storage again
+const snapshotRead = new Set<string>();
+
+function cachedRows(profileId: number, locale: string, key: string): RecommendationRow[] | null {
+  if (!lastRows.has(key) && !snapshotRead.has(key)) {
+    snapshotRead.add(key);
+    const snap = readRecsSnapshot(profileId, locale);
+    if (snap) lastRows.set(key, snap);
+  }
+  return lastRows.get(key) ?? null;
 }
 
 /** Personal rows of the profile; null while the first answer is pending. Disliked titles are hidden. */
 export function useRecommendations(profileId: number | null): RecommendationRow[] | null {
-  // Titles come in the profile language (X-Lang), so rows are kept and refetched per language
+  // Titles come in the profile language (x_lang), so rows are kept and refetched per language
   const locale = useLocale();
   const rowsKey = `${profileId}:${locale}`;
   // Answer for one key; until the current key has one, the cached rows (or null) are shown
@@ -28,18 +54,32 @@ export function useRecommendations(profileId: number | null): RecommendationRow[
   const ratingsVersion = useRatingsVersion();
   const rows = !profileId ? NO_ROWS
     : fetched?.key === rowsKey ? fetched.rows
-      : lastRows.get(rowsKey) ?? null;
+      : cachedRows(profileId, locale, rowsKey);
 
   useEffect(() => {
     if (!profileId) return;
     const ctrl = new AbortController();
+    let cancelWait: (() => void) | undefined;
     fetchRecommendations(profileId, ctrl.signal, locale)
-      .then(r => { lastRows.set(rowsKey, r); setFetched({ key: rowsKey, rows: r }); })
+      .then(r => {
+        const shown = lastRows.has(rowsKey);
+        writeRecsSnapshot(profileId, locale, r);
+        const apply = () => {
+          lastRows.set(rowsKey, r);
+          setFetched({ key: rowsKey, rows: r });
+        };
+        // Rows already on screen are swapped only while no preview is open
+        if (shown) cancelWait = whenPreviewClosed(apply);
+        else apply();
+      })
       .catch(err => {
         if (err?.name === 'AbortError') return;
         setFetched(prev => (prev?.key === rowsKey ? prev : { key: rowsKey, rows: lastRows.get(rowsKey) ?? [] }));
       });
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();
+      cancelWait?.();
+    };
   }, [profileId, rowsKey, locale, refresh]);
 
   useEffect(() => {

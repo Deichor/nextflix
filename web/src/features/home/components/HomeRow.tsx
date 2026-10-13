@@ -1,13 +1,13 @@
 "use client";
 
-import React, { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import TitleCard, { CARD_WIDTH, CardVariant } from '@/features/home/components/HomeTitleCard';
 import { TitleItem } from '@/features/home/feeds';
 import { ImageRowGate, useImageRowGate, useNearViewport } from '@/shared/ui/TmdbImage';
 import { useT } from '@/shared/i18n';
 
-interface RowProps {
+export interface RowProps {
   title: string;
   items: TitleItem[];
   variant?: CardVariant;
@@ -74,12 +74,12 @@ export default function Row({ title, items, variant = 'backdrop', playable = tru
         >
           <ImageRowGate value={gate}>
             {loading
-              ? Array.from({ length: 8 }, (_, i) => (
+              ? Array.from({ length: 6 }, (_, i) => (
                   <div
                     key={i}
                     className={`relative shrink-0 ${CARD_WIDTH[cardVariant]} ${cardVariant === 'poster' ? 'aspect-[2/3]' : 'aspect-video'} rounded overflow-hidden`}
                   >
-                    <div className="nf-img" />
+                    <div className="nf-img" data-plain />
                   </div>
                 ))
               : items.map((item, i) =>
@@ -106,32 +106,16 @@ export default function Row({ title, items, variant = 'backdrop', playable = tru
   );
 }
 
-interface LazyRowProps extends Omit<RowProps, 'items' | 'loading'> {
-  load: (signal: AbortSignal) => Promise<TitleItem[]>;
-}
-
-// Fetches its items only when the row gets close to the viewport
-export function LazyRow({ load, ...rowProps }: LazyRowProps) {
+// Mounts the row (and its cards) only once it comes within 150% of the viewport; until then a
+// box of the row's minimum height keeps the page length
+export function NearRow(props: RowProps) {
   const [el, setEl] = useState<HTMLDivElement | null>(null);
-  const visible = useNearViewport(el, true, '150% 0px');
-  const [items, setItems] = useState<TitleItem[] | null>(null);
-  const loadLatest = useEffectEvent((signal: AbortSignal) => load(signal));
-
-  useEffect(() => {
-    if (!visible) return;
-    const ctrl = new AbortController();
-    loadLatest(ctrl.signal)
-      .then(list => setItems(list.slice(0, 20)))
-      .catch(err => { if (err?.name !== 'AbortError') setItems([]); });
-    return () => ctrl.abort();
-  }, [visible]);
-
-  // A loaded but empty row disappears
-  if (items && items.length === 0) return null;
-
+  const near = useNearViewport(el, true, '150% 0px');
+  // An empty loaded row disappears, like Row itself
+  if (!props.loading && props.items.length === 0) return null;
   return (
     <div ref={setEl} className="min-h-[120px]">
-      <Row {...rowProps} items={items || []} loading={!items} />
+      {near && <Row {...props} />}
     </div>
   );
 }

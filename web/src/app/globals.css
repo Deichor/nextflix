@@ -434,7 +434,8 @@ aside {
   transform: translateX(-100%);
   animation: nf-shimmer 1.6s ease-in-out infinite;
 }
-.nf-img[data-loaded]::before { display: none; }
+.nf-img[data-loaded]::before,
+.nf-img[data-plain]::before { display: none; }
 .nf-img-blur,
 .nf-img-main {
   position: absolute;

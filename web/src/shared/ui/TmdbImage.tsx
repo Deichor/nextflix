@@ -83,6 +83,8 @@ interface TmdbImageProps {
   className?: string;
   /** Extra classes for the wrapper (absolute inset-0 by default) */
   wrapperClassName?: string;
+  /** none: a plain #2f2f2f box without the blurred tiny image or shimmer (cheaper row cards) */
+  placeholder?: 'blur' | 'none';
   onLoad?: () => void;
   onError?: () => void;
 }
@@ -97,6 +99,7 @@ export default function TmdbImage({
   priority = 'lazy',
   className = '',
   wrapperClassName = '',
+  placeholder = 'blur',
   onLoad,
   onError,
 }: TmdbImageProps) {
@@ -112,7 +115,8 @@ export default function TmdbImage({
   const path = tmdbPath(src);
   const main = path ? tmdbDefaultSrc(path, kind) : src || undefined;
   const srcSet = path ? tmdbSrcSet(path, kind) : undefined;
-  const blur = path ? tmdbPlaceholder(path, kind) : undefined;
+  const plain = placeholder === 'none';
+  const blur = path && !plain ? tmdbPlaceholder(path, kind) : undefined;
 
   const [loaded, setLoaded] = useState(false);
   const [blurReady, setBlurReady] = useState(false);
@@ -152,13 +156,13 @@ export default function TmdbImage({
   }, [active, main, reveal]);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !blur) return;
     const t = window.setTimeout(() => setBlurGone(true), BLUR_DROP_MS);
     return () => window.clearTimeout(t);
-  }, [loaded]);
+  }, [loaded, blur]);
 
   return (
-    <div ref={setWrap} className={`nf-img ${wrapperClassName}`} data-loaded={loaded || undefined}>
+    <div ref={setWrap} className={`nf-img ${wrapperClassName}`} data-loaded={loaded || undefined} data-plain={plain || undefined}>
       {active && !!blur && !blurGone && (
         <img
           src={blur}

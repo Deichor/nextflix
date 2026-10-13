@@ -7,7 +7,7 @@ import { ExternalLink, Volume2, VolumeX } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import RedLoader from '@/shared/ui/RedLoader';
 import InstantChip from '@/shared/ui/InstantChip';
-import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
+import TorrentStreamPlayer from '@/features/watch/components/LazyTorrentStreamPlayer';
 import WatchButton, { formatRemaining, useAvailability } from '@/features/watch/components/WatchButton';
 import SeasonEpisodes from '@/features/watch/components/SeasonEpisodes';
 import CinemaRecordingButton from '@/features/watch/components/CinemaRecordingButton';

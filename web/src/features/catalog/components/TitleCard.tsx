@@ -11,6 +11,7 @@ import { useT } from '@/shared/i18n';
 import { ResolveParams } from '@/features/watch/api';
 import { useSourceQuality } from '@/features/watch/useSourceQuality';
 import { useAvailability, useUnavailableLabel } from '@/features/watch/components/WatchButton';
+import { preloadPlayer } from '@/features/watch/components/LazyTorrentStreamPlayer';
 import { tmdbImage } from '@/shared/lib/image';
 import TmdbImage from '@/shared/ui/TmdbImage';
 import InstantChip from '@/shared/ui/InstantChip';
@@ -256,6 +257,7 @@ export function HoverPreview({ state, info, variant = 'backdrop', onPlay, onOpen
           {info.playable && !unavailable && (
             <button
               onClick={act(onPlay)}
+              onPointerEnter={preloadPlayer}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white text-black transition-colors hover:bg-white/80"
               aria-label={`${t(info.resume ? 'player.resume' : 'player.play')}: ${info.title}`}
               title={t(info.resume ? 'player.resume' : 'player.play')}

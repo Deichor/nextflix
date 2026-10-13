@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Play, X } from 'lucide-react';
-import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
+import TorrentStreamPlayer from '@/features/watch/components/LazyTorrentStreamPlayer';
 import { useActiveProfile } from '@/shared/lib/profile';
 import { useLocale, useT } from '@/shared/i18n';
 import InstantChip from '@/shared/ui/InstantChip';
@@ -11,13 +11,10 @@ import {
   StreamProgress,
   deleteProgress,
   episodeLabel,
-  getProgressList,
   progressPercent,
   progressToRequest,
 } from '@/features/watch/api';
-import { type ProfileList, listFor, storeLoad } from '@/features/watch/profileList';
-
-const NO_ITEMS: StreamProgress[] = [];
+import { loadProgress, removeProgressEntry, useProgressList } from '@/features/watch/progressStore';
 
 interface ContinueWatchingRowProps {
   /** Overrides the default "Continue Watching for <profile>" heading */
@@ -32,31 +29,13 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
   const t = useT();
   const locale = useLocale();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [loaded, setLoaded] = useState<ProfileList<StreamProgress> | null>(null);
   const [request, setRequest] = useState<PlayRequest | null>(null);
   const [canLeft, setCanLeft] = useState(false);
   const [canRight, setCanRight] = useState(false);
 
   const profileId = profile?.id ?? null;
-  const items = listFor(loaded, profileId, NO_ITEMS);
-  // Loads that end after a profile switch are dropped
-  const profileRef = useRef(profileId);
-  useEffect(() => { profileRef.current = profileId; }, [profileId]);
-
-  const load = useCallback(async () => {
-    // Without a profile nothing renders (see below)
-    if (!profileId) return;
-    const list = await getProgressList(profileId);
-    const activeId = profileRef.current;
-    setLoaded(prev => storeLoad(prev, { profileId, list }, activeId));
-  }, [profileId]);
-
-  useEffect(() => {
-    if (!profileId) return;
-    let cancelled = false;
-    getProgressList(profileId).then(list => { if (!cancelled) setLoaded({ profileId, list }); });
-    return () => { cancelled = true; };
-  }, [profileId]);
+  // Shared with the home cards (one request per page load)
+  const items = useProgressList(profileId);
 
   const updateArrows = useCallback(() => {
     const el = scrollRef.current;
@@ -78,18 +57,16 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
 
   const remove = async (p: StreamProgress) => {
     if (!profileId) return;
-    setLoaded(prev => prev && prev.profileId === profileId
-      ? { profileId, list: prev.list.filter(x => !(x.media_type === p.media_type && x.tmdb_id === p.tmdb_id)) }
-      : prev);
+    removeProgressEntry(profileId, p.media_type, p.tmdb_id);
     const ok = await deleteProgress(profileId, p.media_type, p.tmdb_id);
-    if (!ok) load();
+    if (!ok) loadProgress(profileId, { force: true });
   };
 
   const closePlayer = useCallback(() => {
     setRequest(null);
     // Give the final progress save a moment to land
-    setTimeout(load, 600);
-  }, [load]);
+    if (profileId) setTimeout(() => loadProgress(profileId, { force: true }), 600);
+  }, [profileId]);
 
   // The player keeps one place in the tree: a row that appears or empties while it plays
   // must not remount it (a remount closes the player and releases the playing title)

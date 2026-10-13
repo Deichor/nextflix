@@ -7,6 +7,8 @@ import { Availability, AvailabilityTarget, getAvailability } from '@/features/wa
 
 interface WatchButtonProps {
   onClick: () => void;
+  /** e.g. starts loading the player code before the click */
+  onPointerEnter?: () => void;
   /** Shows "Resume" instead of "Play" */
   resume?: boolean;
   /** Extra text after the label, e.g. "S1:E2" */
@@ -51,7 +53,7 @@ export function useAvailability(target: AvailabilityTarget | null): Availability
 }
 
 // Netflix-style white Play / Resume button
-export default function WatchButton({ onClick, resume, detail, progress = 0, remainingText, disabled, availability, className = '' }: WatchButtonProps) {
+export default function WatchButton({ onClick, onPointerEnter, resume, detail, progress = 0, remainingText, disabled, availability, className = '' }: WatchButtonProps) {
   const t = useT();
   const unavailable = useUnavailableLabel(availability);
 
@@ -74,6 +76,7 @@ export default function WatchButton({ onClick, resume, detail, progress = 0, rem
     <div className={`inline-flex flex-col gap-2 ${className}`}>
       <button
         onClick={onClick}
+        onPointerEnter={onPointerEnter}
         disabled={disabled}
         className="flex items-center justify-center gap-2 px-6 py-2 md:px-8 md:py-2.5 bg-white text-black font-bold rounded hover:bg-white/75 transition-colors text-sm md:text-lg disabled:opacity-60"
       >

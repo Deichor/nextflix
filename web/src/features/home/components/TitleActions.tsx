@@ -1,56 +1,40 @@
 "use client";
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import TorrentStreamPlayer from '@/features/watch/components/TorrentStreamPlayer';
+import TorrentStreamPlayer from '@/features/watch/components/LazyTorrentStreamPlayer';
 import { useNavigate } from '@/shared/navigation/useNavigate';
 import { useActiveProfile } from '@/shared/lib/profile';
 import {
   PlayRequest,
-  StreamProgress,
-  getProgressList,
   getTitleProgress,
   getTvSeasons,
   isFinished,
   nextEpisodeOf,
   progressToRequest,
 } from '@/features/watch/api';
+import { getProgressFor, loadProgress } from '@/features/watch/progressStore';
 import { TitleItem, detailHref, yearOf } from '@/features/home/feeds';
 
 interface TitleActions {
   play: (t: TitleItem) => void;
   openInfo: (t: TitleItem) => void;
-  progressFor: (t: TitleItem) => StreamProgress | undefined;
 }
 
 const Ctx = createContext<TitleActions | null>(null);
-const NO_PROGRESS: StreamProgress[] = [];
 
-// Shared Play / More Info actions for the billboard and every row (ratings live in features/favorites).
-// Owns the one torrent player instance of the page.
+// Shared Play / More Info actions for the billboard and every row (ratings live in features/favorites,
+// saved progress in features/watch/progressStore). Owns the one torrent player instance of the page.
 export function TitleActionsProvider({ children }: { children: React.ReactNode }) {
-  const navigate = useNavigate();
+  const { push } = useNavigate();
   const profile = useActiveProfile();
-  const [loaded, setLoaded] = useState<{ profileId: number; list: StreamProgress[] } | null>(null);
   const [request, setRequest] = useState<PlayRequest | null>(null);
 
   const profileId = profile?.id ?? null;
-  // Another profile's (or no profile's) progress counts as empty
-  const progress = loaded && loaded.profileId === profileId ? loaded.list : NO_PROGRESS;
 
-  const loadProgress = useCallback(() => {
-    if (!profileId) return;
-    getProgressList(profileId).then(list => setLoaded({ profileId, list }));
-  }, [profileId]);
-
-  useEffect(() => { loadProgress(); }, [loadProgress]);
-
-  const progressFor = useCallback(
-    (t: TitleItem) => progress.find(p => p.media_type === t.media_type && p.tmdb_id === t.id),
-    [progress],
-  );
+  useEffect(() => { if (profileId) loadProgress(profileId); }, [profileId]);
 
   const play = useCallback(async (t: TitleItem) => {
-    const saved = progressFor(t);
+    const saved = profileId ? getProgressFor(t.media_type, t.id, profileId) : undefined;
     if (saved) {
       const req = progressToRequest(saved);
       setRequest({ ...req, meta: { ...req.meta, original_language: t.original_language } });
@@ -80,20 +64,17 @@ export function TitleActionsProvider({ children }: { children: React.ReactNode }
         original_language: t.original_language,
       },
     });
-  }, [progressFor, profileId]);
+  }, [profileId]);
 
-  const openInfo = useCallback((t: TitleItem) => navigate.push(detailHref(t)), [navigate]);
+  const openInfo = useCallback((t: TitleItem) => push(detailHref(t)), [push]);
 
   const closePlayer = useCallback(() => {
     setRequest(null);
     // Let the player's final progress save land first
-    setTimeout(loadProgress, 600);
-  }, [loadProgress]);
+    if (profileId) setTimeout(() => loadProgress(profileId, { force: true }), 600);
+  }, [profileId]);
 
-  const value = useMemo(
-    () => ({ play, openInfo, progressFor }),
-    [play, openInfo, progressFor],
-  );
+  const value = useMemo(() => ({ play, openInfo }), [play, openInfo]);
 
   return (
     <Ctx.Provider value={value}>

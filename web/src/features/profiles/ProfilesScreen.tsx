@@ -7,7 +7,9 @@ import ProfileAvatar from '@/features/profiles/components/ProfileAvatar';
 import ProfileEditor from '@/features/profiles/components/ProfileEditor';
 import { setActiveProfile, type Profile } from '@/shared/lib/profile';
 import { listProfiles, MAX_PROFILES } from '@/features/profiles/api';
-import { useT } from '@/shared/i18n';
+import { DEFAULT_LOCALE, LANG_STORAGE_KEY, isLocale, useT, type Locale } from '@/shared/i18n';
+import { prefetchHome, prefetchRecommendations } from '@/features/home/homeSnapshot';
+import { PICKED_KEY } from '@/features/profiles/components/ProfileGate';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 
 // --nf-avatar is set on <main>: larger tiles in two columns on phones
@@ -28,6 +30,24 @@ function safeNext(next: string | null): string {
   }
 }
 
+// Content language Home will use for a profile (see detectLocale)
+function profileLang(p: Profile): Locale {
+  if (isLocale(p.language)) return p.language;
+  try {
+    const stored = window.localStorage.getItem(LANG_STORAGE_KEY);
+    if (isLocale(stored)) return stored;
+  } catch {
+    /* storage unavailable */
+  }
+  return navigator.language?.toLowerCase().startsWith('tr') ? 'tr' : DEFAULT_LOCALE;
+}
+
+// Home's rows are profile independent: load them while the user picks
+function prefetchHomes(profiles: Profile[]) {
+  new Set(profiles.map(profileLang)).forEach(lang => { prefetchHome(lang); });
+}
+
+const warmRecommendations = (p: Profile) => prefetchRecommendations(p.id, profileLang(p));
 function ProfilesPicker() {
   const t = useT();
   const router = useRouter();
@@ -41,23 +61,34 @@ function ProfilesPicker() {
   const [editing, setEditing] = useState<Profile | null | undefined>(undefined);
 
   const showError = useCallback((e: unknown) => setError(e instanceof Error ? e.message : ''), []);
+  const showProfiles = useCallback((list: Profile[]) => {
+    setProfiles(list);
+    prefetchHomes(list);
+  }, []);
 
   // Retry and editor changes; the first load starts with error already null
   const load = useCallback(() => {
     setError(null);
-    return listProfiles().then(setProfiles, showError);
-  }, [showError]);
+    return listProfiles().then(showProfiles, showError);
+  }, [showProfiles, showError]);
 
   useEffect(() => {
-    listProfiles().then(setProfiles, showError);
-  }, [showError]);
+    listProfiles().then(showProfiles, showError);
+  }, [showProfiles, showError]);
 
   const select = (profile: Profile) => {
     if (manage) {
       setEditing(profile);
       return;
     }
+    warmRecommendations(profile);
     setActiveProfile(profile);
+    // ProfileGate renders the next page without waiting for its profile check
+    try {
+      window.sessionStorage.setItem(PICKED_KEY, String(profile.id));
+    } catch {
+      /* storage unavailable */
+    }
     // Full navigation so every page refetches with the new profile
     window.location.assign(next);
   };
@@ -113,6 +144,8 @@ function ProfilesPicker() {
                 <button
                   type="button"
                   onClick={() => select(p)}
+                  onPointerEnter={() => { if (!manage) warmRecommendations(p); }}
+                  onFocus={() => { if (!manage) warmRecommendations(p); }}
                   className="group flex flex-col items-center outline-none"
                   style={{ width: AVATAR_SIZE }}
                 >

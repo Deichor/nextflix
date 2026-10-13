@@ -6,6 +6,7 @@ import { HoverPreview, useHoverPreview } from '@/features/catalog/components/Tit
 import { localGenres } from '@/features/catalog/titles';
 import { TitleItem, img, matchPercent, yearOf } from '@/features/home/feeds';
 import { progressPercent } from '@/features/watch/api';
+import { useProgressFor } from '@/features/watch/progressStore';
 import { useFormat, useT } from '@/shared/i18n';
 import TmdbImage from '@/shared/ui/TmdbImage';
 import InstantChip from '@/shared/ui/InstantChip';
@@ -33,7 +34,7 @@ export const CARD_SIZES: Record<CardVariant, string> = {
 function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardProps) {
   const t = useT();
   const f = useFormat();
-  const { play, openInfo, progressFor } = useTitleActions();
+  const { play, openInfo } = useTitleActions();
   const [imgFailed, setImgFailed] = useState(false);
 
   const isPoster = variant === 'poster';
@@ -41,7 +42,7 @@ function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardPro
   // What the card usually loads at 1x (placeholder for the hover preview) and the preview's large image
   const src = isPoster ? img('w342', path) : img('w300', path);
   const src2x = isPoster ? img('w500', path) : img('w780', path);
-  const saved = progressFor(item);
+  const saved = useProgressFor(item.media_type, item.id);
   const pct = saved ? progressPercent(saved) : 0;
   const year = yearOf(item);
 
@@ -68,6 +69,7 @@ function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardPro
               kind={isPoster ? 'poster' : 'backdrop'}
               sizes={CARD_SIZES[variant]}
               alt={item.title}
+              placeholder="none"
               onError={() => setImgFailed(true)}
             />
           ) : (

@@ -4,6 +4,8 @@ import React, { useEffect, useState } from 'react';
 import { Info } from 'lucide-react';
 import WatchButton, { formatRemaining, useAvailability } from '@/features/watch/components/WatchButton';
 import { episodeLabel, progressPercent } from '@/features/watch/api';
+import { useProgressFor } from '@/features/watch/progressStore';
+import { preloadPlayer } from '@/features/watch/components/LazyTorrentStreamPlayer';
 import { useTitleActions } from '@/features/home/components/TitleActions';
 import { TitleItem, fetchMovieLogo, img, matchPercent, yearOf } from '@/features/home/feeds';
 import { localGenres } from '@/features/catalog/titles';
@@ -21,7 +23,8 @@ interface BillboardProps {
 export default function Billboard({ item, loading = false }: BillboardProps) {
   const t = useT();
   const locale = useLocale();
-  const { play, openInfo, progressFor } = useTitleActions();
+  const { play, openInfo } = useTitleActions();
+  const saved = useProgressFor(item?.media_type, item?.id);
   // Logo state belongs to the item it was fetched for, so a new item starts without one
   const [fetched, setFetched] = useState<{ item: TitleItem; path: string } | null>(null);
   const [failedFor, setFailedFor] = useState<TitleItem | null>(null);
@@ -36,11 +39,10 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
   }, [item]);
 
   // Is what Play starts out yet? (the movie, or the episode it resumes)
-  const resumeAt = item ? progressFor(item) : undefined;
   const availability = useAvailability(
     !item ? null
       : item.media_type === 'movie' ? { media_type: 'movie', tmdb_id: item.id }
-        : { media_type: 'tv', tmdb_id: item.id, season: resumeAt?.season || 1, episode: resumeAt?.episode || 1 },
+        : { media_type: 'tv', tmdb_id: item.id, season: saved?.season || 1, episode: saved?.episode || 1 },
   );
 
   const shell = 'relative w-full h-[125vw] sm:h-[56.25vw] sm:portrait:h-[75vw] max-h-[92vh] min-h-[420px] overflow-hidden bg-[#141414]';
@@ -58,7 +60,6 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
     );
   }
 
-  const saved = progressFor(item);
   const pct = saved ? progressPercent(saved) : 0;
   const year = yearOf(item);
   const match = matchPercent(item);
@@ -114,6 +115,7 @@ export default function Billboard({ item, loading = false }: BillboardProps) {
           <WatchButton
             className="flex-1 sm:flex-none [&>button]:min-h-11 md:[&>button]:min-h-0"
             onClick={() => play(item)}
+            onPointerEnter={preloadPlayer}
             availability={availability}
             resume={!!saved}
             detail={saved && item.media_type === 'tv' ? episodeLabel(saved.season, saved.episode, locale) : undefined}

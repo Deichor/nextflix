@@ -36,9 +36,32 @@ const isBackendUrl = (url: string) => url.startsWith('/api/') || url.startsWith(
 const requestUrl = (input: RequestInfo | URL) =>
   typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 
-// Adds X-Lang (the active profile's language) to every backend request made with fetch, so TMDB
-// titles and overviews come back in that language without touching each call site. Installed
-// once, client side, by the i18n provider; requests that already carry X-Lang are left alone.
+const LANG_PARAM = 'x_lang';
+const SAFE_HEADERS = new Set(['accept', 'accept-language', 'content-language']);
+
+// Base URLs of older servers (no GET /api/home) that read the language only from X-Lang
+const headerLangServers = new Set<string>();
+
+/** Marks the server at base as older: it has no /api/home and ignores ?x_lang=. */
+export function markOldServer(base: string) {
+  headerLangServers.add(base);
+}
+
+export const isOldServer = (base: string) => headerLangServers.has(base);
+
+// Headers a cross-origin GET may carry without a CORS preflight (Content-Type is dropped before)
+function allSafelisted(headers: Headers): boolean {
+  let safe = true;
+  headers.forEach((_, name) => { if (!SAFE_HEADERS.has(name.toLowerCase())) safe = false; });
+  return safe;
+}
+
+// Adds the active profile's language to every backend request made with fetch, so TMDB titles
+// and overviews come back in that language without touching each call site. Installed once,
+// client side, by the i18n provider. Simple GETs get ?x_lang= instead of the X-Lang header: on
+// the LAN the backend is another origin and a custom header makes every GET preflighted.
+// Requests that already carry X-Lang or x_lang are left alone, except that an older server
+// (see markOldServer) always gets the header.
 export function installLangFetch() {
   if (typeof window === 'undefined') return;
   const w = window as Window & { __nfLangFetch?: boolean };
@@ -46,11 +69,24 @@ export function installLangFetch() {
   w.__nfLangFetch = true;
   const original = window.fetch.bind(window);
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = requestUrl(input);
     // keepalive requests (page unload) skip it: a custom header would need a CORS preflight
-    if (init?.keepalive || !isBackendUrl(requestUrl(input))) return original(input, init);
+    if (init?.keepalive || !isBackendUrl(url)) return original(input, init);
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
     if (headers.has(LANG_HEADER)) return original(input, init);
-    headers.set(LANG_HEADER, contentLang());
+    const target = new URL(url, window.location.href);
+    const queryLang = target.searchParams.get(LANG_PARAM);
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    if ((method === 'GET' || method === 'HEAD') && !(input instanceof Request) && !isOldServer(getApiUrl())) {
+      if (queryLang) return original(input, init);
+      // A bodyless GET has no use for a Content-Type, but a JSON one forces a preflight
+      headers.delete('Content-Type');
+      if (allSafelisted(headers)) {
+        target.searchParams.set(LANG_PARAM, contentLang());
+        return original(target.href, { ...init, headers });
+      }
+    }
+    headers.set(LANG_HEADER, queryLang || contentLang());
     return original(input, { ...init, headers });
   };
 }
