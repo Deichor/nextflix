@@ -36,3 +36,18 @@ Thumbs.db
 /tv/webos/dist/
 /tv/webos/out/
 /tv/webos/.ares/
+
+# Android TV app (tv/android)
+/tv/android/**/build/
+/tv/android/.gradle/
+/tv/android/.kotlin/
+/tv/android/out/
+/tv/android/.adb/
+/tv/android/.signing/
+/tv/android/local.properties
+/tv/android/**/*.jks
+/tv/android/**/*.keystore
+/tv/android/**/*.apk
+/tv/android/**/*.aab
+/tv/android/app/release/
+/tv/android/captures/

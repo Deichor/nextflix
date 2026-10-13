@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Nextflix server runs on the LAN over plain HTTP (http://nextflix.local:8252, http://<pc-ip>:8252). The IP is
+     only known at run time, so cleartext is allowed here and limited to the saved server in code (CleartextGuard). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

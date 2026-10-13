@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Netflix-style N of the webOS icon (tv/webos/scripts/finalize.mjs): two bars and a brighter diagonal -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#E50914" android:pathData="M38.82,30.24L49.91,30.24L69.18,77.76L58.09,77.76Z" />
+    <path android:fillColor="#B1060F" android:pathData="M38.82,30.24h9.9v47.52h-9.9z" />
+    <path android:fillColor="#B1060F" android:pathData="M59.28,30.24h9.9v47.52h-9.9z" />
+</vector>
