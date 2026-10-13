@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import RowsScreen from '../components/RowsScreen';
 import type { RowDef } from '../components/Row';
-import { scoped } from '../lib/http';
+import { langScoped } from '../lib/http';
 import { useT } from '../lib/i18n';
 import { useQuery } from '../lib/useQuery';
 import { useEntry } from '../nav/router';
@@ -25,8 +25,8 @@ async function loadMovieRows() {
 export default function MoviesScreen() {
   const t = useT();
   const entry = useEntry();
-  const feeds = useQuery(scoped('feeds'), homeFeedsCached);
-  const more = useQuery(scoped('movie-rows'), loadMovieRows);
+  const feeds = useQuery(langScoped('feeds'), homeFeedsCached);
+  const more = useQuery(langScoped('movie-rows'), loadMovieRows);
 
   const featured = useMemo(() => {
     if (!feeds.data) return null;

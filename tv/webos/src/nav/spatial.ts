@@ -4,6 +4,8 @@ import { KEY, direction, isBack, type Direction } from '../lib/webos';
 //   [data-nav]          focusable element (button, or a div with tabIndex -1)
 //   [data-nav-id]       stable id, used to restore focus after a screen remounts
 //   [data-nav-group]    remembers its last focused child; moves try the same group first
+//   [data-nav-scope]    its row groups are also remembered by name (a remounted row returns to its card)
+//   [data-row-index]    a row section: Up/Down try the neighbouring rows before the whole layer
 //   [data-nav-default]  focused when a group or layer is entered without memory
 //   [data-nav-enter]    the group is entered only with that direction (the side menu: "left")
 //   [data-nav-layer]    the last one in the DOM traps focus (player, dialogs)
@@ -17,6 +19,8 @@ export type KeyHandler = (e: KeyboardEvent) => boolean;
 const handlers: KeyHandler[] = [];
 const focusListeners = new Set<(el: HTMLElement) => void>();
 const groupMemory = new WeakMap<Element, HTMLElement>();
+// Last focused data-nav-id per "scope|group" name: survives the group's element being replaced
+const groupNameMemory = new Map<string, string>();
 let lastFocusedId: string | null = null;
 let lastMoveAt = 0;
 
@@ -47,7 +51,9 @@ function focusables(root: Element): HTMLElement[] {
     .filter((el: HTMLElement) => !(el as HTMLButtonElement).disabled && rendered(el));
 }
 
-const rootFontPx = () => parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+// The root font scales with the viewport width: measured once, again after a resize
+let fontPx = 0;
+const rootFontPx = () => fontPx || (fontPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
 
 // ---- Scrolling ----
 // A scroll container's [data-scroll-content] child is moved with a composited translate3d (no
@@ -125,12 +131,30 @@ export function ensureVisible(el: HTMLElement, smooth = true): void {
 
 // ---- Focus ----
 
+// Rows only (other groups, like the side menu, start from their default on a new screen)
+function groupName(g: Element): string | null {
+  const scope = g.closest('[data-row-index]') && g.closest('[data-nav-scope]');
+  return scope ? `${scope.getAttribute('data-nav-scope')}|${g.getAttribute('data-nav-group')}` : null;
+}
+
 function remember(el: HTMLElement) {
+  const id = el.getAttribute('data-nav-id');
   let g = el.parentElement?.closest('[data-nav-group]');
   while (g) {
     groupMemory.set(g, el);
+    const name = id && groupName(g);
+    if (name) groupNameMemory.set(name, id as string);
     g = g.parentElement?.closest('[data-nav-group]');
   }
+}
+
+/** The group's last focused element, if it is still there. */
+function memoryOf(g: Element): HTMLElement | null {
+  const m = groupMemory.get(g);
+  if (m && g.contains(m) && rendered(m)) return m;
+  const name = groupName(g);
+  const id = name && groupNameMemory.get(name);
+  return id ? findById(id, g) : null;
 }
 
 export function focusElement(el: HTMLElement, opts: { scroll?: boolean; smooth?: boolean } = {}): void {
@@ -244,6 +268,20 @@ function innermostGroup(el: Element): Element | null {
   return el.parentElement ? el.parentElement.closest('[data-nav-group]') : null;
 }
 
+// Up/Down from a row: the nearest row above or below with a target, measuring only that row
+function neighbourRow(cur: HTMLElement, dir: Direction, from: DOMRect): HTMLElement | null {
+  const section = cur.closest('[data-row-index]');
+  if (!section) return null;
+  const step = (s: Element) => (dir === 'down' ? s.nextElementSibling : s.previousElementSibling);
+  for (let s = step(section); s && s.hasAttribute('data-row-index'); s = step(s)) {
+    const g = s.querySelector('[data-nav-group]');
+    if (!g) continue;
+    const pick = memoryOf(g) || best(dir, from, candidates(g, cur, dir));
+    if (pick) return pick;
+  }
+  return null;
+}
+
 export function move(dir: Direction): boolean {
   const layer = activeLayer();
   const cur = document.activeElement as HTMLElement | null;
@@ -256,13 +294,15 @@ export function move(dir: Direction): boolean {
   const group = innermostGroup(cur);
   const inGroup = !!group && layer.contains(group);
   let next = inGroup ? best(dir, from, candidates(group as Element, cur, dir)) : null;
+  // Then the neighbouring rows; the whole layer (hero buttons, side menu) only when they have none
+  if (!next && inGroup && (dir === 'up' || dir === 'down')) next = neighbourRow(cur, dir, from);
   if (!next) next = best(dir, from, candidates(layer, cur, dir, inGroup ? group : null));
   if (!next) return false;
   // Entering another group: go back to where it was left (Netflix rows), or its default
   const target = innermostGroup(next);
   if (target && target !== group && !target.contains(cur)) {
-    const memo = groupMemory.get(target);
-    if (memo && target.contains(memo) && rendered(memo)) next = memo;
+    const memo = memoryOf(target);
+    if (memo) next = memo;
     else {
       const def = target.querySelector<HTMLElement>('[data-nav-default]');
       if (def && rendered(def)) next = def;
@@ -321,6 +361,7 @@ function onMouseOver(e: MouseEvent) {
 }
 
 export function initSpatial(): void {
+  window.addEventListener('resize', () => { fontPx = 0; });
   window.addEventListener('keydown', onKeyDown);
   document.addEventListener('mouseover', onMouseOver);
 }

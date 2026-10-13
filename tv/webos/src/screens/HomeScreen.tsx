@@ -1,27 +1,26 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import RowsScreen from '../components/RowsScreen';
 import type { RowDef } from '../components/Row';
-import { invalidate, scoped } from '../lib/http';
+import { invalidate } from '../lib/http';
 import { useI18n, type I18n, type MessageKey } from '../lib/i18n';
-import { getProfile, getProfileId } from '../lib/profile';
-import { progressList } from '../lib/stream';
+import { getProfile, getProfileId, profileLocale } from '../lib/profile';
 import { useQuery } from '../lib/useQuery';
 import { useEntry } from '../nav/router';
-import {
-  discoverMovies, favorites, homeFeedsCached, interleave, popularMovies, recommendations, top10,
-  type HomeFeeds, type RecommendationRow, type Title,
-} from '../lib/catalog';
+import { homeQuery, interleave, type HomeData, type RecommendationRow, type Title } from '../lib/catalog';
+import { readHomeSnapshot } from '../lib/homeSnapshot';
+import { personalQueries } from '../lib/homeQueries';
 
-// Keep in sync with GENRE_ROWS in web/src/features/home/HomeScreen.tsx (the server warms their images)
-const GENRE_ROWS: { title: MessageKey; params: Record<string, string> }[] = [
-  { title: 'home.genreActionAdventure', params: { with_genres: '28|12', 'vote_count.gte': '300' } },
-  { title: 'home.genreComedies', params: { with_genres: '35', 'vote_count.gte': '300' } },
-  { title: 'home.genreSciFiFantasy', params: { with_genres: '878|14', 'vote_count.gte': '300' } },
-  { title: 'home.genreHorror', params: { with_genres: '27', 'vote_count.gte': '200' } },
-  { title: 'home.genreAcclaimedMovies', params: { sort_by: 'vote_average.desc', 'vote_count.gte': '5000' } },
+// Ids of HOME_GENRES (lib/catalog.ts); keep in sync with GENRE_ROWS in web/src/features/home/HomeScreen.tsx
+const GENRE_ROWS: { id: string; title: MessageKey }[] = [
+  { id: 'action_adventure', title: 'home.genreActionAdventure' },
+  { id: 'comedies', title: 'home.genreComedies' },
+  { id: 'scifi_fantasy', title: 'home.genreSciFiFantasy' },
+  { id: 'horror', title: 'home.genreHorror' },
+  { id: 'acclaimed', title: 'home.genreAcclaimedMovies' },
 ];
 
-const MIN = 60 * 1000;
+const HOME_RETRIES = 3;
+const HOME_RETRY_MS = 10 * 1000;
 
 export function pickFeatured(pool: Title[], key: string | null): Title | null {
   const good = pool.filter(t => t.backdrop && t.overview.length > 40).slice(0, 6);
@@ -43,34 +42,57 @@ function recommendationTitle({ t }: I18n, row: RecommendationRow): string {
   return row.id === 'trending' ? t('home.trendingNow') : row.title;
 }
 
+// Same content in a new answer (the snapshot replaced by the fresh one): the row is not re-rendered
+function sameItems(a: unknown[] | undefined, b: unknown[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 export default function HomeScreen() {
   const i18n = useI18n();
   const { t } = i18n;
   const pid = getProfileId() ?? 0;
+  const locale = profileLocale();
   // Bumped after playback: Continue Watching and recommendations load again
   const [reload, setReload] = useState(0);
-  const feeds = useQuery<HomeFeeds>(scoped('feeds'), homeFeedsCached);
-  const cw = useQuery(scoped('cw'), () => progressList(pid), 15 * 1000, reload);
-  const recs = useQuery(scoped('recs'), () => recommendations(pid), 5 * MIN, reload);
-  const favs = useQuery(scoped('favs'), () => favorites(pid), MIN);
-  const trMovies = useQuery(scoped('top10-tr-movie'), () => top10('TR', 'movie'));
-  const trTv = useQuery(scoped('top10-tr-tv'), () => top10('TR', 'tv'));
-  const popular = useQuery(scoped('popular-movies'), popularMovies);
-  const genres = useQuery(scoped('home-genres'), () => Promise.all(GENRE_ROWS.map(g => discoverMovies(g.params).catch(() => []))));
+  const hq = useMemo(() => homeQuery(locale), [locale]);
+  const pq = useMemo(() => personalQueries(pid, locale), [pid, locale]);
+  const [homeRetry, setHomeRetry] = useState(0);
+  const home = useQuery<HomeData>(hq.key, hq.load, hq.ttl, homeRetry, { initial: () => readHomeSnapshot(locale), keep: hq.keep });
+  // A part the server had not ready (or that failed) is asked again a few times while Home is open
+  const incomplete = !!home.data && !home.data.complete;
+  useEffect(() => {
+    if (!incomplete || homeRetry >= HOME_RETRIES) return;
+    const id = window.setTimeout(() => setHomeRetry(n => n + 1), HOME_RETRY_MS * (homeRetry + 1));
+    return () => window.clearTimeout(id);
+  }, [incomplete, homeRetry]);
+  const cw = useQuery(pq.cw.key, pq.cw.load, pq.cw.ttl, reload, { initial: pq.cw.initial });
+  const recs = useQuery(pq.recs.key, pq.recs.load, pq.recs.ttl, reload, { initial: pq.recs.initial });
+  const favs = useQuery(pq.favs.key, pq.favs.load, pq.favs.ttl, 0, { initial: pq.favs.initial });
 
-  // The billboard title stays the same when coming back to this screen
+  const f = home.data ? home.data.feeds : null;
+  const trending = useMemo(() => (f ? interleave(f.trendingMovies, f.trendingTv) : undefined), [f]);
+
+  // The billboard title stays the same when coming back to this screen (and from the snapshot to the fresh answer)
   const entry = useEntry();
   const featured = useMemo(() => {
-    if (!feeds.data) return null;
-    const f = pickFeatured([...feeds.data.trendingMovies, ...feeds.data.trendingTv], (entry.state.featured as string) || null);
-    if (f) entry.state.featured = f.key;
-    return f;
-  }, [feeds.data, entry]);
+    if (!f) return null;
+    const pick = pickFeatured([...f.trendingMovies, ...f.trendingTv], (entry.state.featured as string) || null);
+    if (pick) entry.state.featured = pick.key;
+    return pick;
+  }, [f, entry]);
 
+  // Rows that did not change keep their object, so the memoized rows skip rendering
+  const prevRows = useRef(new Map<string, RowDef>());
   const rows = useMemo<RowDef[]>(() => {
-    const f = feeds.data;
-    const failed = (q: { failed: boolean }) => q.failed;
-    const list = (items: Title[] | undefined, q: { failed: boolean }) => (failed(q) ? [] : items);
+    const h = home.data;
+    // Loading: placeholders; failed or missing: the row is hidden
+    const part = (items: Title[] | null | undefined) => (h ? items || [] : home.failed ? [] : undefined);
     const recRows = recs.data || [];
     const serverTrending = recRows.some(r => r.id === 'trending' || r.reason === 'popular');
     const out: RowDef[] = [
@@ -78,26 +100,36 @@ export default function HomeScreen() {
     ];
     if (!recs.data && !recs.failed) out.push({ id: 'recs-loading', title: '', variant: 'backdrop', items: undefined });
     recRows.forEach(r => out.push({ id: `rec-${r.id}`, title: recommendationTitle(i18n, r), variant: 'backdrop', items: r.items }));
-    if (!serverTrending) out.push({ id: 'trending', title: t('home.trendingNow'), variant: 'backdrop', items: f ? interleave(f.trendingMovies, f.trendingTv) : list(undefined, feeds) });
+    if (!serverTrending) out.push({ id: 'trending', title: t('home.trendingNow'), variant: 'backdrop', items: part(trending) });
     out.push(
-      { id: 'top10-tr-movie', title: t('home.top10TrMovies'), variant: 'rank', items: list(trMovies.data, trMovies) },
-      { id: 'favorites', title: t('favorites.title'), variant: 'backdrop', items: list(favs.data, favs) },
-      { id: 'popular-movies', title: t('home.popularMovies'), variant: 'backdrop', items: list(popular.data, popular) },
-      { id: 'top10-tr-tv', title: t('home.top10TrTv'), variant: 'rank', items: list(trTv.data, trTv) },
-      { id: 'popular-tv', title: t('home.popularTv'), variant: 'backdrop', items: f ? f.popularTv : list(undefined, feeds) },
-      { id: 'coming-soon', title: t('home.comingSoon'), variant: 'backdrop', items: f ? f.upcomingMovies : list(undefined, feeds) },
-      { id: 'new-episodes', title: t('home.newEpisodes'), variant: 'backdrop', items: f ? f.onTheAirTv : list(undefined, feeds) },
+      { id: 'top10-tr-movie', title: t('home.top10TrMovies'), variant: 'rank', items: part(h?.top10Movie) },
+      { id: 'favorites', title: t('favorites.title'), variant: 'backdrop', items: favs.failed ? [] : favs.data },
+      { id: 'popular-movies', title: t('home.popularMovies'), variant: 'backdrop', items: part(h?.popular) },
+      { id: 'top10-tr-tv', title: t('home.top10TrTv'), variant: 'rank', items: part(h?.top10Tv) },
+      { id: 'popular-tv', title: t('home.popularTv'), variant: 'backdrop', items: part(f?.popularTv) },
+      { id: 'coming-soon', title: t('home.comingSoon'), variant: 'backdrop', items: part(f?.upcomingMovies) },
+      { id: 'new-episodes', title: t('home.newEpisodes'), variant: 'backdrop', items: part(f?.onTheAirTv) },
     );
-    GENRE_ROWS.forEach((g, i) => out.push({ id: `genre-${i}`, title: t(g.title), variant: 'backdrop', items: genres.data ? genres.data[i] : list(undefined, genres) }));
-    return out;
-  }, [feeds, cw, recs, favs, trMovies, trTv, popular, genres, t, i18n]);
+    GENRE_ROWS.forEach(g => out.push({ id: `genre-${g.id}`, title: t(g.title), variant: 'backdrop', items: part(h?.genres[g.id]) }));
+
+    const prev = prevRows.current;
+    const next = new Map<string, RowDef>();
+    const stable = out.map(r => {
+      const p = prev.get(r.id);
+      const keep = p && p.title === r.title && p.variant === r.variant && sameItems(p.items, r.items) ? p : r;
+      next.set(r.id, keep);
+      return keep;
+    });
+    prevRows.current = next;
+    return stable;
+  }, [home, f, trending, cw, recs, favs, t, i18n]);
 
   return (
     <RowsScreen
       tab="home"
       featured={featured}
       rows={rows}
-      ready={!!feeds.data || feeds.failed}
+      ready={!!home.data || home.failed}
       surprise
       onPlayed={() => {
         invalidate('|cw');

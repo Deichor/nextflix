@@ -566,14 +566,15 @@ p {
   height: 13.5rem;
   margin-right: 1rem;
   border-radius: 0.5rem;
+  /* static: an animation per placeholder made a compositor layer each */
   background: #2b2b2b;
-  /* opacity pulses on the compositor; a moving background repainted every frame */
-  animation: pulse 1.4s ease-in-out infinite;
   flex-shrink: 0;
 }
 
-@keyframes pulse {
-  50% { opacity: 0.55; }
+/* rank rows: as high as .card-rank */
+.card-skeleton-poster {
+  width: 13rem;
+  height: 19.5rem;
 }
 
 .card-img {

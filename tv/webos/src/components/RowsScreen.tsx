@@ -1,15 +1,20 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type FocusEvent } from 'react';
 import { Info, Play, Shuffle } from 'lucide-react';
 import { img } from '../lib/http';
+import { getProfileId } from '../lib/profile';
 import { useI18n } from '../lib/i18n';
 import type { Title } from '../lib/catalog';
 import type { StreamProgress } from '../lib/stream';
-import { useFocusRestore, useRouter, type Tab } from '../nav/router';
+import { useEntry, useFocusRestore, useRouter, type Tab } from '../nav/router';
 import { usePlayer } from '../nav/player';
 import { progressToRequest } from '../lib/stream';
 import SideNav from './SideNav';
-import Row, { heroOfTitle, type RowDef } from './Row';
+import Row, { RowPlaceholder, heroOfTitle, type RowDef } from './Row';
 import { setHero, useHero, type HeroItem } from './heroStore';
+
+// Rows mounted above and below the focused one
+const ROWS_BEFORE = 2;
+const ROWS_AFTER = 4;
 
 interface RowsScreenProps {
   tab: Tab;
@@ -141,10 +146,29 @@ export default function RowsScreen({ tab, featured, kicker, rows, ready, surpris
     pl.open(progressToRequest(p), done);
   }, []);
   const toHero = useCallback(() => setInRows(false), []);
-  const toRows = useCallback(() => setInRows(true), []);
+
+  // Only the rows near the focused one are mounted; the others are placeholders of the same height
+  const entry = useEntry();
+  const [focusedRow, setFocusedRow] = useState<string | null>(null);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const toRows = useCallback((e: FocusEvent) => {
+    setInRows(true);
+    const section = (e.target as Element).closest('[data-row-index]');
+    const r = section && rowsRef.current[Number(section.getAttribute('data-row-index'))];
+    if (r) setFocusedRow(r.id);
+  }, []);
+  // Before the first focus: the row of the restored card (Back), else the top
+  const restoreId = entry.focusId && entry.focusId.lastIndexOf(':') > 0 ? entry.focusId.slice(0, entry.focusId.lastIndexOf(':')) : null;
+  const centerId = focusedRow || restoreId;
+  const found = centerId ? rows.findIndex(r => r.id === centerId) : 0;
+  // A focused row that left the list: the window stays where it was
+  const lastCenter = useRef(0);
+  const center = found >= 0 ? found : Math.min(lastCenter.current, rows.length - 1);
+  lastCenter.current = center;
 
   return (
-    <div className="screen rows-screen">
+    <div className="screen rows-screen" data-nav-scope={`rows-${tab}-${getProfileId() ?? 0}`}>
       <SideNav active={tab} />
       <Hero featured={featured} kicker={kicker} inRows={inRows} onOpen={openTitle} onButtonsFocus={toHero} />
       <div
@@ -154,8 +178,9 @@ export default function RowsScreen({ tab, featured, kicker, rows, ready, surpris
         onFocus={toRows}
       >
         <div className="rows-content" data-scroll-content>
-          {rows.map(r => (
-            <Row key={r.id} row={r} onSelectTitle={openTitle} onSelectProgress={playProgress} />
+          {rows.map((r, i) => (i >= center - ROWS_BEFORE && i <= center + ROWS_AFTER
+            ? <Row key={r.id} row={r} index={i} onSelectTitle={openTitle} onSelectProgress={playProgress} />
+            : <RowPlaceholder key={r.id} row={r} index={i} />
           ))}
           {surprise && <SurpriseFooter />}
           <div className="rows-end" />

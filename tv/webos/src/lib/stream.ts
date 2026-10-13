@@ -525,8 +525,9 @@ export async function saveProgress(p: StreamProgress, keepalive = false): Promis
   }
 }
 
-export async function progressList(profileId: number): Promise<StreamProgress[]> {
-  const data = await getJson<StreamProgress[]>(`/api/stream-progress?profile_id=${profileId}`);
+/** `locale` given: for that profile rather than the active one (prefetch). */
+export async function progressList(profileId: number, locale?: Locale): Promise<StreamProgress[]> {
+  const data = await getJson<StreamProgress[]>(`/api/stream-progress?profile_id=${profileId}`, locale ? { profileId, locale } : {});
   return Array.isArray(data) ? data : [];
 }
 

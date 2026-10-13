@@ -9,7 +9,7 @@ import {
   GENRE_CHIPS, NO_FILTERS, chipFits, discover, genreName, hasFilters,
   type SearchFilters, type TypeFilter,
 } from '../lib/discover';
-import { img, scoped } from '../lib/http';
+import { img, langScoped } from '../lib/http';
 import { searchFiltered, searchRanked, suggestTitles } from '../lib/search';
 import { useT } from '../lib/i18n';
 import { useQuery } from '../lib/useQuery';
@@ -71,7 +71,7 @@ export default function SearchScreen() {
   const leftRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
-  const feeds = useQuery(scoped('feeds'), homeFeedsCached);
+  const feeds = useQuery(langScoped('feeds'), homeFeedsCached);
   const popular = useMemo(
     () => (feeds.data ? unique(feeds.data.trendingMovies, feeds.data.trendingTv, feeds.data.trendingWeekMovies, feeds.data.popularTv).slice(0, 24) : null),
     [feeds.data],

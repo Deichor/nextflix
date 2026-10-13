@@ -31,13 +31,32 @@ interface RowProps {
   row: RowDef;
   onSelectTitle: (t: Title) => void;
   onSelectProgress?: (p: StreamProgress) => void;
+  /** Position in RowsScreen's rows (only the rows near the focus are mounted there) */
+  index?: number;
 }
 
-const SKELETONS = [0, 1, 2, 3, 4, 5];
+// Static grey cards while loading (enough to fill the screen width)
+const SKELETONS = [0, 1, 2, 3];
+const skeletonClass = (variant: RowDef['variant']) => `card card-skeleton ${variant === 'rank' ? 'card-skeleton-poster' : ''}`;
 // Cards past the last focused one that already load their image
 const AHEAD = 7;
 
-function Row({ row, onSelectTitle, onSelectProgress }: RowProps) {
+/** Stand-in for a row far from the focus: same height, nothing focusable. */
+export const RowPlaceholder = memo(function RowPlaceholder({ row, index }: { row: RowDef; index: number }) {
+  if (row.items && row.items.length === 0) return null;
+  return (
+    <section className={`row row-${row.variant}`} data-scroll-anchor data-row-index={index}>
+      <h2 className="row-title">{row.title}</h2>
+      <div className="row-scroller">
+        <div className="row-track">
+          <div className={skeletonClass(row.variant)} />
+        </div>
+      </div>
+    </section>
+  );
+});
+
+function Row({ row, onSelectTitle, onSelectProgress, index }: RowProps) {
   const i18n = useI18n();
   const ref = useRef<HTMLElement>(null);
   const [near, setNear] = useState(false);
@@ -79,11 +98,11 @@ function Row({ row, onSelectTitle, onSelectProgress }: RowProps) {
   if (items && items.length === 0) return null;
 
   return (
-    <section className={`row row-${row.variant}`} ref={ref} data-scroll-anchor>
+    <section className={`row row-${row.variant}`} ref={ref} data-scroll-anchor data-row-index={index}>
       <h2 className="row-title">{row.title}</h2>
       <div className="row-scroller" data-scroll-x="start" data-scroll-pad="8">
         <div className="row-track" data-scroll-content data-nav-group={`row-${row.id}`}>
-          {!items && SKELETONS.map(i => <div key={i} className="card card-skeleton" />)}
+          {!items && SKELETONS.map(i => <div key={i} className={skeletonClass(row.variant)} />)}
           {row.variant === 'continue' && items && (items as StreamProgress[]).map((p, i) => (
             <ContinueCard
               key={`${p.media_type}-${p.tmdb_id}`}

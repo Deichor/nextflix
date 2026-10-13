@@ -1,5 +1,8 @@
-import { getJson, scoped, cached } from './http';
+import { HttpError, base, cached, getJson, langScoped, prime, scoped, setQp } from './http';
+import type { Locale } from './i18n';
 import type { Profile } from './profile';
+import { mergeHome } from './homeMerge';
+import { readHomeSnapshot, writeHomeSnapshot } from './homeSnapshot';
 
 export type MediaType = 'movie' | 'tv';
 
@@ -103,15 +106,14 @@ export interface HomeFeeds {
   popularTv: Title[];
   onTheAirTv: Title[];
   airingToday: Title[];
+  /** One of the two answers failed: its lists are empty (kept from the previous answer when merged) */
+  missing?: 'movies' | 'tv';
 }
 
-export async function homeFeeds(): Promise<HomeFeeds> {
-  const [movies, tv] = await Promise.all([
-    getJson('/api/upcoming-movies').catch(() => null),
-    getJson('/api/upcoming-tv-series').catch(() => null),
-  ]);
-  if (!movies && !tv) throw new Error('feeds unavailable');
-  return {
+/** Bodies of /api/upcoming-movies and /api/upcoming-tv-series; null when both are missing. */
+function feedsOf(movies: any, tv: any): HomeFeeds | null {
+  if (!movies && !tv) return null;
+  const feeds: HomeFeeds = {
     trendingMovies: toTitles(movies?.trending_daily, 'movie'),
     trendingWeekMovies: toTitles(movies?.trending_weekly, 'movie'),
     nowPlaying: toTitles(movies?.now_playing, 'movie'),
@@ -121,12 +123,24 @@ export async function homeFeeds(): Promise<HomeFeeds> {
     onTheAirTv: toTitles(tv?.on_the_air, 'tv'),
     airingToday: toTitles(tv?.airing_today, 'tv'),
   };
+  if (!movies) feeds.missing = 'movies';
+  else if (!tv) feeds.missing = 'tv';
+  return feeds;
 }
 
-export const homeFeedsCached = () => cached(scoped('feeds'), 10 * 60 * 1000, homeFeeds);
+export async function homeFeeds(locale?: Locale): Promise<HomeFeeds> {
+  const [movies, tv] = await Promise.all([
+    getJson('/api/upcoming-movies', { locale }).catch(() => null),
+    getJson('/api/upcoming-tv-series', { locale }).catch(() => null),
+  ]);
+  const feeds = feedsOf(movies, tv);
+  if (!feeds) throw new Error('feeds unavailable');
+  return feeds;
+}
 
-export async function top10(region: 'TR' | 'global', type: MediaType): Promise<Title[]> {
-  const data = await getJson(`/api/top10?region=${region}&type=${type}`);
+export const homeFeedsCached = () => cached(langScoped('feeds'), HOME_TTL, homeFeeds);
+
+function top10Of(data: any, type: MediaType): Title[] {
   const items: any[] = Array.isArray(data?.items) ? data.items : [];
   const out: Title[] = [];
   items.forEach(it => {
@@ -136,6 +150,115 @@ export async function top10(region: 'TR' | 'global', type: MediaType): Promise<T
   return out;
 }
 
+export async function top10(region: 'TR' | 'global', type: MediaType, locale?: Locale): Promise<Title[]> {
+  return top10Of(await getJson(`/api/top10?region=${region}&type=${type}`, { locale }), type);
+}
+
+// ---- Home: one /api/home answer (older servers: the separate lists) ----
+
+const HOME_TTL = 10 * 60 * 1000;
+
+// Same ids and params as tmdb.HomeGenreRows on the server and GENRE_ROWS in web/src/features/home/HomeScreen.tsx
+export const HOME_GENRES: { id: string; params: Record<string, string> }[] = [
+  { id: 'action_adventure', params: { with_genres: '28|12', 'vote_count.gte': '300' } },
+  { id: 'comedies', params: { with_genres: '35', 'vote_count.gte': '300' } },
+  { id: 'scifi_fantasy', params: { with_genres: '878|14', 'vote_count.gte': '300' } },
+  { id: 'horror', params: { with_genres: '27', 'vote_count.gte': '200' } },
+  { id: 'acclaimed', params: { sort_by: 'vote_average.desc', 'vote_count.gte': '5000' } },
+];
+
+/** A null part failed or was not ready on the server; `complete` is false then. */
+export interface HomeData {
+  feeds: HomeFeeds | null;
+  popular: Title[] | null;
+  top10Movie: Title[] | null;
+  top10Tv: Title[] | null;
+  genres: Record<string, Title[] | null>;
+  complete: boolean;
+}
+
+function homeData(movies: any, tv: any, popular: any, trMovie: any, trTv: any, genres: Record<string, any>): HomeData {
+  const out: HomeData = {
+    feeds: feedsOf(movies, tv),
+    popular: popular ? toTitles(popular.results, 'movie') : null,
+    top10Movie: trMovie ? top10Of(trMovie, 'movie') : null,
+    top10Tv: trTv ? top10Of(trTv, 'tv') : null,
+    genres: {},
+    complete: !!(movies && tv && popular && trMovie && trTv),
+  };
+  HOME_GENRES.forEach(g => {
+    const data = genres[g.id];
+    out.genres[g.id] = data ? toTitles(data.results, 'movie') : null;
+    if (!data) out.complete = false;
+  });
+  return out;
+}
+
+// Servers without /api/home (404/405), until the next launch
+const homeUnsupported: Record<string, boolean> = {};
+
+/** The home lists in one request without custom headers; older servers: the separate requests. */
+export async function home(locale: Locale): Promise<HomeData> {
+  const server = base();
+  if (!homeUnsupported[server]) {
+    const res = await fetch(`${server}/api/home?x_lang=${locale}`);
+    if (res.status === 404 || res.status === 405) {
+      homeUnsupported[server] = true;
+      setQp(false);
+    } else {
+      if (!res.ok) throw new HttpError(res.status, `/api/home -> ${res.status}`);
+      // Not JSON (e.g. a proxy's page) or an unknown version: the separate requests below
+      const d = await res.json().catch(() => null);
+      if (d && d.version >= 1) {
+        setQp(true);
+        const genres: Record<string, any> = {};
+        (Array.isArray(d.genres) ? d.genres : []).forEach((g: any) => { if (g && typeof g.id === 'string') genres[g.id] = g.data; });
+        return homeData(d.upcoming_movies, d.upcoming_tv_series, d.popular_movies, d.top10_tr_movie, d.top10_tr_tv, genres);
+      }
+    }
+  }
+  const none = () => null;
+  const opts = { locale };
+  const discover = (params: Record<string, string>) => getJson(`/api/tmdb/discover/movie?${discoverQuery(params)}`, opts).catch(none);
+  const [movies, tv, popular, trMovie, trTv, ...genreData] = await Promise.all([
+    getJson('/api/upcoming-movies', opts).catch(none),
+    getJson('/api/upcoming-tv-series', opts).catch(none),
+    getJson('/api/tmdb/movie/popular', opts).catch(none),
+    getJson('/api/top10?region=TR&type=movie', opts).catch(none),
+    getJson('/api/top10?region=TR&type=tv', opts).catch(none),
+    ...HOME_GENRES.map(g => discover(g.params)),
+  ]);
+  if (!movies && !tv && !popular && !trMovie && !trTv && genreData.every(g => !g)) throw new Error('home unavailable');
+  const genres: Record<string, any> = {};
+  HOME_GENRES.forEach((g, i) => { genres[g.id] = genreData[i]; });
+  return homeData(movies, tv, popular, trMovie, trTv, genres);
+}
+
+async function loadHome(locale: Locale): Promise<HomeData> {
+  const fresh = await home(locale);
+  // A part missing now keeps the previous one (a complete answer skips reading the snapshot)
+  const data = fresh.complete ? fresh : mergeHome(fresh, readHomeSnapshot(locale));
+  writeHomeSnapshot(locale, data);
+  // Movies, TV Shows and Search use the same feeds
+  if (fresh.feeds && !fresh.feeds.missing) prime(langScoped('feeds', locale), HOME_TTL, fresh.feeds);
+  return data;
+}
+
+/** For useQuery and prefetch: an answer with a missing part is not kept in memory (asked again soon). */
+export function homeQuery(locale: Locale) {
+  return {
+    key: langScoped('home', locale),
+    ttl: HOME_TTL,
+    load: () => loadHome(locale),
+    keep: (d: HomeData) => d.complete,
+  };
+}
+
+export function homeCached(locale: Locale): Promise<HomeData> {
+  const q = homeQuery(locale);
+  return cached(q.key, q.ttl, q.load, q.keep);
+}
+
 export interface RecommendationRow {
   id: string;
   title: string;
@@ -143,16 +266,17 @@ export interface RecommendationRow {
   items: Title[];
 }
 
-export async function recommendations(profileId: number): Promise<RecommendationRow[]> {
-  const data = await getJson(`/api/recommendations?profile_id=${profileId}`);
+/** `locale` given: for that profile rather than the active one (prefetch). */
+export async function recommendations(profileId: number, locale?: Locale): Promise<RecommendationRow[]> {
+  const data = await getJson(`/api/recommendations?profile_id=${profileId}`, locale ? { profileId, locale } : {});
   const rows: any[] = Array.isArray(data?.rows) ? data.rows : [];
   return rows
     .map(r => ({ id: String(r?.id ?? ''), title: String(r?.title ?? ''), reason: String(r?.reason ?? ''), items: toTitles(r?.items, 'movie') }))
     .filter(r => r.id && r.items.length > 0);
 }
 
-export async function favorites(profileId: number): Promise<Title[]> {
-  const data = await getJson<any[]>(`/api/favorites?profile_id=${profileId}`);
+export async function favorites(profileId: number, locale?: Locale): Promise<Title[]> {
+  const data = await getJson<any[]>(`/api/favorites?profile_id=${profileId}`, locale ? { profileId, locale } : {});
   return (Array.isArray(data) ? data : [])
     .map(r => toTitle({ id: r.tmdb_id, media_type: r.media_type, title: r.title, poster_path: r.poster_path, backdrop_path: r.backdrop_path }, 'movie'))
     .filter((t): t is Title => !!t && !!(t.poster || t.backdrop));
@@ -163,9 +287,11 @@ export async function popularMovies(): Promise<Title[]> {
   return toTitles(data?.results, 'movie');
 }
 
+const discoverQuery = (params: Record<string, string>) =>
+  new URLSearchParams({ sort_by: 'popularity.desc', include_adult: 'false', ...params }).toString();
+
 export async function discoverMovies(params: Record<string, string>): Promise<Title[]> {
-  const q = new URLSearchParams({ sort_by: 'popularity.desc', include_adult: 'false', ...params });
-  const data = await getJson(`/api/tmdb/discover/movie?${q.toString()}`);
+  const data = await getJson(`/api/tmdb/discover/movie?${discoverQuery(params)}`);
   return toTitles(data?.results, 'movie');
 }
 

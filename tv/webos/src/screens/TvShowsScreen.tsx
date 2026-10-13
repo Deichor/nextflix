@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import RowsScreen from '../components/RowsScreen';
 import type { RowDef } from '../components/Row';
-import { scoped } from '../lib/http';
+import { langScoped } from '../lib/http';
 import { useT } from '../lib/i18n';
 import { useQuery } from '../lib/useQuery';
 import { useEntry } from '../nav/router';
@@ -21,8 +21,8 @@ async function loadProviderRows() {
 export default function TvShowsScreen() {
   const t = useT();
   const entry = useEntry();
-  const feeds = useQuery(scoped('feeds'), homeFeedsCached);
-  const providers = useQuery(scoped('tv-providers'), loadProviderRows);
+  const feeds = useQuery(langScoped('feeds'), homeFeedsCached);
+  const providers = useQuery(langScoped('tv-providers'), loadProviderRows);
 
   const featured = useMemo(() => {
     if (!feeds.data) return null;

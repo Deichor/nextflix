@@ -4,7 +4,8 @@ import Avatar from '../components/Avatar';
 import Spinner from '../components/Spinner';
 import { profiles as loadProfiles } from '../lib/catalog';
 import { useT } from '../lib/i18n';
-import { MAX_PROFILES, getProfileId, type Profile } from '../lib/profile';
+import { prefetchHome, prefetchProfile } from '../lib/homeQueries';
+import { MAX_PROFILES, getProfile, getProfileId, profileLocale, type Profile } from '../lib/profile';
 import { useFocusRestore, useRouter } from '../nav/router';
 import { focusById, focusDefault } from '../nav/spatial';
 
@@ -28,6 +29,15 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
       .catch(e => { if (!cancelled) { setList([]); setError(e instanceof Error ? e.message : String(e)); } });
     return () => { cancelled = true; };
   }, [attempt]);
+
+  // Home's lists load while the viewer picks: the last used profile's language, else the first profile's
+  useEffect(() => {
+    const p = getProfile();
+    if (p) prefetchHome(profileLocale(p));
+  }, []);
+  useEffect(() => {
+    if (list && list[0] && !list.some(p => p.id === getProfileId())) prefetchHome(profileLocale(list[0]));
+  }, [list]);
 
   const last = getProfileId();
   const canAdd = !!list && !error && list.length < MAX_PROFILES;
@@ -59,7 +69,7 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
       {!!list && (list.length > 0 || canAdd) && (
         <div className="profiles-list" data-nav-group="profiles">
           {list.map(p => (
-            <button key={p.id} type="button" className="profile-tile" data-nav data-nav-id={`profile-${p.id}`} onClick={() => onPick(p)}>
+            <button key={p.id} type="button" className="profile-tile" data-nav data-nav-id={`profile-${p.id}`} onFocus={() => prefetchProfile(p)} onClick={() => onPick(p)}>
               <Avatar profile={p} className="profile-avatar" />
               <span className="profile-name">{p.name}</span>
             </button>
