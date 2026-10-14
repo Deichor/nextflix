@@ -13,7 +13,8 @@ import (
 )
 
 // Speech tap: a play stream with audio (muxed or split track=audio) also writes the dialogue of
-// the played audio track as 8 kHz mono PCM to a second ffmpeg output (fd 3). Subtitle timing
+// the played audio track as 8 kHz mono PCM to a second ffmpeg output (fd 3; cuetap.go adds a
+// third). Subtitle timing
 // listens to it, so every stretch the viewer plays is a timing reference without reading the
 // file again. The tap never slows playback: its own goroutine drains the pipe and drops what the
 // sink cannot take in time, and a play ffmpeg that fails with the tap runs again without it.
@@ -53,7 +54,7 @@ func speechTapArgs(n int, a *tsProbeStream) []string {
 	if tsHasCenter(a.ChannelLayout, a.Channels) {
 		af = "pan=mono|c0=FC," + af
 	}
-	return []string{"-map", fmt.Sprintf("0:a:%d", n), "-af", af, "-ac", "1", "-c:a", "pcm_s16le", "-f", "s16le", "pipe:3"}
+	return []string{"-map", fmt.Sprintf("0:a:%d", n), "-af", af, "-ac", "1", "-c:a", "pcm_s16le", "-f", "s16le"}
 }
 
 // tsHasCenter reports whether an audio layout has a front centre (dialogue) channel.
@@ -70,16 +71,26 @@ func tsHasCenter(layout string, channels int) bool {
 	return strings.Contains(l, "fc")
 }
 
-// tsRunPlay runs a play ffmpeg writing to out. With a sink, tapArgs add the speech output on
-// fd 3; when that run fails before writing anything (and the viewer is still there), it runs
-// again without the tap.
-func tsRunPlay(ctx context.Context, args, tapArgs []string, sink SpeechSink, out *tsFirstWrite, stderr *strings.Builder, label string) error {
-	if sink != nil {
-		err := tsRunTapped(ctx, append(slices.Clone(args), tapArgs...), sink, out, stderr, label)
+// tsTap is an extra output of a play ffmpeg (speech, cues), written to its own pipe.
+type tsTap struct {
+	args []string              // output options; pipe:<fd> is added
+	pump func(r io.ReadCloser) // drains r in the background and closes the sink at EOF
+	drop func()                // the tap never ran
+}
+
+func speechTap(n int, a *tsProbeStream, sink SpeechSink, label string) tsTap {
+	return tsTap{args: speechTapArgs(n, a), pump: func(r io.ReadCloser) { tsPumpSpeech(r, sink, label) }, drop: sink.Close}
+}
+
+// tsRunPlay runs a play ffmpeg writing to out. Taps add outputs on fd 3, 4, ...; when that run
+// fails before writing anything (and the viewer is still there), it runs again without them.
+func tsRunPlay(ctx context.Context, args []string, taps []tsTap, out *tsFirstWrite, stderr *strings.Builder, label string) error {
+	if len(taps) > 0 {
+		err := tsRunTapped(ctx, args, taps, out, stderr)
 		if err == nil || ctx.Err() != nil || out.wrote {
 			return err
 		}
-		log.Printf("speech tap (%s): ffmpeg failed with the tap, playing without it: %v %s", label, err,
+		log.Printf("speech tap (%s): ffmpeg failed with the taps, playing without them: %v %s", label, err,
 			strings.TrimSpace(stderr.String()))
 		stderr.Reset()
 	}
@@ -88,18 +99,34 @@ func tsRunPlay(ctx context.Context, args, tapArgs []string, sink SpeechSink, out
 	return cmd.Run()
 }
 
-func tsRunTapped(ctx context.Context, args []string, sink SpeechSink, out *tsFirstWrite, stderr *strings.Builder, label string) error {
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		sink.Close()
-		return err
+func tsRunTapped(ctx context.Context, args []string, taps []tsTap, out *tsFirstWrite, stderr *strings.Builder) error {
+	args = slices.Clone(args)
+	var pipes []*os.File
+	defer func() {
+		for _, pw := range pipes {
+			pw.Close() // the pumps see EOF once ffmpeg is gone
+		}
+	}()
+	for i, t := range taps {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			for _, t := range taps[i:] {
+				t.drop()
+			}
+			return err
+		}
+		t.pump(pr)
+		pipes = append(pipes, pw)
+		args = append(append(args, t.args...), fmt.Sprintf("pipe:%d", 3+i))
 	}
-	tsPumpSpeech(pr, sink, label)
 	cmd := exec.CommandContext(ctx, tsFFmpegBin, args...)
 	cmd.Stdout, cmd.Stderr = out, stderr
-	cmd.ExtraFiles = []*os.File{pw} // fd 3
-	err = cmd.Start()
-	pw.Close() // the pump sees EOF once ffmpeg is gone
+	cmd.ExtraFiles = pipes
+	err := cmd.Start()
+	for _, pw := range pipes {
+		pw.Close()
+	}
+	pipes = nil
 	if err != nil {
 		return err
 	}

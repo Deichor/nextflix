@@ -37,6 +37,52 @@ type tlFixture struct {
 	kfs     []float64 // keyframes, file time
 	acodec  string
 	vcopied bool
+	cues    []cueRec // the text track's cues, file time (none without one)
+}
+
+// tlCueSRT: a cue every 2.5 s from 2.345 s, 1.1 s long (on ms that no frame or packet grid hits).
+func tlCueSRT(t *testing.T, dir string, d float64) string {
+	t.Helper()
+	clock := func(s float64) string {
+		ms := int(math.Round(s * 1000))
+		return fmt.Sprintf("%02d:%02d:%02d,%03d", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
+	}
+	var b strings.Builder
+	for i := 0; 2.345+2.5*float64(i)+1.1 < d; i++ {
+		s := 2.345 + 2.5*float64(i)
+		fmt.Fprintf(&b, "%d\n%s --> %s\nline %d\n\n", i+1, clock(s), clock(s+1.1), i)
+	}
+	file := filepath.Join(dir, "cues.srt")
+	if err := os.WriteFile(file, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// tlTextCues reads the cues of the file's first text track on the file's timeline, as the
+// subtitle timing's own-track reads see them (pts - start_time; mov_text gap samples left out).
+func tlTextCues(t *testing.T, file string, start float64) []cueRec {
+	t.Helper()
+	out, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "s:0", "-show_entries",
+		"packet=pts_time,duration_time,size", "-of", "csv=p=0", file).Output()
+	if err != nil {
+		t.Fatalf("ffprobe %s: %v", file, err)
+	}
+	var cues []cueRec
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.Split(strings.TrimSpace(line), ",")
+		if len(parts) < 3 {
+			continue
+		}
+		pts, err1 := strconv.ParseFloat(parts[0], 64)
+		dur, err2 := strconv.ParseFloat(parts[1], 64)
+		size, err3 := strconv.Atoi(parts[2])
+		if err1 != nil || err2 != nil || err3 != nil || (strings.HasSuffix(file, ".mp4") && size <= 2) {
+			continue
+		}
+		cues = append(cues, cueRec{pts - start, pts - start + dur})
+	}
+	return cues
 }
 
 // tlFrameNumber draws the frame number as 16 bars of 20 px (bright = 1, lowest bit left).
@@ -70,6 +116,7 @@ type tlSpec struct {
 	kfs                             string
 	extra                           []string
 	remux                           string
+	subs                            string // codec of a text track (srt, ass, webvtt, mov_text)
 }
 
 func tlMake(t *testing.T, dir string, sp tlSpec) tlFixture {
@@ -85,6 +132,18 @@ func tlMake(t *testing.T, dir string, sp tlSpec) tlFixture {
 		args = append(args, "-itsoffset", strconv.FormatFloat(sp.aOff, 'f', 3, 64))
 	}
 	args = append(args, "-f", "lavfi", "-i", "aevalsrc='"+tlBurst+"|"+tlBurst+"':s=48000:d="+ds, "-map", "0:v", "-map", "1:a")
+	var subs []string
+	if sp.subs != "" {
+		subs = []string{"-i", tlCueSRT(t, dir, sp.d), "-map", "2:s", "-c:s", sp.subs}
+		if sp.remux != "" {
+			// The capture's own clock: its streams start at about 10 + 1.4 s
+			subs = append([]string{"-itsoffset", "10"}, subs...)
+			subs[slices.Index(subs, "2:s")] = "1:s"
+		} else {
+			args = slices.Insert(args, slices.Index(args, "-map"), subs[:2]...)
+			args = append(args, subs[2:]...)
+		}
+	}
 	switch sp.vcodec {
 	case "mpeg4":
 		args = append(args, "-c:v", "mpeg4", "-q:v", "4", "-bf", "2", "-g", "1000")
@@ -103,13 +162,23 @@ func tlMake(t *testing.T, dir string, sp tlSpec) tlFixture {
 	if sp.remux != "" {
 		tmp := file + ".src." + sp.remux
 		tlRun(t, append(args, tmp)...)
-		tlRun(t, "-copyts", "-i", tmp, "-map", "0", "-c", "copy", file)
+		remux := []string{"-copyts", "-i", tmp, "-map", "0", "-c", "copy", file}
+		if subs != nil {
+			remux = slices.Concat(remux[:3], subs[:4], remux[3:5], subs[4:6], remux[5:7], subs[6:], remux[7:])
+		}
+		tlRun(t, remux...)
 	} else {
 		tlRun(t, append(args, file)...)
 	}
 	fps, _ := tlRate(sp.rate)
 	f := tlFixture{name: sp.name, file: file, fps: fps, acodec: sp.acodec, vcopied: sp.vcodec != "mpeg4"}
 	f.vStart, f.aStart, f.kfs = tlProbeFixture(t, file)
+	if sp.subs != "" {
+		_, _, start := tlStreamStarts(t, file)
+		if f.cues = tlTextCues(t, file, start); len(f.cues) == 0 {
+			t.Fatalf("%s: no cues in the text track", sp.name)
+		}
+	}
 	return f
 }
 
@@ -461,6 +530,7 @@ func tlDecodePCM(t *testing.T, file, stream string, rate int) []int16 {
 type tlEnv struct {
 	r    *gin.Engine
 	tap  *testTap
+	cues *testCueTap
 	dir  string
 	kept []tlKept
 	mode string
@@ -530,11 +600,13 @@ func tlServe(t *testing.T, dir string, files map[string]string) *tlEnv {
 	s := NewService(nil, Config{TorrServerURL: src.URL})
 	tap := &testTap{}
 	s.SetSpeechTap(tap)
+	cues := &testCueTap{want: -1}
+	s.SetCueTap(cues)
 	r := gin.New()
 	h := newHandler(s)
 	r.GET("/play", h.play)
 	r.GET("/seekpoint", h.seekPoint)
-	return &tlEnv{r: r, tap: tap, dir: dir, s: s}
+	return &tlEnv{r: r, tap: tap, cues: cues, dir: dir, s: s}
 }
 
 func (e *tlEnv) get(t *testing.T, url string) []byte {
@@ -559,6 +631,11 @@ type tlResult struct {
 	tapFirst   float64 // speech tap: error of the first burst heard
 	tapWorst   float64
 	taps       int
+	cueFirst   float64 // cue tap: error of the first cue (start; end in cueWorst)
+	cueWorst   float64
+	cues       int
+	cueMissed  int     // cues of the file from t on that did not come
+	cueHeard   float64 // the last progress reported
 	elst       string
 	held       float64 // the first frame stays on screen this long (frames before it dropped)
 	splitSeek  float64 // split: the seekpoint answer (track=video), the first frame's file time
@@ -598,6 +675,9 @@ func (e *tlEnv) tlPlay(t *testing.T, f tlFixture, hash string, start float64, qu
 	e.tap.mu.Lock()
 	taps := len(e.tap.sinks)
 	e.tap.mu.Unlock()
+	e.cues.mu.Lock()
+	cueTaps := len(e.cues.sinks)
+	e.cues.mu.Unlock()
 
 	videoQ, audioQ := base, base
 	if split {
@@ -721,12 +801,57 @@ func (e *tlEnv) tlPlay(t *testing.T, f tlFixture, hash string, start float64, qu
 		}
 		res.tapFirst, res.tapWorst, res.taps = tlBurstError(f, tlBursts(sink.pcm(), 8000), func(at float64) float64 { return start + at }, 0)
 	}
+
+	// Cue tap of the audio request: the file's own cues on the file's timeline
+	e.cues.mu.Lock()
+	var cues *recordCues
+	if n := len(e.cues.sinks); n > cueTaps {
+		if n > cueTaps+1 || math.Abs(e.cues.start[n-1]-start) > 1e-9 {
+			t.Fatalf("%s: cue tap opened %d times, start %v", f.name, n-cueTaps, e.cues.start[cueTaps:])
+		}
+		cues = e.cues.sinks[n-1]
+	}
+	e.cues.mu.Unlock()
+	if (cues != nil) != (len(f.cues) > 0) {
+		t.Fatalf("%s: cue tap opened: %v", f.name, cues != nil)
+	}
+	if cues != nil {
+		cues.wait(t)
+		res.cues = len(cues.cues)
+		for i, c := range cues.cues {
+			want := f.cues[0]
+			for _, w := range f.cues {
+				if math.Abs(w.start-c.start) < math.Abs(want.start-c.start) {
+					want = w
+				}
+			}
+			if i == 0 {
+				res.cueFirst = c.start - want.start
+			}
+			for _, d := range []float64{c.start - want.start, c.end - want.end} {
+				if math.Abs(d) > math.Abs(res.cueWorst) {
+					res.cueWorst = d
+				}
+			}
+		}
+		if n := len(cues.heard); n > 0 {
+			res.cueHeard = cues.heard[n-1]
+		}
+		for _, w := range f.cues {
+			if w.start >= start && !slices.ContainsFunc(cues.cues, func(c cueRec) bool { return math.Abs(c.start-w.start) < 0.5 }) {
+				res.cueMissed++
+			}
+		}
+	}
 	return res
 }
 
 func (r tlResult) String() string {
 	s := fmt.Sprintf("offset %7.3f  first frame %7.3f  video %+6.3f (worst %+6.3f)  audio %+6.3f (worst %+6.3f, %d)  tap %+6.3f (worst %+6.3f, %d)",
 		r.offset, r.startFrame, r.vFirst, r.vWorst, r.aFirst, r.aWorst, r.bursts, r.tapFirst, r.tapWorst, r.taps)
+	if r.cues > 0 {
+		s += fmt.Sprintf("  cues %+6.3f (worst %+6.3f, %d, %d missed, heard to %.2f)", r.cueFirst, r.cueWorst, r.cues, r.cueMissed, r.cueHeard)
+	}
 	if r.elst != "" {
 		s += "  [edit lists:" + r.elst + "]"
 	}
@@ -748,14 +873,14 @@ func TestPlayTimeline(t *testing.T) {
 	dir := t.TempDir()
 	kfs := "0,4.2,9.0,21.4,27.0,32.5,38.1,41.0,52.6"
 	specs := []tlSpec{
-		{name: "mkv", ext: "mkv", rate: "24000/1001", acodec: "aac", d: 60, kfs: kfs},
-		{name: "mkv-eac3", ext: "mkv", rate: "24000/1001", acodec: "eac3", d: 60, kfs: kfs},
-		{name: "mkv-adelay", ext: "mkv", rate: "24000/1001", acodec: "aac", d: 60, aOff: 0.5, kfs: kfs},
-		{name: "mkv-vdelay", ext: "mkv", rate: "25", acodec: "ac3", d: 60, vOff: 0.3, kfs: kfs},
-		{name: "mp4", ext: "mp4", rate: "25", acodec: "aac", d: 60, kfs: kfs},
+		{name: "mkv", ext: "mkv", rate: "24000/1001", acodec: "aac", d: 60, kfs: kfs, subs: "srt"},
+		{name: "mkv-eac3", ext: "mkv", rate: "24000/1001", acodec: "eac3", d: 60, kfs: kfs, subs: "ass"},
+		{name: "mkv-adelay", ext: "mkv", rate: "24000/1001", acodec: "aac", d: 60, aOff: 0.5, kfs: kfs, subs: "webvtt"},
+		{name: "mkv-vdelay", ext: "mkv", rate: "25", acodec: "ac3", d: 60, vOff: 0.3, kfs: kfs, subs: "srt"},
+		{name: "mp4", ext: "mp4", rate: "25", acodec: "aac", d: 60, kfs: kfs, subs: "mov_text"},
 		{name: "ts", ext: "ts", rate: "24000/1001", acodec: "ac3", d: 60, kfs: kfs, extra: []string{"-output_ts_offset", "10"}},
-		{name: "mkv-from-ts", ext: "mkv", rate: "24000/1001", acodec: "ac3", d: 60, kfs: kfs, extra: []string{"-output_ts_offset", "10"}, remux: "ts"},
-		{name: "mkv-mpeg4", ext: "mkv", rate: "24000/1001", vcodec: "mpeg4", acodec: "aac", d: 60, kfs: kfs},
+		{name: "mkv-from-ts", ext: "mkv", rate: "24000/1001", acodec: "ac3", d: 60, kfs: kfs, extra: []string{"-output_ts_offset", "10"}, remux: "ts", subs: "srt"},
+		{name: "mkv-mpeg4", ext: "mkv", rate: "24000/1001", vcodec: "mpeg4", acodec: "aac", d: 60, kfs: kfs, subs: "srt"},
 	}
 	if only := os.Getenv("TL_ONLY"); only != "" {
 		specs = slices.DeleteFunc(specs, func(s tlSpec) bool { return !strings.Contains(","+only+",", ","+s.name+",") })
@@ -806,6 +931,12 @@ func TestPlayTimeline(t *testing.T) {
 				}
 				if res.taps > 0 && math.Abs(res.tapWorst) > 0.025 {
 					t.Errorf("%s t=%.3f %s: speech tap off by %+.3f s", f.name, start, m.name, res.tapWorst)
+				}
+				// Cue tap: the file's own cues within 10 ms, all of them from t on, read to the end
+				if len(f.cues) > 0 && (math.Abs(res.cueWorst) > 0.010 || res.cueMissed > 0 ||
+					res.cueHeard < f.cues[len(f.cues)-1].start) {
+					t.Errorf("%s t=%.3f %s: cue tap off by %+.3f s, %d of %d missed, heard to %.2f", f.name, start,
+						m.name, res.cueWorst, res.cueMissed, len(f.cues), res.cueHeard)
 				}
 			}
 		}

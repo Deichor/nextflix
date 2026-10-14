@@ -157,6 +157,7 @@ func run() error {
 		NextEpisode:     catalogSvc.NextEpisode,
 	})
 	streamingSvc.SetSpeechTap(speechTap{subtitlesSvc})
+	streamingSvc.SetCueTap(cueTap{subtitlesSvc})
 	if err := subtitlesSvc.EnsureSettings(); err != nil {
 		log.Printf("seed subtitle settings: %v", err)
 	}
@@ -456,6 +457,22 @@ func (t speechTap) Open(hash string, index int, start float64) streaming.SpeechS
 		return sink
 	}
 	return nil // not a typed nil
+}
+
+// cueTap feeds the cues of the played file's own text track into the subtitle timing.
+type cueTap struct{ s *subtitles.Service }
+
+func (t cueTap) OpenCues(hash string, index int, start float64, tracks []streaming.TextTrack) (int, streaming.CueSink, bool) {
+	own := make([]subtitles.OwnTrack, 0, len(tracks))
+	for _, tr := range tracks {
+		own = append(own, subtitles.OwnTrack{Stream: tr.Stream, Lang: tr.Lang, Title: tr.Title, Codec: tr.Codec,
+			Default: tr.Default, Forced: tr.Forced})
+	}
+	stream, sink, ok := t.s.OpenOwnCues(hash, index, start, own)
+	if !ok || sink == nil {
+		return 0, nil, false
+	}
+	return stream, sink, true
 }
 
 // debridSource lets the subtitle reads follow files that play from TorBox.

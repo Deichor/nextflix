@@ -537,6 +537,7 @@ func shortSubID(id string) string {
 // fitOne aligns one subtitle to the file's reference and live windows (with read, reading more
 // windows where the offset changes) and returns its result and the WebVTT to serve (nil: serve
 // it as it is). A provisional fit that fitted before keeps its scale (fewer FFTs per re-fit).
+// The timed cues inside own-track windows are refined onto the own lines (sync_refine.go).
 func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef, live []refWindow, vtt []byte, read bool, prev *syncMeta) (syncMeta, []byte, syncRef) {
 	cues := vttCues(vtt)
 	spans := make([]span, len(cues))
@@ -574,12 +575,13 @@ func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef
 	if !ok || !fit.good() || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, ref
 	}
-	if !fit.changes() {
+	served := refineFit(cues, fit, refineWindows(ref.Windows, live))
+	if !fit.changes() && !refineMoved(cues, served) {
 		m.State = syncStateUnchanged
 		return m, nil, ref
 	}
 	m.State = syncStateSynced
-	return m, renderVTT(applyFit(cues, fit), false), ref
+	return m, renderVTT(served, false), ref
 }
 
 // lengthFits rejects a subtitle that runs past the end of the video or covers too little of it

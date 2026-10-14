@@ -1207,7 +1207,14 @@ Both players draw subtitles themselves: the cue for position - `subDelay` (posit
 element's time, see [Playback timeline](#playback-timeline-playgo-seekpointgo)), the web overlay on every animation
 frame, the TV overlay right after each cue boundary (`cueTiming.ts`, at least every 100 ms for seeks; a fixed 100 ms
 poll showed cues 50 ms late on average). A new cue list (a poll of a partial answer) is looked up at once without
-a blank frame; the delay is applied only there.
+a blank frame; the delay is applied only there. The webOS app also subtracts the clock's lead (`clockLead.ts`):
+webOS restarts `currentTime` at a seek's target and within ~30 ms of playing reports about 0.25 s more, then runs at
+rate 1 (LG B5, webOS 25: 0.21-0.29 s over 15 seeks; pause and resume without a seek do not jump; Kodi uses -275 ms
+on webOS), so cues showed that much early with picture and sound in sync. 1.5 s after each seek's `playing` the jump
+is measured (a stall or pause in between drops the sample), the median of the last 7 is kept in localStorage
+(`nfx-tv:clock-lead`; 0.25 s until the first) and logged as `clock` and as `clead` in `summary`. `video.
+requestVideoFrameCallback` never fires on webOS and the screen capture service is denied to apps, so the displayed
+frame itself cannot be checked.
 
 Subtitles in the players (web `TorrentStreamPlayer.tsx`, TV `engine.ts`): the list of the playing file is asked
 again 8 s and 20 s after the first answer while the profile's language is missing. When it is still missing after
@@ -1303,7 +1310,17 @@ that change at splits), simplified:
   wires it. The tap never costs playback: a goroutine drains the pipe and hands 1 s pieces to the sink through a
   32 s queue, dropping what does not fit (the next piece's offset marks the gap); a sink that panics stops getting
   data while the pipe is still drained; a play ffmpeg that fails with the tap before writing anything runs again
-  without it. Subtitles runs the same energy detector on 10 ms frames (energies kept per frame, 1 byte) and puts them
+  without it. A file with text subtitle tracks (never PGS / VobSub / DVB) gets a third output from the same run
+  (`streaming/cuetap.go`, `CueTap.OpenCues(hash, index, start, tracks)` picks one track and returns a `CueSink`): the
+  chosen track and the played audio copied into `framecrc` (packet times only, no text; `-avoid_negative_ts
+  disabled`, `-flush_packets 1`). Its times count from the request's `-ss`, so `t` + time is the file time, the same
+  as the own-track reads (`-copyts -start_at_zero`) and the speech tap, also for cues between the keyframe and `t`
+  (exact to the ms in `TestPlayTimeline` for SRT / ASS / WebVTT in MKV and mov_text in MP4, copied / re-encoded,
+  muxed / split, with `start_time` 11.4 s). The muxer writes the two streams in time order, so an audio packet at T
+  means every cue before T came: the sink gets `Heard(T)` about every second (also through stretches without
+  cues), and none after a dropped cue. mov_text gap samples (2 bytes) are no cues. Same safeguards as the speech
+  tap (256-event queue, a panicking sink stops getting data, a failing run retries without both taps). Subtitles
+  runs the same energy detector on 10 ms frames (energies kept per frame, 1 byte) and puts them
   on a 60 s grid of the file, so the stretches of several streams (a seek starts a new one; overlapping, in any
   order) merge. A grid window is finished once 90 % of it was heard and the stream moved on (speech kept as bits,
   750 bytes); an unfinished one counts from 20 s heard in one stretch. Every 30 s of new audio (and when a stream ends)
@@ -1335,6 +1352,32 @@ that change at splits), simplified:
   subtitle was served untimed for two minutes before two offsets fitted at 8. A re-fit that fits replaces the served
   fit only when its offsets match 4 lines more on the current windows than the served ones do (`keepStable`), else
   the cues moved back and forth by fractions of a second between re-fits (the players logged `moved=` on most polls).
+- Own-track cue tap (`sync_owncues.go`, streaming side wired in `main.go`): the play ffmpeg also passes the cue times
+  of one text track of the played file (it demuxes them anyway; no extra reads). Subtitles picks the track like the
+  window reads (the probed one, else English, not forced, not SDH) through `OpenOwnCues(hash, index, start, tracks)`
+  (no tap when live timing is off, the file's reference is a whole subtitle, or the file is covered); `Cue(start,
+  end)` marks a cue, `Heard(t)` says every cue before `t` was passed. Frames are kept like the speech (1 byte per
+  10 ms frame while unfinished: read, cue shows, cue starts) on the same 60 s grid, so overlapping streams in any
+  order merge; a window is finished once 98 % of it was read (bits for "shows" plus the start frames, in
+  `synclive` next to the speech windows), an unfinished one counts from 20 s read in one stretch, and only windows
+  with 4 line starts are used. They are `subs` windows: they beat a live speech window of the same stretch, count
+  towards covering the file, and 30 s of newly read track trigger the same debounced re-fit. While a tap runs,
+  `readEarly` reads nothing.
+- Line refinement (`sync_refine.go`): fan subtitles start single lines up to a second early or late (The Mentalist
+  S02E18's HDTV pack around 12:00: four lines 1.0 s early, then 0.5 s early, then 0.6-0.75 s late), and another
+  cut's subtitle has stretches of a minute 2-3 s off (S02E17's HDTV pack: +2 s around 2:00, −3 s around 5:30) that
+  the fit's segments do not follow. Wherever own-track windows (read and live, also overlapping ones) show a cue's
+  surroundings, the cue is moved onto the own lines in two steps. Local offset: on the subtitle's own clock (before
+  the fit's offsets, so lines the fit put on the wrong side of an offset change move with their stretch) the 12
+  neighbours on each side (within 60 s) are shifted to where most of them start within 0.3 s of an own start (±1 s
+  around the fit, else ±4 s), only when that beats every shift 0.5 s away by 2 lines and 60 % of them then lie
+  within 0.4 s of one; both sides agreeing (0.2 s) give the offset, else the side that puts the cue itself nearer
+  to an own start (within 0.7 s; two large offsets that disagree: none). Then the cue moves onto the own start
+  nearest to it within 0.7 s when the next one is 0.4 s further, the own track shows that stretch and no
+  neighbour is nearer to it. Moves under 0.15 s are not made; a move that would swap two cues or leave one
+  shorter than 0.7 s is undone; a cue chained to the next one (gap under 0.1 s) ends where that one now starts,
+  others do not reach into the next one. A fit that changes nothing is served refined when a cue moved. Lines
+  outside own-track windows stay as the fit serves them.
 - Serving (`sync.go`): the file request answers the subtitle as it is at once (marked partial, `NOTE
   nextflix-partial`, so both players ask again every 15 s; a timing ready within 2.5 s is answered directly) and
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
@@ -1369,7 +1412,8 @@ that change at splits), simplified:
   750 bytes per finished one, 16 files kept. A re-fit takes about 0.1 s per subtitle and 25 windows at one frame rate
   (measured in the tests; all 7 rates and a 2 h film: a few seconds).
 - Logs: `subtitles: live audio of <hash8>:<index> from <t>s: <s> heard, <s> missing; <s> of the file covered, <n>
-  windows finished` when a play stream ends, and `subtitles: timing of … (provisional) (… offsets …, score …; live
+  windows finished` when a play stream ends (`own track of …: <n> cues, <s> read; <n> own windows finished` for
+  the cue tap), and `subtitles: timing of … (provisional) (… offsets …, score …; live
   reference, <n> windows (<n> live, <s> played) …)` whenever a re-fit changes what is served (state, offsets by
   0.05 s, splits by 1 s); `timing reference of …: … no read, timed from the played audio` for files above the budget.
 - Ranking: later lists show a timed fitting subtitle as `synced` (after the ones made for the file) and move ones
@@ -1415,6 +1459,28 @@ The first minutes (`sync_early_eval_test.go`: the picture 90 s behind the audio,
 S02E10 AMZN (no read, truth from its converged fit) first timed after 120 s of audio instead of 180 s, cues of
 minutes 0-5 within 0.3 s 71 % → 92 %; Avatar S01E02 and its 30 distortions without a read: with the 2 early
 own-track windows 66 % → 81 % (median error 0.29 → 0.00 s), first right minute 2.3 → 1.4.
+Line refinement (`sync_refine_eval_test.go`, signed per-line errors against the own track, early and late apart):
+with the read own-track windows, on 24 loose pairs (Mentalist, Gilmore Girls, others) lines in those windows within
+0.15 s 56 % → 76 % (early beyond 0.15 s 21 % → 11 %, late 24 % → 13 %, p10/p90 −0.33/+0.42 → −0.19/+0.26 s, none
+moved 0.15 s further from its line); already right subtitles 94 % → 97 %, none worse. With the whole own track
+from the cue tap (`TestSnapshotRefineFull`: S02E17 and S02E18 own tracks read once for the test, times only,
+every line of the episode): S02E18's HDTV pack 44 % within 0.15 s as served today → 77 % (|median| 0.18 →
+0.07 s, early 19 % → 12 %, late 36 % → 11 %), S02E17's 26 % → 51 % (0.34 → 0.14 s), the two subf2m English
+subtitles 27 % → 49 % and 27 % → 47 %; all four 32 % → 57 %, within 0.5 s 66 % → 72 %. Against the fit with the
+tap's windows the refinement moves 24 % of the lines, 23 % closer, 1 % further; 8 % of the lines end further off
+than served today, from the fit itself (with own windows everywhere its segments change: 10 % better, 10 %
+worse). Lines without clear evidence keep the fit's place (S02E17: p10/p90 −0.94/+0.88 s remain, stretches
+whose lines are a second apart from each other). No other episode's subtitle fitted with the tap's reference (87
+tried). Lines outside own-track windows (an own window held out in turn, 3574 lines) stay as they were: 41 %
+within 0.15 s, p10/p90 −0.73/+0.87 s. Tried and rejected: snapping lines onto speech onsets of the played audio
+(only 30-40 % of own line starts have an onset within 0.3 s; held-out lines 1 % better, 3 % worse, already right
+subtitles 4 % worse); carrying the windows' offsets to the stretches between them (held out: 2 % better, 1 %
+worse, S02E17 5 % worse); one offset per 60 s window (±1 s; the two HDTV packs with the whole track
+36 % → 53 % instead of 65 %: the 2-3 s stretches and the lines the fit put on the wrong side of an offset change
+stay); a ±4 s search alone (read windows 72 % instead of 76 %: shifts a line spacing away compete, so ±4 s is
+tried only when ±1 s finds nothing); a 0.5 s gate (1 % worse against the fit). Other episodes' subtitles
+fitted at the file's rate to the files with own-track windows (692 pairs, mostly not accepted, which are never
+refined): 1.6 % of their cues move, against 2.9 % of this episode's subtitles' at that rate.
 `sync_robust_test.go` keeps the Avatar case as a compact fixture (`testdata/sync/avatar_s01e02.json`: cue times and
 speech bits, no text).
 

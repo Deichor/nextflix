@@ -52,6 +52,11 @@ type liveFile struct {
 	chunks   map[int][]uint8 // unfinished grid windows: frame energies (0 not heard, else 1 + 2·dB)
 	covered  map[int]int     // frames heard per unfinished window
 	done     map[int]liveWin // finished windows
+	own      map[int][]uint8 // unfinished own-track windows (sync_owncues.go): ownRead|ownShows|ownStarts per frame
+	ownRead  map[int]int     // frames read per unfinished own-track window
+	ownDone  map[int]liveWin // finished own-track windows
+	ownTaps  int
+	ownGrown float64 // seconds of own track read since the last re-fit was asked for
 	duration float64
 	complete bool
 	taps     int
@@ -64,20 +69,24 @@ type liveFile struct {
 	lastFit  time.Time
 }
 
-// liveWin is a finished window: its speech frames, one bit each.
+// liveWin is a finished window: its speech frames (own-track windows: frames a cue shows), one
+// bit each, and for own-track windows the frames where a cue starts.
 type liveWin struct {
 	Bits   []byte `json:"bits"`
 	Frames int    `json:"n"`
+	Starts []int  `json:"starts,omitempty"`
 }
 
 type liveSaved struct {
 	Windows  map[int]liveWin `json:"windows"`
+	Own      map[int]liveWin `json:"own,omitempty"`
 	Complete bool            `json:"complete,omitempty"`
 }
 
 func newLiveFile(hash string, index int) *liveFile {
 	return &liveFile{fk: syncFileKey(hash, index), hash: strings.ToLower(hash), index: index,
-		chunks: map[int][]uint8{}, covered: map[int]int{}, done: map[int]liveWin{}}
+		chunks: map[int][]uint8{}, covered: map[int]int{}, done: map[int]liveWin{},
+		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}}
 }
 
 // windowFrames is the length of grid window w (the last one ends with the file).
@@ -104,11 +113,23 @@ func (f *liveFile) setDuration(d float64) {
 			f.finishIfHeard(w)
 		}
 	}
+	if f.ownTaps == 0 {
+		for w := range f.own {
+			f.finishOwn(w)
+		}
+	}
 	f.checkComplete()
 }
 
+// checkComplete: the file is covered once enough grid windows are finished, of either kind.
 func (f *liveFile) checkComplete() {
-	if f.duration > 0 && float64(len(f.done)) >= liveCompleteShare*math.Ceil(f.duration/syncWindowLen) {
+	n := len(f.done)
+	for w := range f.ownDone {
+		if _, ok := f.done[w]; !ok {
+			n++
+		}
+	}
+	if f.duration > 0 && float64(n) >= liveCompleteShare*math.Ceil(f.duration/syncWindowLen) {
 		f.complete = true
 	}
 }
@@ -176,13 +197,18 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 }
 
 // windows returns the live reference windows (finished ones, and unfinished ones with at least
-// liveMinRun frames heard in one stretch) and the seconds they cover.
+// liveMinRun frames heard in one stretch) and the seconds they cover. Own-track windows come
+// first; a speech window of the same stretch is left out.
 func (f *liveFile) windows() ([]refWindow, float64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []refWindow
+	out := f.ownWindows()
+	own := len(out)
 	for w, d := range f.done {
-		out = append(out, refWindow{Start: float64(w) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)})
+		lw := refWindow{Start: float64(w) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)}
+		if !overlapsHalf(lw, out[:own]) {
+			out = append(out, lw)
+		}
 	}
 	for w, c := range f.chunks {
 		first, last := -1, -1
@@ -197,8 +223,11 @@ func (f *liveFile) windows() ([]refWindow, float64) {
 		if first < 0 || f.covered[w] < liveMinRun || float64(f.covered[w]) < liveDoneShare*float64(last-first+1) {
 			continue
 		}
-		out = append(out, refWindow{Start: float64(w)*syncWindowLen + float64(first)/syncRate, Kind: "live",
-			Speech: classifyEnergies(c[first : last+1])})
+		lw := refWindow{Start: float64(w)*syncWindowLen + float64(first)/syncRate, Kind: "live",
+			Speech: classifyEnergies(c[first : last+1])}
+		if !overlapsHalf(lw, out[:own]) {
+			out = append(out, lw)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out, windowSeconds(out)
@@ -398,8 +427,8 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 			time.Sleep(5 * time.Second)
 		}
 	}
-	if !r.Skipped || r.Probe.TextSub < 0 || len(r.Windows) > 0 {
-		return
+	if !r.Skipped || r.Probe.TextSub < 0 || len(r.Windows) > 0 || y.liveFile(hash, index).ownTapping() {
+		return // (the play stream's cue tap brings those cues)
 	}
 	select {
 	case y.sem <- struct{}{}:
@@ -456,6 +485,11 @@ func (y *syncer) liveFile(hash string, index int) *liveFile {
 					f.done[w] = win
 				}
 			}
+			for w, win := range saved.Own {
+				if w >= 0 && win.Frames > 0 && win.Frames <= liveWindowFrames {
+					f.ownDone[w] = win
+				}
+			}
 			f.complete = saved.Complete
 		}
 	}
@@ -480,7 +514,7 @@ func (y *syncer) evictLive() {
 	var list []idle
 	for fk, f := range y.lives {
 		f.mu.Lock()
-		if f.taps == 0 && !f.refit {
+		if f.taps == 0 && f.ownTaps == 0 && !f.refit {
 			list = append(list, idle{fk, f.lastTap})
 		}
 		f.mu.Unlock()
@@ -505,6 +539,12 @@ func (y *syncer) saveLive(f *liveFile) {
 	for w, d := range f.done {
 		saved.Windows[w] = d
 	}
+	if len(f.ownDone) > 0 {
+		saved.Own = make(map[int]liveWin, len(f.ownDone))
+		for w, d := range f.ownDone {
+			saved.Own[w] = d
+		}
+	}
 	f.dirty = false
 	f.mu.Unlock()
 	if b, err := json.Marshal(saved); err == nil {
@@ -524,7 +564,7 @@ func (y *syncer) livePlaying(fk string) bool {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.taps > 0 || time.Since(f.lastTap) < livePlayingFor
+	return f.taps > 0 || f.ownTaps > 0 || time.Since(f.lastTap) < livePlayingFor
 }
 
 // scheduleRefit re-fits the file's served subtitles soon (one loop per file).

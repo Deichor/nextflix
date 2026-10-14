@@ -358,15 +358,6 @@ func (s errStats) String() string {
 	return fmt.Sprintf("n=%4d %3.0f%% %3.0f%% %3.0f%% med %5.2f p95 %5.2f", s.n, 100*s.w03, 100*s.w05, 100*s.w1, s.median, s.p95)
 }
 
-func median(v []float64) float64 {
-	s := append([]float64(nil), v...)
-	sort.Float64s(s)
-	if len(s) == 0 {
-		return 0
-	}
-	return s[len(s)/2]
-}
-
 // TestSnapshotTruth lists, per file of the snapshot, the subtitles of its episode and their
 // true offsets.
 func TestSnapshotTruth(t *testing.T) {

@@ -93,26 +93,33 @@ func parseMediaProbe(out []byte) (mediaProbe, error) {
 				m.Center = hasCenter(s.ChannelLayout, s.Channels)
 			}
 		case "subtitle":
-			if !textSubCodecs[s.CodecName] {
-				continue
-			}
-			forced, hi := subFlags(s.Tags["title"])
-			if forced || s.Disposition["forced"] == 1 {
-				continue // a few lines only
-			}
-			score := 2
-			if iso639To1(s.Tags["language"]) == "en" {
-				score = 3 // a line per cue (some languages merge lines)
-			}
-			if hi || s.Disposition["hearing_impaired"] == 1 {
-				score = 1 // sound descriptions blur the speech timing a little
-			}
+			score := ownTrackScore(s.CodecName, s.Tags["language"], s.Tags["title"], s.Disposition["forced"] == 1,
+				s.Disposition["hearing_impaired"] == 1)
 			if score > subScore {
 				subScore, m.TextSub = score, s.Index
 			}
 		}
 	}
 	return m, nil
+}
+
+// ownTrackScore rates a subtitle track of the file as the timing reference (higher is better, -1
+// not usable).
+func ownTrackScore(codec, lang, title string, forced, hi bool) int {
+	if !textSubCodecs[codec] {
+		return -1
+	}
+	f, h := subFlags(title)
+	if forced || f {
+		return -1 // a few lines only
+	}
+	if hi || h {
+		return 1 // sound descriptions blur the speech timing a little
+	}
+	if iso639To1(lang) == "en" {
+		return 3 // a line per cue (some languages merge lines)
+	}
+	return 2
 }
 
 // isDefaultStream reports whether the stream has the default disposition.

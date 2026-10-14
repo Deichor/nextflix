@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -144,7 +145,7 @@ func (panicSink) Close()              {}
 func TestSpeechTapArgs(t *testing.T) {
 	five := speechTapArgs(1, &tsProbeStream{Channels: 6, ChannelLayout: "5.1(side)"})
 	if !slices.Contains(five, "0:a:1") || !strings.HasPrefix(five[slices.Index(five, "-af")+1], "pan=mono|c0=FC,") ||
-		five[len(five)-1] != "pipe:3" {
+		five[len(five)-1] != "s16le" {
 		t.Fatalf("5.1: %v", five)
 	}
 	stereo := speechTapArgs(0, &tsProbeStream{Channels: 2, ChannelLayout: "stereo"})
@@ -168,12 +169,17 @@ func fakePlayFFmpeg(t *testing.T, script string) {
 	t.Cleanup(func() { tsFFmpegBin = saved })
 }
 
+// speechTaps is a speech tap with no output options of its own (fd 3).
+func speechTaps(sink SpeechSink) []tsTap {
+	return []tsTap{{pump: func(r io.ReadCloser) { tsPumpSpeech(r, sink, "test") }, drop: sink.Close}}
+}
+
 func TestRunPlayWritesTheTap(t *testing.T) {
 	fakePlayFFmpeg(t, `printf 'abcd' >&3; printf ok`)
 	sink := newRecordSink()
 	var out bytes.Buffer
 	var stderr strings.Builder
-	err := tsRunPlay(context.Background(), []string{"-i", "x", "pipe:1"}, []string{"pipe:3"}, sink,
+	err := tsRunPlay(context.Background(), []string{"-i", "x", "pipe:1"}, speechTaps(sink),
 		&tsFirstWrite{w: &out}, &stderr, "test")
 	if err != nil || out.String() != "ok" {
 		t.Fatalf("err %v out %q", err, out.String())
@@ -190,7 +196,7 @@ func TestRunPlayFallsBackWithoutTheTap(t *testing.T) {
 	sink := newRecordSink()
 	var out bytes.Buffer
 	var stderr strings.Builder
-	err := tsRunPlay(context.Background(), []string{"-i", "x", "pipe:1"}, []string{"pipe:3"}, sink,
+	err := tsRunPlay(context.Background(), []string{"-i", "x", "pipe:1"}, speechTaps(sink),
 		&tsFirstWrite{w: &out}, &stderr, "test")
 	if err != nil || out.String() != "ok" {
 		t.Fatalf("err %v out %q stderr %q", err, out.String(), stderr.String())
@@ -207,7 +213,7 @@ func TestRunPlayNoFallbackAfterOutput(t *testing.T) {
 	fakePlayFFmpeg(t, `printf ok; exit 1`)
 	var out bytes.Buffer
 	var stderr strings.Builder
-	if err := tsRunPlay(context.Background(), nil, []string{"pipe:3"}, newRecordSink(), &tsFirstWrite{w: &out}, &stderr, "test"); err == nil || out.String() != "ok" {
+	if err := tsRunPlay(context.Background(), nil, speechTaps(newRecordSink()), &tsFirstWrite{w: &out}, &stderr, "test"); err == nil || out.String() != "ok" {
 		t.Fatalf("err %v out %q", err, out.String())
 	}
 }

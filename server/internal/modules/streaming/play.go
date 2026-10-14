@@ -88,22 +88,25 @@ func (h handler) play(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Status(http.StatusOK)
 
-	// The dialogue of the played audio also goes to the subtitle timing (speechtap.go)
-	var sink SpeechSink
-	var tapArgs []string
-	if track != tsTrackVideo && h.s.speech != nil {
-		if a := probe.audioStream(audio); a != nil {
-			if sink = h.s.speech.Open(hash, index, start); sink != nil {
-				tapArgs = speechTapArgs(audio, a)
+	// The dialogue of the played audio and the cues of the file's own text track also go to the
+	// subtitle timing (speechtap.go, cuetap.go)
+	label := fmt.Sprintf("%s:%d", tsShortHash(hash), index)
+	var taps []tsTap
+	if track != tsTrackVideo {
+		if a := probe.audioStream(audio); a != nil && h.s.speech != nil {
+			if sink := h.s.speech.Open(hash, index, start); sink != nil {
+				taps = append(taps, speechTap(audio, a, sink, label))
 			}
+		}
+		if tap, ok := h.s.cueTap(probe, hash, index, start, audio, label); ok {
+			taps = append(taps, tap)
 		}
 	}
 
 	// The request context is cancelled when the viewer closes or seeks, which stops ffmpeg
 	out := &tsFirstWrite{w: c.Writer, first: func() { h.s.playFlows(hash) }}
 	var stderr strings.Builder
-	label := fmt.Sprintf("%s:%d", tsShortHash(hash), index)
-	if err := tsRunPlay(c.Request.Context(), args, tapArgs, sink, out, &stderr, label); err != nil && c.Request.Context().Err() == nil {
+	if err := tsRunPlay(c.Request.Context(), args, taps, out, &stderr, label); err != nil && c.Request.Context().Err() == nil {
 		log.Printf("torrent stream ffmpeg error (%s:%d): %v %s", hash, index, err, strings.TrimSpace(stderr.String()))
 	}
 }

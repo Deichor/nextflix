@@ -43,6 +43,7 @@ type Service struct {
 	instant      *tsInstant // instant-play hints (instant.go)
 	home         *tsHome    // home releases of films in cinemas (homerelease.go)
 	speech       SpeechTap  // subtitle timing listens to the play streams (nil = off)
+	cues         CueTap     // and reads the file's own text track along (nil = off)
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
