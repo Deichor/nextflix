@@ -1,0 +1,25 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { addSample, leadOf, leadSample } from './clockLead.ts';
+
+test('a seek measured on the TV gives its jump', () => {
+  // seeked at 196.534, 1.5 s of playback later currentTime said 198.243
+  assert.equal(leadSample(196.534, 198.243, 1.5), 0.209);
+  assert.equal(leadSample(100, 101.5, 1.5), 0);
+  assert.equal(leadSample(100, 101.48, 1.5), 0); // timer jitter just under
+});
+
+test('stalls and missed events are not samples', () => {
+  assert.equal(leadSample(100, 102.5, 1.5), null);
+  assert.equal(leadSample(100, 100.2, 1.5), null);
+  assert.equal(leadSample(100, NaN, 1.5), null);
+});
+
+test('the median of the last samples, the default without any', () => {
+  assert.equal(leadOf([], 0.25), 0.25);
+  assert.equal(leadOf([0.21, 0.29, 0.25], 0), 0.25);
+  assert.equal(leadOf([0.2, 0.3], 0), 0.25);
+  let s = [];
+  for (let i = 0; i < 10; i++) s = addSample(s, i / 100);
+  assert.deepEqual(s, [0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09]);
+});

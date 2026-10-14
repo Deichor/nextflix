@@ -30,6 +30,7 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+/.claude/
 
 # webOS TV app (tv/webos)
 /tv/webos/node_modules/

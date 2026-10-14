@@ -18,6 +18,8 @@ import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuf
 import { lengthsMatch, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
+import { DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addSample, leadOf, leadSample, loadSamples, saveSamples } from './clockLead';
+import { isWebOS } from '../lib/webos';
 import { canSeek, cueAnswer, openStart, progressToSave, subtitleRetryMs } from './playRules';
 import { DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy } from './subsLog';
 
@@ -288,6 +290,11 @@ export class PlayerEngine {
   // The viewer's subtitle delay changes, logged once settled (subsLog.ts)
   private delayLog = new DelayLog();
   private delayTimer?: Timer;
+  // How far currentTime runs ahead of picture and sound, measured after seeks (clockLead.ts)
+  private leadSamples = loadSamples();
+  private clockLead = leadOf(this.leadSamples, isWebOS() ? DEFAULT_LEAD_S : 0);
+  private leadProbe: { target: number; t0: number } | null = null;
+  private leadTimer?: Timer;
 
   constructor(video: HTMLVideoElement, req: PlayRequest, locale: Locale) {
     this.video = video;
@@ -329,7 +336,7 @@ export class PlayerEngine {
     };
     this.bindVideo();
     this.plog = PlaybackLog.create(video, () => this.positionNow(), () => this.logContext(),
-      () => ({ subdelay: this.state.subId ? this.state.subDelay : undefined }));
+      () => ({ subdelay: this.state.subId ? this.state.subDelay : undefined, clead: this.clockLead }));
     this.saveTimer = setInterval(() => { if (this.state.playing) this.persist(); }, 10000);
     this.healthTimer = setInterval(() => this.sampleHealth(), 1000);
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -383,7 +390,7 @@ export class PlayerEngine {
 
   /** File time the subtitle overlay shows. */
   subtitleTime(): number {
-    return this.positionNow() - this.state.subDelay;
+    return this.positionNow() - this.clockLead - this.state.subDelay;
   }
 
   /** Subtitle timing (seconds, + shows them later); kept for the playing file like on the web */
@@ -883,10 +890,40 @@ export class PlayerEngine {
       this.itemPlayed = true;
       clearTimeout(this.stallResetTimer);
       this.stallResetTimer = setTimeout(() => { this.recoveries = 0; }, 60000);
+      if (this.leadProbe && !this.leadProbe.t0) {
+        this.leadProbe.t0 = performance.now();
+        this.leadTimer = setTimeout(() => this.takeLead(), LEAD_SAMPLE_MS);
+      }
     });
+    // A seek restarts the clock at its target: its jump once playing is the clock's lead
+    on('seeking', () => {
+      clearTimeout(this.leadTimer);
+      this.leadProbe = { target: v.currentTime, t0: 0 };
+    });
+    // A stall or pause while sampling makes the elapsed time wrong
+    const dropLead = () => {
+      if (!this.leadProbe?.t0) return;
+      clearTimeout(this.leadTimer);
+      this.leadProbe = null;
+    };
+    on('waiting', dropLead);
+    on('pause', dropLead);
     on('timeupdate', () => this.onTime());
     on('ended', () => this.onEnded());
     on('error', () => this.onError());
+  }
+
+  private takeLead() {
+    const p = this.leadProbe;
+    this.leadProbe = null;
+    const v = this.video;
+    if (!p || v.paused || v.seeking || v.playbackRate !== 1) return;
+    const lead = leadSample(p.target, v.currentTime, (performance.now() - p.t0) / 1000);
+    if (lead === null) return;
+    this.leadSamples = addSample(this.leadSamples, lead);
+    saveSamples(this.leadSamples);
+    this.clockLead = leadOf(this.leadSamples, 0);
+    this.plog?.note('clock', { lead, use: this.clockLead, n: this.leadSamples.length });
   }
 
   private onTime() {
@@ -1929,6 +1966,7 @@ export class PlayerEngine {
     if (this.destroyed) return;
     this.persist();
     clearTimeout(this.delayTimer);
+    clearTimeout(this.leadTimer);
     this.noteDelay(this.delayLog.take(Date.now(), true));
     this.plog?.note('exit', { subdelay: this.state.subId ? this.state.subDelay : undefined });
     this.plog?.destroy();
