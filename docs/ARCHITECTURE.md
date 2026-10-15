@@ -1326,7 +1326,10 @@ that change at splits), simplified:
   750 bytes); an unfinished one counts from 20 s heard in one stretch. Every 30 s of new audio (and when a stream ends)
   re-fits the subtitles served for the file in the last 10 minutes (debounced 3 s, at most every 15 s per file, one
   re-fit at a time server-wide) with the read windows plus the live ones (a window of the file's own subtitle track
-  beats a live one, a live one an audio window read for the same stretch). The live windows of a file with a timed
+  beats a live one, a live one an audio window read for the same stretch). While a file's first timing still reads
+  its windows, the re-fit times its subtitles from the live windows alone (one decide per subtitle at a time), so a
+  file opened mid-way (another source after a stall) is not served untimed for the whole read (The Mentalist S03E01,
+  2026-10-14: about 45 s with cues 7 s early). The live windows of a file with a timed
   subtitle are kept on disk (`/app/data/subtitles/synclive`, one bit per frame). Once 85 % of the file's windows
   were heard live timing ends for the file (no more tap) and the result is final. Fits with live windows are held to
   stricter rules: on generated episodes, few or contiguous windows let another episode's subtitle pass through the

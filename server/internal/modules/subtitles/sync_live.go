@@ -654,14 +654,20 @@ func (y *syncer) refitFile(f *liveFile) {
 		if m := y.meta(s.key); m != nil && !m.Live {
 			continue // final
 		}
-		if y.svc.flights.running("sync|" + s.key) {
-			continue // the first timing runs and takes the live windows too
-		}
-		base, err := y.svc.File(ctx, s.inner)
-		if err != nil {
+		// A running first timing takes the live windows too once its read is done. While the
+		// read runs (ref skipped) the live windows time it alone: a file opened mid-way (another
+		// source after a stall) is not served untimed for the whole read.
+		if !ref.Skipped && y.svc.flights.running("sync|"+s.key) {
 			continue
 		}
-		y.decide(ctx, s.inner, f.hash, f.index, base, ref, false)
+		mu := y.decideLock(s.key)
+		if !mu.TryLock() {
+			continue
+		}
+		if base, err := y.svc.File(ctx, s.inner); err == nil {
+			y.decide(ctx, s.inner, f.hash, f.index, base, ref, false)
+		}
+		mu.Unlock()
 	}
 }
 

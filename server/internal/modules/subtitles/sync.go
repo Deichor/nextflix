@@ -128,6 +128,8 @@ type syncer struct {
 	early   map[string]bool       // file keys whose early own-track windows were asked for
 	liveSem chan struct{}         // re-fits at a time (CPU)
 	onGrow  func(f *liveFile)     // more live audio: re-fit soon (tests replace it)
+	// result key -> *sync.Mutex: one decide per result at a time (first timing and live re-fits)
+	deciding sync.Map
 
 	refitDelay, refitGap time.Duration
 }
@@ -344,8 +346,18 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 	if err != nil {
 		return err
 	}
+	if key, err := syncKey(inner, hash, index); err == nil {
+		mu := y.decideLock(key)
+		mu.Lock()
+		defer mu.Unlock()
+	}
 	y.decide(ctx, inner, hash, index, base, ref, true)
 	return nil
+}
+
+func (y *syncer) decideLock(key string) *sync.Mutex {
+	mu, _ := y.deciding.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 // decide fits a subtitle (else the best fitting alternative) to the file's read and live
