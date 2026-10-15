@@ -26,6 +26,7 @@ import (
 	"nextflix/internal/platform/config"
 	"nextflix/internal/platform/database"
 	"nextflix/internal/platform/httpserver"
+	"nextflix/internal/platform/netcheck"
 	"nextflix/internal/platform/tmdb"
 
 	"github.com/joho/godotenv"
@@ -129,6 +130,7 @@ func run() error {
 	go notificationsSvc.Start(ctx)
 	defer notificationsSvc.Close()
 
+	internet := netcheck.New()
 	streamingSvc := streaming.NewService(db, streaming.Config{
 		TorrServerURL:   cfg.TorrServerURL,
 		JackettURL:      cfg.JackettURL,
@@ -137,6 +139,7 @@ func run() error {
 		Availability:    catalogAvailability{catalogSvc},
 		BitsearchURL:    envOr("BITSEARCH_URL", "https://bitsearch.to"),
 		FlareSolverrURL: envOr("FLARESOLVERR_URL", "http://flaresolverr:8191/v1"),
+		Online:          internet.Online,
 	})
 	if err := streamingSvc.EnsureSettings(); err != nil {
 		log.Printf("seed indexer settings: %v", err)
@@ -174,7 +177,7 @@ func run() error {
 		},
 	})
 
-	r := httpserver.New(cfg, db)
+	r := httpserver.New(cfg, db, internet.Online)
 	httpserver.ServeTVApp(r, os.Getenv("TV_APP_DIR"))
 	images.Register(r, imagesSvc)
 	api := r.Group("/api")

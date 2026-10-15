@@ -20,6 +20,7 @@ import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mse
 import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
 import { DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addSample, leadOf, leadSample, loadSamples, saveSamples } from './clockLead';
 import { isWebOS } from '../lib/webos';
+import { checkNet, type NetState } from '../lib/netStatus';
 import { canSeek, cueAnswer, openStart, progressToSave, subtitleRetryMs } from './playRules';
 import { DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy } from './subsLog';
 
@@ -79,6 +80,8 @@ export interface PlayerState {
   reconnecting: boolean;
   ended: boolean;
   fatal: { key?: MessageKey; text?: string } | null;
+  /** The server has no internet, or the TV cannot reach it: playback picks up once it is back */
+  net: Exclude<NetState, 'online'> | null;
   audioTracks: AudioTrackInfo[];
   audio: number;
   quality: { label: string; hdr: boolean; dv: boolean } | null;
@@ -105,6 +108,8 @@ const FIRST_START_MS = 30000;
 // A torrent without a first frame this long after it opened hands over to a faster source (slowStart)
 const SLOW_START_MS = 12000;
 const MAX_RECOVERIES = 3;
+// While offline the connection is checked this often
+const ONLINE_POLL_MS = 5000;
 // A failed source is resolved again (without it) this many times per item before an error shows
 const MAX_AUTO_REFRESH = 3;
 // While the viewer pauses the server keeps the file ready; after a long pause a stall restarts quickly
@@ -285,6 +290,7 @@ export class PlayerEngine {
   private saveTimer: ReturnType<typeof setInterval>;
   private countdownTimer?: ReturnType<typeof setInterval>;
   private toastTimer?: Timer;
+  private onlineTimer?: Timer;
   // Playback diagnostics (playbackLog.ts); null when switched off
   private plog: PlaybackLog | null = null;
   // The viewer's subtitle delay changes, logged once settled (subsLog.ts)
@@ -320,6 +326,7 @@ export class PlayerEngine {
       reconnecting: false,
       ended: false,
       fatal: null,
+      net: null,
       audioTracks: [],
       audio: 0,
       quality: null,
@@ -507,8 +514,55 @@ export class PlayerEngine {
         return;
       }
       const notFound = e?.status === 404 || !e?.message;
-      this.set({ phase: 'error', error: notFound ? { key: 'player.noSourceHint' } : { text: String(e.message) } });
+      const error = notFound ? { key: 'player.noSourceHint' as MessageKey } : { text: String(e.message) };
+      if (e instanceof StreamError && e.code === 'offline') {
+        this.goOffline('offline', startPos || 0, error);
+        return;
+      }
+      if (e instanceof StreamError) {
+        this.set({ phase: 'error', error });
+        return;
+      }
+      // No answer at all ("Failed to fetch"): the server or its internet may be down
+      const session = this.session;
+      checkNet().then(net => {
+        if (this.stale(session)) return;
+        if (net !== 'online') this.goOffline(net, startPos || 0, error);
+        else this.set({ phase: 'error', error });
+      });
     }
+  }
+
+  // ---- offline: the server lost its internet (or the TV the server) ----
+
+  /** Shows the offline screen and resumes at `at` once the connection is back. */
+  private goOffline(net: Exclude<NetState, 'online'>, at: number, error?: { key?: MessageKey; text?: string }) {
+    if (!this.state.net) this.plog?.note('offline', { net });
+    if (error) this.set({ phase: 'error', error });
+    this.set({ net, reconnecting: false });
+    clearTimeout(this.onlineTimer);
+    const check = () => checkNet().then(next => {
+      if (this.destroyed || !this.state.net) return;
+      if (next === 'online') {
+        this.backOnline(at);
+        return;
+      }
+      this.set({ net: next });
+      this.onlineTimer = setTimeout(check, ONLINE_POLL_MS);
+    });
+    this.onlineTimer = setTimeout(check, ONLINE_POLL_MS);
+  }
+
+  /** The same source plays on where it stopped (the connection failed, not the source). */
+  private backOnline(at: number) {
+    clearTimeout(this.onlineTimer);
+    this.plog?.note('online');
+    this.set({ net: null, fatal: null });
+    this.toast('net.backOnline');
+    this.recoveries = 0;
+    this.autoRefreshes = 0;
+    if (this.state.phase === 'error') this.startItem({ startAt: at });
+    else this.restartAt(at, 'online');
   }
 
   private cancelResolve() {
@@ -521,13 +575,22 @@ export class PlayerEngine {
   /** A failed source is resolved again (up to MAX_AUTO_REFRESH times per item); a fresh one is avoided. */
   private sourceFailed(position: number, auto: boolean): boolean {
     if (auto && this.autoRefreshes >= MAX_AUTO_REFRESH) return false;
-    if (auto) {
-      this.autoRefreshes++;
-      // A fresh source that failed is not picked again; a reused one gets a fresh resolve
-      const failed = this.source?.hash.toLowerCase();
-      if (this.origin === 'fresh' && failed && this.avoid.indexOf(failed) < 0) this.avoid = [...this.avoid, failed];
-    }
-    this.startItem({ refresh: true, startAt: position });
+    // A dropped connection is not the source's fault: it is kept and played on once back
+    const session = this.session;
+    checkNet().then(net => {
+      if (this.stale(session)) return;
+      if (net !== 'online') {
+        this.goOffline(net, position);
+        return;
+      }
+      if (auto) {
+        this.autoRefreshes++;
+        // A fresh source that failed is not picked again; a reused one gets a fresh resolve
+        const failed = this.source?.hash.toLowerCase();
+        if (this.origin === 'fresh' && failed && this.avoid.indexOf(failed) < 0) this.avoid = [...this.avoid, failed];
+      }
+      this.startItem({ refresh: true, startAt: position });
+    });
     return true;
   }
 
@@ -1051,13 +1114,22 @@ export class PlayerEngine {
 
   private recover() {
     this.disarmStall();
-    if (this.recoveries >= MAX_RECOVERIES) {
-      // Out of restarts: another source first, an error only when that is out of tries too
-      if (!this.sourceFailed(this.positionNow(), true)) this.set({ reconnecting: false, fatal: { key: 'player.connectionLost' } });
-      return;
-    }
-    this.recoveries++;
-    this.restartAt(this.positionNow(), 'stall');
+    const session = this.session;
+    checkNet().then(net => {
+      if (this.stale(session)) return;
+      // Restarts cannot help without a connection
+      if (net !== 'online') {
+        this.goOffline(net, this.positionNow());
+        return;
+      }
+      if (this.recoveries >= MAX_RECOVERIES) {
+        // Out of restarts: another source first, an error only when that is out of tries too
+        if (!this.sourceFailed(this.positionNow(), true)) this.set({ reconnecting: false, fatal: { key: 'player.connectionLost' } });
+        return;
+      }
+      this.recoveries++;
+      this.restartAt(this.positionNow(), 'stall');
+    });
   }
 
   // ---- adaptive quality (sidegrade first, then a lower cap) ----
@@ -1688,6 +1760,14 @@ export class PlayerEngine {
   retry() {
     // The last shown position (positionNow keeps an old offset without a stream), else where the item was to start
     const at = this.state.position > 0 ? this.state.position : this.resumePos;
+    if (this.state.net) {
+      checkNet().then(net => {
+        if (this.destroyed || !this.state.net) return;
+        if (net === 'online') this.backOnline(at);
+        else this.set({ net });
+      });
+      return;
+    }
     if (this.state.phase === 'error') {
       this.startItem({ refresh: true, startAt: at });
       return;
@@ -1979,6 +2059,7 @@ export class PlayerEngine {
     clearInterval(this.keepAliveTimer);
     if (this.countdownTimer) clearInterval(this.countdownTimer);
     clearTimeout(this.toastTimer);
+    clearTimeout(this.onlineTimer);
     clearTimeout(this.realStallTimer);
     clearTimeout(this.stallConfirmTimer);
     clearTimeout(this.seekRetry);

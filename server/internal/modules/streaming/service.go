@@ -23,6 +23,9 @@ type Config struct {
 	FlareSolverrURL string
 	// TorBoxURL is the TorBox API base ("" = https://api.torbox.app/v1/api; tests use a fake)
 	TorBoxURL string
+	// Online tells whether the server reaches the internet (nil = always): a resolve answers
+	// 503 {code: "offline"} without it instead of "No playable source found"
+	Online func(ctx context.Context) bool
 }
 
 type Service struct {

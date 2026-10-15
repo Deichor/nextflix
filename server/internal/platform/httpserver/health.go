@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -19,7 +20,8 @@ type healthResponse struct {
 var startTime = time.Now()
 
 // healthHandler reports "healthy", or "degraded" with 503 when the database is unreachable.
-func healthHandler(db *gorm.DB) gin.HandlerFunc {
+// services.internet says whether the server reaches the internet (players show it on errors).
+func healthHandler(db *gorm.DB, online func(context.Context) bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		dbStatus := "not_configured"
 		if db != nil {
@@ -27,6 +29,11 @@ func healthHandler(db *gorm.DB) gin.HandlerFunc {
 			if sqlDB, err := db.DB(); err != nil || sqlDB.PingContext(c.Request.Context()) != nil {
 				dbStatus = "unhealthy"
 			}
+		}
+
+		internet := "online"
+		if online != nil && !online(c.Request.Context()) {
+			internet = "offline"
 		}
 
 		status, code := "healthy", http.StatusOK
@@ -38,7 +45,7 @@ func healthHandler(db *gorm.DB) gin.HandlerFunc {
 			Status:    status,
 			Timestamp: time.Now(),
 			Version:   "3.0.0",
-			Services:  map[string]string{"database": dbStatus},
+			Services:  map[string]string{"database": dbStatus, "internet": internet},
 			Uptime:    time.Since(startTime).String(),
 		})
 	}

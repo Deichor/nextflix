@@ -307,10 +307,13 @@ export interface Availability {
 export class StreamError extends Error {
   status: number;
   availability?: Availability;
-  constructor(message: string, status: number, availability?: Availability) {
+  /** "offline": the server has no internet connection */
+  code?: string;
+  constructor(message: string, status: number, availability?: Availability, code?: string) {
     super(message);
     this.status = status;
     this.availability = availability;
+    this.code = code;
   }
 }
 
@@ -363,7 +366,7 @@ export async function resolveSource(
       const availability = e.status === 425 && b
         ? { status: (b.status as AvailabilityStatus) || 'not_released', release_date: b.release_date || null, digital_date: b.digital_date || null }
         : undefined;
-      throw new StreamError(e.message, e.status, availability);
+      throw new StreamError(e.message, e.status, availability, b && typeof b.code === 'string' ? b.code : undefined);
     }
     throw e;
   }
@@ -396,6 +399,8 @@ export async function reuseSource(
     return a && (a.action === 'resolve' || (a.action === 'play' && a.source && a.source.hash)) ? a : null;
   } catch (e: any) {
     if (e && e.name === 'AbortError') throw e;
+    // Without internet the saved source cannot be checked either: the player shows it
+    if (e instanceof HttpError && e.body?.code === 'offline') throw new StreamError(e.message, e.status, undefined, 'offline');
     return null;
   }
 }

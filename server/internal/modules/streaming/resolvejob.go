@@ -31,6 +31,7 @@ const (
 type tsResolveError struct {
 	status int
 	msg    string
+	code   string // machine-readable reason for the players ("offline")
 }
 
 func (e *tsResolveError) Error() string { return e.msg }
@@ -235,6 +236,12 @@ func (h handler) resolve(c *gin.Context) {
 		}
 		return
 	}
+	// Without internet nothing can be searched or checked: say so at once instead of a
+	// "No playable source found" after a minute of failing searches
+	if s.offline(c.Request.Context()) {
+		c.JSON(errOffline.status, errOffline.body())
+		return
+	}
 	refresh := c.Query("refresh") == "1" || c.Query("refresh") == "true"
 	res, ok := s.cachedFor(key, q)
 	if ok && !refresh && tsHashIn(res.Hash, q.avoid) {
@@ -301,9 +308,13 @@ func (h handler) resolve(c *gin.Context) {
 				return
 			}
 		}
+		if s.offline(c.Request.Context()) {
+			c.JSON(errOffline.status, errOffline.body())
+			return
+		}
 		var re *tsResolveError
 		if errors.As(f.err, &re) {
-			c.JSON(re.status, gin.H{"error": re.msg})
+			c.JSON(re.status, re.body())
 		} else {
 			c.JSON(http.StatusNotFound, gin.H{"error": errNoSource.msg})
 		}
@@ -422,4 +433,19 @@ func (s *Service) cachedOrRunning(key string, q tsResolveQuery) bool {
 func (s *Service) failedRecently(key string) bool {
 	v, ok := s.failedAt.Load(key)
 	return ok && time.Since(v.(time.Time)) < tsPrefetchRetryAfter
+}
+
+// errOffline: the server cannot reach the internet, so nothing can be searched or played.
+var errOffline = &tsResolveError{status: http.StatusServiceUnavailable, msg: "The server is not connected to the internet", code: "offline"}
+
+// offline reports whether the server has no internet connection now.
+func (s *Service) offline(ctx context.Context) bool {
+	return s.cfg.Online != nil && !s.cfg.Online(ctx)
+}
+
+func (e *tsResolveError) body() gin.H {
+	if e.code != "" {
+		return gin.H{"error": e.msg, "code": e.code}
+	}
+	return gin.H{"error": e.msg}
 }

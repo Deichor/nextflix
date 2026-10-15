@@ -1691,6 +1691,22 @@ p {
   margin-top: 2.6rem;
 }
 
+.player-alert-net {
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.player-net-text {
+  max-width: 60rem;
+  line-height: 1.4;
+}
+
+.player-net-wait {
+  margin-top: 1.6rem;
+  font-size: 1.4rem;
+  color: var(--muted);
+}
+
 .player-toast {
   position: absolute;
   top: 9rem;
@@ -2809,4 +2825,26 @@ p {
   margin: 0;
   font-size: 2.4rem;
   color: var(--muted);
+}
+
+.net-banner {
+  position: fixed;
+  top: 2rem;
+  left: 50%;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 2rem;
+  border-radius: 0.6rem;
+  background: rgba(20, 20, 20, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 1.5rem;
+  transform: translateX(-50%);
+}
+
+.net-banner-icon {
+  width: 2rem;
+  height: 2rem;
+  color: var(--red);
 }

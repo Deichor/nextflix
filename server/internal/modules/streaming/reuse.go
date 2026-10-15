@@ -63,6 +63,10 @@ func (h handler) reuse(c *gin.Context) {
 	if t, err := strconv.ParseFloat(c.Query("t"), 64); err == nil && t > 0 && t < 86400 {
 		sv.at = t
 	}
+	if s.offline(c.Request.Context()) {
+		c.JSON(errOffline.status, errOffline.body())
+		return
+	}
 	key := tsResolveKey(q)
 	w := s.holdWarm(key)
 	s.markIntent(w) // a player asks: the title never gives way to another one's playback

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, ArrowLeft, CalendarClock, ChevronsRight, Clapperboard, MessageSquare, Pause, Play, RotateCcw, RotateCw, SkipForward } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CalendarClock, ChevronsRight, Clapperboard, MessageSquare, Pause, Play, RotateCcw, RotateCw, ServerOff, SkipForward, WifiOff } from 'lucide-react';
 import Spinner from '../components/Spinner';
 import { img } from '../lib/http';
 import { useI18n } from '../lib/i18n';
@@ -96,6 +96,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
 
   const playable = !!s && s.phase === 'ready' && s.duration > 0 && !s.fatal;
   const overlay = !s ? 'loading'
+    : s.net ? 'offline'
     : s.phase === 'resolving' ? 'resolving'
       : s.phase === 'error' ? 'error'
         : s.phase === 'unreleased' ? 'unreleased'
@@ -316,7 +317,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
 
       {playable && <PauseScreen meta={m} shown={pauseScreen} />}
 
-      {(overlay === 'resolving' || overlay === 'loading' || overlay === 'error' || overlay === 'unreleased') && (
+      {(overlay === 'resolving' || overlay === 'loading' || overlay === 'error' || overlay === 'unreleased' || overlay === 'offline') && (
         <div className="player-cover">
           {!!m.backdrop_path && <img className="player-cover-img" src={img(m.backdrop_path, 'w1280')} alt="" />}
           <div className="player-cover-shade" />
@@ -335,6 +336,18 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
                 <AlertCircle className="player-alert" />
                 <p className="player-status">{t(m.media_type === 'tv' ? 'player.couldNotStartEpisode' : 'player.couldNotStartTitle')}</p>
                 <p className="player-status-sub">{errorText(s.error)}</p>
+                <div className="player-dialog-buttons">
+                  <button type="button" className="btn btn-primary" data-nav data-nav-default onClick={() => engine?.retry()}>{t('player.retry')}</button>
+                  <button type="button" className="btn btn-secondary" data-nav onClick={onClose}>{t('common.close')}</button>
+                </div>
+              </>
+            )}
+            {overlay === 'offline' && (
+              <>
+                {s.net === 'offline' ? <WifiOff className="player-alert player-alert-net" /> : <ServerOff className="player-alert player-alert-net" />}
+                <p className="player-status">{t(s.net === 'offline' ? 'net.offlineTitle' : 'net.unreachableTitle')}</p>
+                <p className="player-status-sub player-net-text">{t(s.net === 'offline' ? 'net.offlineText' : 'net.unreachableText')}</p>
+                <p className="player-net-wait"><Spinner className="spinner-small" /> {t('net.waiting')}</p>
                 <div className="player-dialog-buttons">
                   <button type="button" className="btn btn-primary" data-nav data-nav-default onClick={() => engine?.retry()}>{t('player.retry')}</button>
                   <button type="button" className="btn btn-secondary" data-nav onClick={onClose}>{t('common.close')}</button>

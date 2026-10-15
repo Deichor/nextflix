@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ConfirmDialog from './components/ConfirmDialog';
 import Intro from './components/Intro';
+import NetBanner from './components/NetBanner';
 import { getServer } from './lib/config';
 import { I18nContext, makeI18n } from './lib/i18n';
 import { playSting, takeIntro, whenOnScreen } from './lib/intro';
@@ -93,6 +94,7 @@ function Shell({ onLocale }: { onLocale: (p: Profile) => void }) {
           <Screen entry={top} onPickProfile={pickProfile} />
         </EntryProvider>
       </div>
+      {!play && top.route.name !== 'setup' && <NetBanner />}
       {!!play && <Player req={play.req} onClose={closePlayer} />}
       {exitAsk && (
         <I18nExitDialog onCancel={cancelExit} />

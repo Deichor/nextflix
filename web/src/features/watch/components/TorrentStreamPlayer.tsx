@@ -2,9 +2,10 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare, ChevronsLeft, ChevronsRight, RotateCwSquare, Clapperboard } from 'lucide-react';
+import { Play, Pause, ArrowLeft, Maximize, Minimize, Volume2, VolumeX, Loader2, RotateCcw, RotateCw, Film, SkipForward, AlertCircle, CalendarClock, MessageSquare, ChevronsLeft, ChevronsRight, RotateCwSquare, Clapperboard, ServerOff, WifiOff } from 'lucide-react';
 import { getApiUrl } from '@/shared/lib/api';
 import { getActiveProfileId } from '@/shared/lib/profile';
+import { checkNet, type NetState } from '@/shared/lib/netStatus';
 import { intlLocale, useFormat, useLocale, useT, type Locale, type MessageKey, type TFunction, type Vars } from '@/shared/i18n';
 import AudioSubtitlePanel from '@/features/watch/components/AudioSubtitlePanel';
 import SubtitleOverlay from '@/features/watch/components/SubtitleOverlay';
@@ -160,6 +161,8 @@ const SLOW_START_MS = 12000;
 const MAX_RECOVERIES = 3;
 // A failed source is resolved again (without it) this many times per item before an error shows
 const MAX_AUTO_REFRESH = 3;
+// While offline the connection is checked this often
+const ONLINE_POLL_MS = 5000;
 // Pause keep-alive and the check after a long pause (the stream may have died meanwhile)
 const KEEPALIVE_MS = 15000;
 const LONG_PAUSE_MS = 10000;
@@ -393,6 +396,10 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // wrongLength: the last file did not have the title's length. fresh: resolve (with avoid) even though
   // a saved or given source exists, without dropping the server's cached source.
   const retryRef = useRef<{ refresh: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }>({ refresh: false });
+  // The server has no internet (or does not answer): the offline screen, left with
+  // offlineRetryRef (the same source, where it stopped) once the connection is back
+  const [net, setNet] = useState<Exclude<NetState, 'online'> | null>(null);
+  const offlineRetryRef = useRef<typeof retryRef.current>({ refresh: false });
   const autoRefreshesRef = useRef(0);
   // A recovery chain runs (restart, fallback, resolve without the failed source): one stable
   // overlay until frames run again, over the last frame when one was shown (frameRef)
@@ -547,6 +554,18 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           setPhase('error');
           return;
         }
+        // The server said it is offline, or did not answer at all ("Failed to fetch")
+        const offline = e instanceof StreamApiError && e.code === 'offline';
+        if (offline || !(e instanceof StreamApiError)) {
+          const s = offline ? 'offline' : await checkNet();
+          if (cancelled) return;
+          if (s !== 'online') {
+            offlineRetryRef.current = { refresh: false, startAt: startPos || 0 };
+            setNet(s);
+            setPhase('error');
+            return;
+          }
+        }
         setResolveError(e?.status === 404 || !e?.message ? 'player.noSource' : e.message);
         setPhase('error');
       } finally {
@@ -591,17 +610,62 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const isLive = !!live && live.base === resolved;
     const reused = !isLive && resolved.origin !== 'fresh';
     if (auto && (!item.meta || autoRefreshesRef.current >= MAX_AUTO_REFRESH)) return false;
-    if (auto) {
-      autoRefreshesRef.current++;
-      setRecovering(true);
-    }
-    const failed = (isLive ? live.source : resolved.source)?.hash?.toLowerCase();
-    if (auto && !reused && failed && !avoidRef.current.includes(failed)) avoidRef.current = [...avoidRef.current, failed];
+    const current = isLive ? live.source : resolved.source;
     // A source that failed before its first frame reports 0: it resumes where it was to start
-    retryRef.current = { refresh: !!item.meta, startAt: position > 0 ? position : resolvedRef.current.startAt };
-    setAttempt(a => a + 1);
+    const at = position > 0 ? position : resolvedRef.current.startAt;
+    const key = itemKeyRef.current;
+    checkNet().then(s => {
+      if (itemKeyRef.current !== key) return;
+      // A dropped connection is not the source's fault: it is kept and played on once back
+      if (s !== 'online') {
+        offlineRetryRef.current = current ? { refresh: false, startAt: at, switchTo: current } : { refresh: false, startAt: at };
+        setRecovering(false);
+        setFrameShown(false);
+        setNet(s);
+        setPhase('error');
+        return;
+      }
+      if (auto) {
+        autoRefreshesRef.current++;
+        setRecovering(true);
+      }
+      const failed = current?.hash?.toLowerCase();
+      if (auto && !reused && failed && !avoidRef.current.includes(failed)) avoidRef.current = [...avoidRef.current, failed];
+      retryRef.current = { refresh: !!item.meta, startAt: at };
+      setAttempt(a => a + 1);
+    });
     return true;
   }, [resolved, live, item.meta]);
+
+  // Offline: checked every few seconds; once back the same source plays on where it stopped
+  const resumeOnline = useCallback(() => {
+    retryRef.current = offlineRetryRef.current;
+    autoRefreshesRef.current = 0;
+    setNet(null);
+    setToast('net.backOnline');
+    setAttempt(a => a + 1);
+  }, []);
+  useEffect(() => {
+    if (!net) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      checkNet().then(s => {
+        if (!alive) return;
+        if (s === 'online') {
+          resumeOnline();
+          return;
+        }
+        setNet(s);
+        timer = setTimeout(tick, ONLINE_POLL_MS);
+      });
+    };
+    timer = setTimeout(tick, ONLINE_POLL_MS);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [net, resumeOnline]);
 
   // Called by PlayerCore when the probed file is clearly not the whole title (its length does
   // not fit the TMDB runtime): resolve again without it. False when it gave up (play it anyway).
@@ -1239,7 +1303,35 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
             <p className="text-white text-2xl md:text-3xl font-bold mb-1">{displayTitle}</p>
             {!!subtitle && <p className="text-[#b3b3b3] text-sm md:text-base mb-6">{subtitle}</p>}
             {!subtitle && <div className="mb-6" />}
-            {phase === 'resolving' ? (
+            {net && phase === 'error' ? (
+              // No connection: a calm note that resumes by itself, retry checks at once
+              <>
+                {net === 'offline'
+                  ? <WifiOff className="w-12 h-12 text-white/80 mb-4" />
+                  : <ServerOff className="w-12 h-12 text-white/80 mb-4" />}
+                <p className="text-white text-lg font-semibold">{t(net === 'offline' ? 'net.offlineTitle' : 'net.unreachableTitle')}</p>
+                <p className="text-[#b3b3b3] text-sm mt-1">{t(net === 'offline' ? 'net.offlineText' : 'net.unreachableText')}</p>
+                <p className="flex items-center gap-2 text-white/60 text-xs mt-4 mb-6">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> {t('net.waiting')}
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      checkNet().then(s => {
+                        if (s === 'online') resumeOnline();
+                        else setNet(s);
+                      });
+                    }}
+                    className="flex items-center gap-2 px-6 py-2.5 bg-white text-black font-bold rounded hover:bg-white/80 transition"
+                  >
+                    <RotateCw className="w-4 h-4" /> {t('player.retry')}
+                  </button>
+                  <button onClick={onClose} className="px-6 py-2.5 bg-[#6d6d6eb3] hover:bg-[#6d6d6e66] text-white font-bold rounded transition">
+                    {t('common.close')}
+                  </button>
+                </div>
+              </>
+            ) : phase === 'resolving' ? (
               <>
                 <Loader2 className="w-12 h-12 text-[#E50914] animate-spin mb-4" />
                 <p className="text-white text-base">{t(resolveStageKey(resolveElapsed, refreshing, wrongLength))}</p>

@@ -198,10 +198,13 @@ export class StreamApiError extends Error {
   status: number;
   /** 425 answers: the title / episode is not out yet */
   availability?: Availability;
-  constructor(message: string, status: number, availability?: Availability) {
+  /** "offline": the server has no internet connection */
+  code?: string;
+  constructor(message: string, status: number, availability?: Availability, code?: string) {
     super(message);
     this.status = status;
     this.availability = availability;
+    this.code = code;
   }
 }
 
@@ -220,7 +223,7 @@ async function readError(res: Response, fallback: string): Promise<StreamApiErro
         digital_date: data.digital_date || null,
       }
     : undefined;
-  return new StreamApiError(data?.error || fallback, res.status, availability);
+  return new StreamApiError(data?.error || fallback, res.status, availability, typeof data?.code === 'string' ? data.code : undefined);
 }
 
 // ---- Availability (is the title / episode out yet?) ----
@@ -427,11 +430,16 @@ export async function reuseSource(
   if (t > 0) q.set('t', String(Math.round(t)));
   try {
     const res = await fetch(`${getApiUrl()}/api/torrent-stream/reuse?${q.toString()}`, { signal });
+    if (res.status === 503) {
+      // Without internet the saved source cannot be checked either: the player shows it
+      const err = await readError(res, 'offline');
+      if (err.code === 'offline') throw err;
+    }
     if (!res.ok) return null;
     const a = (await res.json()) as ReuseAnswer;
     return a?.action === 'resolve' || (a?.action === 'play' && a.source?.hash) ? a : null;
   } catch (e: any) {
-    if (e?.name === 'AbortError') throw e;
+    if (e?.name === 'AbortError' || (e instanceof StreamApiError && e.code === 'offline')) throw e;
     return null;
   }
 }

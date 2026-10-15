@@ -16,8 +16,8 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // New builds the gin engine with logging, recovery, Host / cross-site / body size guards,
-// request deadlines, CORS, gzip for JSON answers and /api/health.
-func New(cfg config.Config, db *gorm.DB) *gin.Engine {
+// request deadlines, CORS, gzip for JSON answers and /api/health (online: nil = always online).
+func New(cfg config.Config, db *gorm.DB, online func(context.Context) bool) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(errorLogger(), recovery(),
@@ -27,7 +27,7 @@ func New(cfg config.Config, db *gorm.DB) *gin.Engine {
 		requestDeadline(),
 		corsMiddleware(cfg.AllowedOrigins, cfg.TVAppKey),
 		gzipJSON())
-	r.GET("/api/health", healthHandler(db))
+	r.GET("/api/health", healthHandler(db, online))
 	return r
 }
 
