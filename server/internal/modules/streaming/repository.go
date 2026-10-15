@@ -53,6 +53,20 @@ func deleteSource(db *gorm.DB, key string) error {
 	return db.Where("source_key = ?", key).Delete(&StreamSource{}).Error
 }
 
+// loadLineRate returns the stored line rate, or nil when none was seen yet.
+func loadLineRate(db *gorm.DB) (*LineRate, error) {
+	var rows []LineRate
+	if err := db.Order("id").Limit(1).Find(&rows).Error; err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return &rows[0], nil
+}
+
+func saveLineRate(db *gorm.DB, row *LineRate) error {
+	row.ID = 1
+	return db.Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error
+}
+
 func pruneSources(db *gorm.DB, before time.Time) error {
 	return db.Where("resolved_at < ?", before).Delete(&StreamSource{}).Error
 }

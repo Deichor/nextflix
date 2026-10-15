@@ -42,6 +42,7 @@ var (
 	tsSpareFresh      = 45 * time.Second // a spare measurement this old still counts for a sidegrade
 	tsSidegradeEvery  = 2 * time.Minute  // at most one sidegrade per title in this time
 	tsSideSearchEvery = 3 * time.Minute  // a draining player starts a search for alternatives at most this often
+	tsSideSearchAfter = time.Minute      // ... and not before its stream played this long
 	tsJanitorTick     = 5 * time.Second
 )
 
@@ -71,6 +72,7 @@ type tsWarm struct {
 	drainAt   time.Time // last sidegrade poll of a draining player
 	searchAt  time.Time // last search for alternatives (searchSidegrade)
 	searching bool
+	heldAt    time.Time // last log of a search put off
 	released  bool
 
 	// Playback priority (priority.go), guarded by Service.warmMu
@@ -400,11 +402,13 @@ func (s *Service) releaseHashes(hashes []string) {
 	}()
 }
 
-// playBegin / playEnd count the running play streams of a torrent.
-func (s *Service) playBegin(hash string) {
+// playBegin / playEnd count the running play streams of a torrent. playBegin returns the
+// stream, so play.go counts what it delivers (quiet.go) and ends exactly that one (playDone).
+func (s *Service) playBegin(hash string) *tsPlayStream {
 	now := time.Now()
 	s.warmMu.Lock()
 	defer s.warmMu.Unlock()
+	st := s.beginStreamLocked(hash, now)
 	s.playing[hash]++
 	s.lastUse[hash] = now
 	s.playStart[hash] = now
@@ -420,11 +424,17 @@ func (s *Service) playBegin(hash string) {
 			}
 		}
 	}
+	return st
 }
 
-func (s *Service) playEnd(hash string) {
+// playEnd ends the oldest play stream of hash.
+func (s *Service) playEnd(hash string) { s.playDone(hash, nil) }
+
+// playDone ends the play stream st of hash (nil: its oldest).
+func (s *Service) playDone(hash string, st *tsPlayStream) {
 	s.warmMu.Lock()
 	defer s.warmMu.Unlock()
+	s.endStreamLocked(hash, st, time.Now())
 	if s.playing[hash]--; s.playing[hash] <= 0 {
 		delete(s.playing, hash)
 		delete(s.playStart, hash)
@@ -440,6 +450,9 @@ func (s *Service) playFlows(hash string) {
 	s.warmMu.Lock()
 	if s.playing[hash] > 0 {
 		s.playFlowing[hash] = true
+		if r := s.playRuns[hash]; r != nil && r.firstAt.IsZero() {
+			r.firstAt = time.Now()
+		}
 	}
 	s.warmMu.Unlock()
 }
@@ -477,6 +490,7 @@ func (s *Service) janitor() {
 			go s.pingTorrent(h)
 		}
 		s.priorityTick(now)
+		s.startingStreams("") // notes (and logs) the streams that got past their start
 		s.retryDrops(now)
 		s.pruneState(now)
 	}
@@ -564,6 +578,7 @@ func (s *Service) warmTick(now time.Time) (ping []string) {
 // for alternatives (searchSidegrade).
 func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, curQ int, opt tsSideOpts) *tsResolveResult {
 	now := time.Now()
+	played, resolving := s.playedFor(current, now), s.titleResolving(key)
 	s.warmMu.Lock()
 	w := s.warms[key]
 	if w == nil || w.released {
@@ -623,10 +638,32 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 	}
 	search := best == nil && opt.draining && len(stale) == 0 && !w.measuring && !w.searching &&
 		now.Sub(w.searchAt) >= tsSideSearchEvery
-	if search {
+	// Not while the stream starts (it needs the line; the player's step down or handover
+	// resolves anyway) unless it was measured starving, not next to a player's resolve of the
+	// title, never without a cap
+	held := ""
+	switch {
+	case !search:
+	case curQ <= 0:
+		held = "the playing resolution is unknown"
+	case resolving:
+		held = "a player resolves the title"
+	case played <= 0:
+		held = "its stream has sent nothing yet"
+	case played < tsSideSearchAfter && (cur == nil || cur.ratio() >= tsRescueRatio):
+		held = "its stream has not played a minute yet"
+	}
+	if search = search && held == ""; search {
 		w.searching, w.searchAt = true, now
 	}
+	logHeld := held != "" && now.Sub(w.heldAt) >= 30*time.Second
+	if logHeld {
+		w.heldAt = now
+	}
 	s.warmMu.Unlock()
+	if logHeld {
+		log.Printf("warm: deferring the sidegrade search of %s: %s", key, held)
+	}
 	for _, h := range avoided {
 		s.dropFrom(w, h)
 	}
@@ -648,8 +685,9 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 }
 
 // searchSidegrade looks for a faster source than a draining current one: the title is
-// resolved again in the background (its checks wait while a stream starts, quiet.go),
-// capped at the playing resolution, without current and the avoided torrents. A pick that
+// resolved again in the background (its checks wait while a stream starts, quiet.go, except
+// while the title's source starves: rescueCtx), capped at the playing resolution, without
+// current and the avoided torrents. A pick that
 // keeps up with a fitting length becomes a spare, which a later sidegrade poll offers; a
 // lower resolution only with lowerOK.
 func (s *Service) searchSidegrade(w *tsWarm, q tsResolveQuery, current string, curQ int, lowerOK bool) {
@@ -658,11 +696,29 @@ func (s *Service) searchSidegrade(w *tsWarm, q tsResolveQuery, current string, c
 		w.searching = false
 		s.warmMu.Unlock()
 	}()
-	if s.flights.running(w.key) {
+	if s.flights.running(w.key) || s.titleResolving(w.key) {
 		return // a resolve of the title runs anyway
 	}
-	ctx, cancel := context.WithTimeout(tsBackground(w.ctx), tsResolveJobTime)
+	ctx, cancel := context.WithTimeout(s.rescueCtx(w, "sidegrade search"), tsResolveJobTime)
 	defer cancel()
+	// A player's resolve of the title (step down, avoid) has the line to itself: the search ends
+	title := q.title
+	go func() {
+		t := time.NewTicker(tsQuietPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if s.titleResolving(w.key) {
+					log.Printf("resolve %q: a player resolves the title, the sidegrade search ends", title)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	q.warm = w
 	q.upgradeFrom = 0
 	if curQ > 0 {
@@ -706,7 +762,7 @@ func (s *Service) searchSidegrade(w *tsWarm, q tsResolveQuery, current string, c
 }
 
 func (s *Service) measureSpares(w *tsWarm, spares []tsResolveResult) {
-	ctx := tsBackground(w.ctx)
+	ctx := s.rescueCtx(w, "spare measurement")
 	defer func() {
 		s.warmMu.Lock()
 		w.measuring = false

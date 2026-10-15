@@ -312,11 +312,14 @@ func TestCheckCandidateProbesBeforeMeasuring(t *testing.T) {
 }
 
 // The player's probe and a play stream without its first bytes hold background work back;
-// the first bytes end the hold after tsStartQuiet.
+// a stream that then flows steadily (rate unknown) ends the hold after tsStartSteady.
 func TestQuietCoversProbeAndFirstBytes(t *testing.T) {
 	ms := time.Millisecond
 	shortQuiet(t, 50*ms)
 	tsStartQuietMax = time.Minute
+	oldSteady := tsStartSteady
+	tsStartSteady = 50 * ms
+	t.Cleanup(func() { tsStartSteady = oldSteady })
 	s := NewService(nil, Config{})
 	other := hx('o')
 	s.probeBegin(hx('p'))
@@ -327,18 +330,27 @@ func TestQuietCoversProbeAndFirstBytes(t *testing.T) {
 	if s.startingStream(other) != "" {
 		t.Fatal("a finished probe still holds background work")
 	}
-	s.playBegin(hx('p'))
+	st := s.playBegin(hx('p'))
 	defer s.playEnd(hx('p'))
 	time.Sleep(80 * ms)
 	if s.startingStream(other) != hx('p') {
 		t.Fatal("a stream without its first bytes stopped counting as starting")
 	}
-	w := &tsFirstWrite{w: discard{}, first: func() { s.playFlows(hx('p')) }}
+	w := &tsFirstWrite{w: discard{}, first: func() { s.playFlows(hx('p')) }, stream: st}
 	if _, err := w.Write([]byte{1}); err != nil {
 		t.Fatal(err)
 	}
+	if s.startingStream(other) != hx('p') {
+		t.Fatal("the first bytes alone ended the start")
+	}
+	for range 4 {
+		time.Sleep(20 * ms)
+		if _, err := w.Write([]byte{1}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if s.startingStream(other) != "" {
-		t.Fatal("a flowing stream past tsStartQuiet still holds background work")
+		t.Fatal("a stream that flows steadily still holds background work")
 	}
 }
 

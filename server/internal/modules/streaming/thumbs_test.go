@@ -136,10 +136,9 @@ func TestThumbGridAndWidth(t *testing.T) {
 
 func TestThumbValidation(t *testing.T) {
 	s, _, f, r := newThumbTest(t)
-	s.probeCache.Store(thumbHashA+":1", &tsProbe{Format: struct {
-		FormatName string `json:"format_name"`
-		Duration   string `json:"duration"`
-	}{"matroska", "600"}})
+	probe := &tsProbe{}
+	probe.Format.FormatName, probe.Format.Duration = "matroska", "600"
+	s.probeCache.Store(thumbHashA+":1", probe)
 	for _, q := range []string{
 		"hash=xyz&index=1&t=10",
 		"hash=" + thumbHashA + "&index=-1&t=10",

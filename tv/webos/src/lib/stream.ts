@@ -3,7 +3,7 @@ import { readJson, writeJson } from './storage';
 import { deviceInfo, isWebOS, type DeviceInfo } from './webos';
 import type { MediaType, SeasonInfo } from './catalog';
 import { translate, type Locale } from './i18n';
-import { healthRatio } from '../player/startBuffer';
+import { healthRatio, healthStarving } from '../player/startBuffer';
 
 // Same request shapes as web/src/features/watch/api.ts
 
@@ -229,7 +229,7 @@ export const sourceOf = (r: ResolvedSource): StreamSource => ({
   torrent_title: r.torrent_title,
   quality: r.quality,
   hdr: r.hdr,
-  starving: r.health?.keeps_up === false,
+  starving: healthStarving(r.health),
   format: r.format,
   ratio: healthRatio(r.health),
   debrid: r.debrid === true || r.source === 'torbox',

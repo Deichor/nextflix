@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canSeek, cueAnswer, openStart, progressToSave, subtitleRetryMs } from './playRules.ts';
+import { canSeek, cueAnswer, handoverPlan, keepsLowerCap, openStart, progressToSave, subtitleRetryMs } from './playRules.ts';
+import { healthStarving } from './startBuffer.ts';
 
 test('subtitleRetryMs: a server or network error is asked again after 5 s, doubling up to 5 minutes', () => {
   assert.deepEqual([1, 2, 3, 4].map(subtitleRetryMs), [5000, 10000, 20000, 40000]);
@@ -72,4 +73,43 @@ test('progressToSave: no length or under 10 s saves nothing', () => {
   const x = { finished: false, itemPlayed: true, duration: 0, exact: true, position: 1500, offset: 0 };
   assert.equal(progressToSave(x), null);
   assert.equal(progressToSave({ ...x, duration: 3600, position: 8 }), null);
+});
+
+test('handoverPlan: never above the starving source; a 4K steps down to 1080p', () => {
+  // TV without maxq: a starving 1080p is replaced at 1080p, never by a 4K
+  assert.deepEqual(handoverPlan(1080, undefined, 0, 3), { maxq: 1080, step: false, last: false });
+  assert.deepEqual(handoverPlan(720, 1080, 0, 3), { maxq: 720, step: false, last: false });
+  assert.deepEqual(handoverPlan(1080, 720, 0, 3), { maxq: 720, step: false, last: false });
+  assert.deepEqual(handoverPlan(2160, undefined, 0, 3), { maxq: 1080, step: true, last: false });
+  // 1080p found nothing: the 4K is replaced at the original cap
+  assert.deepEqual(handoverPlan(2160, undefined, 1, 3, [1080]), { maxq: undefined, step: false, last: false });
+  assert.deepEqual(handoverPlan(0, undefined, 0, 3), { maxq: undefined, step: false, last: false });
+});
+
+test('keepsLowerCap: only an answer that plays well keeps the lowered cap', () => {
+  assert.equal(keepsLowerCap({ rate: 4, need: 2, keeps_up: true }), true);
+  assert.equal(keepsLowerCap(undefined), true);
+  assert.equal(keepsLowerCap({ rate: 2.5, need: 2, keeps_up: false }), true);
+  // Detour (1945): the 720p answer needs 1.84 MB/s from 2-3 seeders
+  assert.equal(keepsLowerCap({ rate: 0.4e6, need: 1.84e6, keeps_up: false }), false);
+  assert.equal(keepsLowerCap({ rate: 0, need: 1.84e6, keeps_up: false, dead: true }), false);
+});
+
+test('Detour sequence: a starving 1080p is handed over at 1080p, the last one without the earlier avoids, then the window', () => {
+  const plans = [0, 1, 2, 3].map(n => handoverPlan(1080, undefined, n, 3));
+  assert.deepEqual(plans, [
+    { maxq: 1080, step: false, last: false },
+    { maxq: 1080, step: false, last: false },
+    { maxq: 1080, step: false, last: true },
+    null,
+  ]);
+});
+
+test('healthStarving: only a measured rate below need (or a dead swarm) is starving, not a measurement in progress', () => {
+  assert.equal(healthStarving({ rate: 2, need: 5, keeps_up: false }), true);
+  assert.equal(healthStarving({ rate: 0, need: 5, keeps_up: false, dead: true }), true);
+  assert.equal(healthStarving({ rate: 0, need: 5, keeps_up: false }), false);
+  assert.equal(healthStarving({ rate: 6, need: 5, keeps_up: false }), false);
+  assert.equal(healthStarving({ rate: 2, need: 5, keeps_up: true }), false);
+  assert.equal(healthStarving(undefined), false);
 });

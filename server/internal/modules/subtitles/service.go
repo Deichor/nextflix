@@ -57,6 +57,8 @@ type Config struct {
 	AIDir string
 	// NextEpisode is the episode after season/episode (nil = no AI prefetch of the next episode)
 	NextEpisode func(tvID, season, episode int) (int, int, bool)
+	// LineGate holds the timing's window reads while a stream starts (nil = no wait)
+	LineGate LineGate
 }
 
 // Service lists subtitles from the torrent itself and online providers and serves them as WebVTT.

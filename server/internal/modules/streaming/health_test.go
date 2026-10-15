@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -327,5 +328,22 @@ func TestCapPrefersVerifiedAlive(t *testing.T) {
 	remux.Health.partial, remux.Health.sampled = true, 5*time.Second
 	if i := tsChoosePlayable([]*tsResolveResult{remux, yts}); i != 1 {
 		t.Fatalf("got %d, want the verified YTS", i)
+	}
+}
+
+// A health before its verdict says so in the answer; a finished one leaves the field out.
+func TestHealthJSONMeasuring(t *testing.T) {
+	h := &tsHealth{Rate: 100, Need: 200, partial: true}
+	b, err := json.Marshal(h)
+	if err != nil || !strings.Contains(string(b), `"measuring":true`) || !strings.Contains(string(b), `"need":200`) {
+		t.Fatalf("partial: %s %v", b, err)
+	}
+	h.partial = false
+	if b, _ := json.Marshal(struct{ H *tsHealth }{h}); strings.Contains(string(b), "measuring") {
+		t.Fatalf("final: %s", b)
+	}
+	var back tsHealth
+	if err := json.Unmarshal(b, &back); err != nil || back.Need != 200 {
+		t.Fatalf("round trip: %+v %v", back, err)
 	}
 }

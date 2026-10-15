@@ -21,7 +21,7 @@ import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
 import { DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addSample, leadOf, leadSample, loadSamples, saveSamples } from './clockLead';
 import { isWebOS } from '../lib/webos';
 import { checkNet, type NetState } from '../lib/netStatus';
-import { canSeek, cueAnswer, openStart, progressToSave, subtitleRetryMs } from './playRules';
+import { canSeek, cueAnswer, handoverPlan, keepsLowerCap, lowerCap, openStart, progressToSave, subtitleRetryMs } from './playRules';
 import { DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy } from './subsLog';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
@@ -107,6 +107,8 @@ const STALL_MS = 12000;
 const FIRST_START_MS = 30000;
 // A torrent without a first frame this long after it opened hands over to a faster source (slowStart)
 const SLOW_START_MS = 12000;
+// After the last handover a source without a frame gets this long more (30 s from its open), then the error (lastTry)
+const LAST_START_MS = 18000;
 const MAX_RECOVERIES = 3;
 // While offline the connection is checked this often
 const ONLINE_POLL_MS = 5000;
@@ -124,6 +126,8 @@ const MIN_STALL_MS = 3000;
 // shorter waits (a gap of a few frames, a decoder hiccup) play on by themselves
 const STALL_CONFIRM_MS = 800;
 const MAX_DOWNGRADES = 2;
+// A step down whose answer did not keep up may be tried again after this
+const STEP_DOWN_RETRY_MS = 60000;
 // The first upgrade poll comes soon after the start (a TorBox 4K is often ready at once), then every 10 s
 const UPGRADE_FIRST_MS = 5000;
 const UPGRADE_POLL_MS = 10000;
@@ -172,7 +176,6 @@ function splitOverride(): string {
 const releaseHeight = (q?: string) => (q === '2160p' ? 2160 : q === '1080p' ? 1080 : q === '720p' ? 720 : 0);
 const videoQuality = (w: number, h: number) =>
   w >= 3200 || h >= 1800 ? 2160 : w >= 1800 || h >= 1000 ? 1080 : w >= 1200 || h >= 700 ? 720 : w > 0 || h > 0 ? 480 : 0;
-const lowerCap = (q: number): QualityCap | null => (q >= 2160 ? 1080 : q >= 1080 ? 720 : null);
 
 function resolutionLabel(w: number, h: number): string {
   if (w >= 3200 || h >= 1800) return '4K';
@@ -217,11 +220,20 @@ export class PlayerEngine {
   private cap?: QualityCap;
   private triedCaps: QualityCap[] = [];
   private downgrades = 0;
+  private stepDownRetryAt = 0;
+  // Caps whose slow start resolve found nothing for this item: not asked again
+  private emptyCaps: QualityCap[] = [];
+  // Torrents slow start handovers left for this item (the last handover allows them again)
+  private handoverAvoid: string[] = [];
+  // The cap the item started with: a handover whose lowered cap found nothing goes back to it
+  private itemCap?: QualityCap;
   private upgraded = false;
   private lastSidegrade = 0;
   private busy = false;
   // Buffer health and the proactive sidegrade
   private health = new BufferMonitor();
+  // Last buffer verdict of the playing stream (null before its first sample)
+  private lastVerdict: BufferVerdict['state'] | null = null;
   private healthTimer: ReturnType<typeof setInterval>;
   private sidePoll = { next: 0, delay: PROACTIVE_POLL_MS };
   private pendingSide: StreamSource | null = null;
@@ -259,6 +271,8 @@ export class PlayerEngine {
   // Any source of this item showed frames (everPlayed is per source)
   private itemPlayed = false;
   private recoveries = 0;
+  // Session of the source in its last try (lastTry)
+  private lastTrySession = -1;
   private stallTimer?: Timer;
   private stallArmed = false;
   // The viewer's pause (0 = none), its keep-alive timer, and the last Play after a long pause
@@ -441,8 +455,11 @@ export class PlayerEngine {
 
   // ---- item: resolve the source ----
 
-  /** fresh: resolve (with avoid) even though a saved or given source exists, keeping the server's cached source. */
-  private async startItem(retry: { refresh?: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }) {
+  /**
+   * fresh: resolve (with avoid) even though a saved or given source exists, keeping the server's cached source.
+   * maxq, step, last: a slow start handover (handoverPlan); a step's cap becomes the item's once its answer plays well.
+   */
+  private async startItem(retry: { refresh?: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean; maxq?: QualityCap; step?: boolean; last?: boolean }) {
     this.cancelResolve();
     const startPos = retry.startAt ?? this.startAt;
     if (retry.switchTo) return this.openSource(retry.switchTo, startPos || 0, 'fresh');
@@ -502,8 +519,35 @@ export class PlayerEngine {
         console.info(`[restart] saved source ${h.slice(0, 8)} not reused (${a.reason || 'slow'}): resolving again`);
         if (this.avoid.indexOf(h) < 0) this.avoid = [...this.avoid, h];
       }
-      const r = await resolveSource(paramsOf(m, this.cap), ctrl.signal, { refresh: retry.refresh, avoid: this.avoid, t: start });
+      // The last handover leaves out the torrents earlier handovers left (one of them may have woken up since),
+      // not the one it replaces
+      const avoidFor = (all: boolean) => {
+        if (all) return this.avoid;
+        const earlier = this.handoverAvoid.slice(0, -1);
+        return this.avoid.filter(x => earlier.indexOf(x) < 0);
+      };
+      const resolveAt = (maxq: QualityCap | undefined, all: boolean) =>
+        resolveSource(paramsOf(m, maxq), ctrl.signal, { refresh: retry.refresh, avoid: avoidFor(all), t: start });
+      let stepped = !!retry.step;
+      const r = await resolveAt(retry.maxq ?? this.cap, !retry.last).catch(e => {
+        if (!retry.maxq || ctrl.signal.aborted || !(e instanceof StreamError) || e.code === 'offline' || e.status === 425) throw e;
+        // Nothing at 1080p for a 4K: back to the item's original cap
+        if (stepped) {
+          stepped = false;
+          this.emptyCaps.push(retry.maxq);
+          console.info(`[restart] nothing at ${retry.maxq}p (${e.message}): resolving at the original cap`);
+          this.cap = this.itemCap;
+          return resolveAt(this.itemCap, !retry.last);
+        }
+        if (retry.last) throw e;
+        // Nothing new at this resolution: a swarm an earlier handover left may have woken up
+        console.info(`[restart] nothing new at ${retry.maxq}p (${e.message}): resolving without the earlier handovers' avoids`);
+        return resolveAt(retry.maxq, false);
+      });
       if (ctrl.signal.aborted) return;
+      // The cap only follows a lower resolution that plays well (a starving answer still plays, uncapped)
+      if (stepped && keepsLowerCap(r.health)) this.cap = retry.maxq;
+      else if (stepped) console.info(`[restart] the ${retry.maxq}p answer does not keep up: the cap stays`);
       this.cancelResolve();
       this.openSource(sourceOf(r), start, r.cached ? 'cached' : 'fresh');
     } catch (e: any) {
@@ -710,20 +754,51 @@ export class PlayerEngine {
   /**
    * A torrent without a first frame SLOW_START_MS after it opened: a sidegrade that keeps up, else resolve
    * again without it (a TorBox or faster release) at the same position, instead of restarting the same
-   * swarm for minutes. TorBox sources keep the usual restarts.
+   * swarm for minutes; never above its resolution, a 4K at 1080p (handoverPlan). The last of the
+   * MAX_AUTO_REFRESH handovers resolves without the earlier ones' avoids; after it the source gets a last,
+   * longer window (lastTry). TorBox sources keep the usual restarts.
    */
   private async slowStart(session: number) {
     const src = this.source;
-    if (this.stale(session) || this.everPlayed || this.state.fatal || !src || src.debrid || this.autoRefreshes >= MAX_AUTO_REFRESH) return;
+    if (this.stale(session) || this.everPlayed || this.state.fatal || !src || src.debrid) return;
+    const quality = this.videoHeight || releaseHeight(src.quality) || this.cap || 0;
+    const plan = handoverPlan(quality, this.cap, this.autoRefreshes, MAX_AUTO_REFRESH, this.emptyCaps);
+    if (!plan) {
+      this.lastTry(session);
+      return;
+    }
     const pos = this.positionNow() || this.state.position;
     const h = this.current;
-    console.info(`[restart] no frame ${SLOW_START_MS / 1000} s after the start of ${h.slice(0, 8)}: trying another source`);
+    console.info(`[restart] no frame ${SLOW_START_MS / 1000} s after the start of ${h.slice(0, 8)}: trying another source` +
+      `${plan.maxq ? ` up to ${plan.maxq}p` : ''}${plan.last ? ' (last, earlier swarms allowed again)' : ''}`);
     this.slow.add(h);
-    if (await this.trySidegrade(this.videoHeight, 'restart')) return;
+    if (await this.trySidegrade(this.videoHeight, 'restart', plan.maxq)) {
+      if (plan.step) this.cap = plan.maxq;
+      return;
+    }
     if (this.stale(session) || this.everPlayed) return;
     this.autoRefreshes++;
     if (this.avoid.indexOf(h) < 0) this.avoid = [...this.avoid, h];
-    this.startItem({ fresh: true, startAt: pos });
+    this.handoverAvoid = [...this.handoverAvoid.filter(x => x !== h), h]; // last = the one replaced now
+    this.startItem({ fresh: true, startAt: pos, maxq: plan.maxq, step: plan.step, last: plan.last });
+  }
+
+  /**
+   * The handovers ran out: the source gets LAST_START_MS more for its first frame (30 s from its open),
+   * then the error (Retry). The stall watchdog waits meanwhile.
+   */
+  private lastTry(session: number) {
+    this.lastTrySession = session;
+    this.disarmStall();
+    this.pollTimers.push(setTimeout(() => {
+      if (this.stale(session) || this.everPlayed || this.state.fatal) return;
+      if (this.pausedAt) {
+        this.lastTry(session);
+        return;
+      }
+      this.disarmStall();
+      if (!this.sourceFailed(this.positionNow(), true)) this.set({ reconnecting: false, fatal: { key: 'player.connectionLost' } });
+    }, LAST_START_MS));
   }
 
   private videoHeight = 0;
@@ -859,6 +934,7 @@ export class PlayerEngine {
     this.everPlayed = false;
     this.recoveries = 0;
     this.health.reset();
+    this.lastVerdict = null;
     // A held sidegrade belongs to the stream it was meant to replace
     if (this.pendingSide) {
       releaseTorrents([this.pendingSide.hash.toLowerCase()]);
@@ -1039,6 +1115,8 @@ export class PlayerEngine {
 
   private armStall() {
     clearTimeout(this.stallTimer);
+    // The last try owns the restarts of a source that never showed a frame
+    if (this.lastTrySession === this.session && !this.everPlayed) return;
     this.stallArmed = true;
     // Right after a long pause a stalled stream has probably died meanwhile: restart it quickly
     const base = !this.hasPlayed ? FIRST_START_MS : Date.now() - this.resumedAt < 60000 ? RESUME_STALL_MS : STALL_MS;
@@ -1183,15 +1261,18 @@ export class PlayerEngine {
   }
 
   /** Asks for a faster source: `restart` switches at once (stalled or not started yet), `splice` seamlessly. */
-  private async trySidegrade(quality: number, mode: 'restart' | 'splice'): Promise<boolean> {
+  private async trySidegrade(quality: number, mode: 'restart' | 'splice', cap?: QualityCap, poll = false): Promise<boolean> {
     const src = this.source;
     if (!src || this.busy || this.splicing || Date.now() - this.lastSidegrade < SIDEGRADE_EVERY_MS) return false;
     const session = this.session;
     this.busy = true;
     let offer: StreamSource | null = null;
     try {
-      const up = await checkSidegrade(paramsOf(this.meta, this.cap), src.hash, quality || releaseHeight(src.quality), undefined,
-        { state: 'critical', avoid: Array.from(this.slow) });
+      // An early look (poll) reports the buffer verdict only when the buffer really drains
+      const v = this.lastVerdict;
+      const state = !poll ? 'critical' : v === 'draining' || v === 'critical' ? v : undefined;
+      const up = await checkSidegrade(paramsOf(this.meta, cap ?? this.cap), src.hash, quality || releaseHeight(src.quality), undefined,
+        { state, avoid: Array.from(this.slow) });
       if (!up || up.hash.toLowerCase() === src.hash.toLowerCase() || this.stale(session)) return false;
       this.lastSidegrade = Date.now();
       if (this.slow.has(up.hash.toLowerCase()) || !this.betterOffer(up)) {
@@ -1239,6 +1320,7 @@ export class PlayerEngine {
   }
 
   private onHealth(h: BufferVerdict) {
+    this.lastVerdict = h.state;
     const pending = this.pendingSide;
     if (pending) {
       if (h.healthyMs >= RECOVERED_MS) {
@@ -1315,7 +1397,7 @@ export class PlayerEngine {
   private stepDown(quality: number) {
     const src = this.source;
     const cap = lowerCap(quality || releaseHeight(src?.quality));
-    if (!src || !cap || this.busy || this.downgrades >= MAX_DOWNGRADES) return;
+    if (!src || !cap || this.busy || this.downgrades >= MAX_DOWNGRADES || Date.now() < this.stepDownRetryAt) return;
     if (this.triedCaps.indexOf(cap) >= 0 || (this.cap && cap > this.cap)) return;
     this.triedCaps.push(cap);
     const session = this.session;
@@ -1323,9 +1405,14 @@ export class PlayerEngine {
     resolveSource(paramsOf(this.meta, cap), undefined, { avoid: this.avoid })
       .then(r => {
         if (this.stale(session)) return;
+        // A lower quality that does not keep up either is no improvement: the cap stays (later
+        // sidegrades still find spares of the playing resolution) and the step down may run again later
+        if ((r.health && !r.health.keeps_up) || (r.hash.toLowerCase() === src.hash.toLowerCase() && r.index === src.index)) {
+          this.triedCaps = this.triedCaps.filter(c => c !== cap);
+          this.stepDownRetryAt = Date.now() + STEP_DOWN_RETRY_MS;
+          return;
+        }
         this.cap = cap;
-        if (r.health && !r.health.keeps_up) return;
-        if (r.hash.toLowerCase() === src.hash.toLowerCase() && r.index === src.index) return;
         this.downgrades++;
         this.switchTo(sourceOf(r), 'player.switchedHd', 'stepdown');
       })
@@ -1341,7 +1428,7 @@ export class PlayerEngine {
     const started = Date.now();
     const poll = async () => {
       if (this.stale(session) || Date.now() - started > SIDEGRADE_FOR_MS) return;
-      if ((this.positionNow() > 0 || !startAt) && await this.trySidegrade(this.videoHeight, this.everPlayed ? 'splice' : 'restart')) return;
+      if ((this.positionNow() > 0 || !startAt) && await this.trySidegrade(this.videoHeight, this.everPlayed ? 'splice' : 'restart', undefined, true)) return;
       if (!this.stale(session)) this.pollTimers.push(setTimeout(poll, SIDEGRADE_POLL_MS));
     };
     this.pollTimers.push(setTimeout(poll, SIDEGRADE_FIRST_MS));
@@ -1967,6 +2054,9 @@ export class PlayerEngine {
     this.given = undefined;
     this.autoRefreshes = 0;
     this.avoid = [];
+    this.emptyCaps = [];
+    this.handoverAvoid = [];
+    this.itemCap = this.cap;
     this.lengthRetries = 0;
     this.itemPlayed = false;
     // Each episode may switch up once

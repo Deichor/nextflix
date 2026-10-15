@@ -97,6 +97,7 @@ func (s *Service) debridHealth(ctx context.Context, hash string, index int, size
 	// Bytes the proxy had cached say nothing about the line (the proxy's CDN reads count it)
 	if !cached {
 		s.debrid.line.note(h.Rate, time.Now())
+		s.lineTorBox(hash, h.Rate) // the same home line (linerate.go)
 	}
 	if h.KeepsUp {
 		return h

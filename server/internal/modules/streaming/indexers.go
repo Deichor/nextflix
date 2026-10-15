@@ -520,13 +520,14 @@ func tsGatherJobs(ctx, bg context.Context, jobs []tsJob, fetch tsIndexerFetch, p
 // tsUHDMinSeeders). settled (the fast indexers answered and tsIndexerQuick passed, or
 // tsIndexerSettle passed) lowers a 4K bar to 1080p and up: 4K is preferred, but when the
 // fast majority has little of it the slow rest rarely has more, and a late one still
-// becomes an upgrade.
+// becomes an upgrade. With a known line the top resolution is 1080p when even a typical 4K
+// (tsRefMbps) needs more than it carries, and releases over the line do not count for it.
 func tsEnoughResults(raw []JackettResult, q tsResolveQuery, settled bool) bool {
 	want := 1080
 	switch {
 	case q.maxQ > 0:
 		want = q.maxQ
-	case q.hevc:
+	case q.hevc && !tsOverLine(int64(tsRefMbps[2160]*1e6/8), q.line):
 		want = 2160
 	}
 	floor := min(want, 1080)
@@ -535,7 +536,7 @@ func tsEnoughResults(raw []JackettResult, q tsResolveQuery, settled bool) bool {
 		if tsAvoided(c, q) || c.quality == 0 || (c.quality == 2160 && c.raw.Seeders < tsUHDMinSeeders) {
 			continue
 		}
-		if c.quality >= want {
+		if c.quality >= want && c.parts.Line == 0 {
 			top++
 		}
 		if c.quality >= floor {

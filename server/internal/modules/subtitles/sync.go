@@ -33,7 +33,8 @@ const (
 	syncByteBudget    = 800 << 20 // bytes the windows of one file may read
 	syncWindowExtra   = 28 << 20  // read around a window (TorBox proxy: first chunk, read-ahead)
 	syncWindowTimeout = 75 * time.Second
-	syncJobLimit      = 5 * time.Minute
+	syncLineWait      = 2 * time.Minute // how long the reads may wait for a stream's start (LineGate)
+	syncJobLimit      = 5*time.Minute + syncLineWait
 	syncRetryAfter    = 10 * time.Minute // a failed timing is not tried again before this
 	syncAlternatives  = 3                // other subtitles tried when one does not fit
 	syncReads         = 2                // files whose reference is read at the same time
@@ -44,6 +45,52 @@ var syncFirstWait = 2500 * time.Millisecond
 
 // The window reads wait this long, so they do not compete with the playback start (tests shorten it).
 var syncReadDelay = 20 * time.Second
+
+// LineGate keeps the window reads off the line while a stream starts (streaming implements it).
+type LineGate interface {
+	// WaitStartQuiet waits while a stream starts (the file's own too); false when ctx ended.
+	WaitStartQuiet(ctx context.Context, hash string) bool
+}
+
+type lineBudgetKey struct{}
+
+// lineBudget is how long the reads of one timing job may still wait in the LineGate, together.
+type lineBudget struct {
+	mu   sync.Mutex
+	left time.Duration
+}
+
+// withLineBudget gives a timing job its shared wait (syncLineWait), so seeks that start new
+// streams cannot make it run out of time.
+func (y *syncer) withLineBudget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lineBudgetKey{}, &lineBudget{left: y.lineWait})
+}
+
+// waitLine waits in the LineGate before a window read of hash, at most what is left of the
+// job's budget; after that the reads go on without waiting. False when ctx ended.
+func (y *syncer) waitLine(ctx context.Context, hash string) bool {
+	g := y.svc.cfg.LineGate
+	if g == nil {
+		return ctx.Err() == nil
+	}
+	b, _ := ctx.Value(lineBudgetKey{}).(*lineBudget)
+	if b == nil {
+		b = &lineBudget{left: y.lineWait}
+	}
+	b.mu.Lock()
+	left := b.left
+	b.mu.Unlock()
+	if left > 0 {
+		wctx, cancel := context.WithTimeout(ctx, left)
+		start := time.Now()
+		g.WaitStartQuiet(wctx, hash)
+		cancel()
+		b.mu.Lock()
+		b.left -= time.Since(start)
+		b.mu.Unlock()
+	}
+	return ctx.Err() == nil
+}
 
 // Sync states (X-Subtitle-Sync, logs).
 const (
@@ -132,6 +179,7 @@ type syncer struct {
 	deciding sync.Map
 
 	refitDelay, refitGap time.Duration
+	lineWait             time.Duration // the LineGate wait of one job (syncLineWait; tests shorten it)
 }
 
 func newSyncer(svc *Service) *syncer {
@@ -139,7 +187,7 @@ func newSyncer(svc *Service) *syncer {
 		refs: map[string]*syncRefState{}, metas: map[string]*syncMeta{}, failed: map[string]time.Time{},
 		lists: map[string][]Sub{}, probes: map[string]mediaProbe{}, holes: map[string]*holeState{}, titles: map[string]aiMeta{},
 		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{}, early: map[string]bool{},
-		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap}
+		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap, lineWait: syncLineWait}
 	y.onGrow = y.scheduleRefit
 	return y
 }
@@ -226,6 +274,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 	}
 	call := y.svc.flights.start("sync|"+key, func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
+		ctx = y.withLineBudget(ctx)
 		defer cancel()
 		start := time.Now()
 		err := y.run(ctx, inner, hash, index, base)
@@ -745,7 +794,7 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 		}
 		starts := windowStarts(probe.Duration, syncWindowLen, r.MaxWindows)
 		for _, at := range starts {
-			if w, err := y.readWindow(ctx, url, probe, at); err == nil {
+			if w, err := y.readWindow(ctx, hash, url, probe, at); err == nil {
 				r.Windows = append(r.Windows, w)
 			} else if ctx.Err() != nil {
 				return syncRef{}, ctx.Err()
@@ -781,7 +830,7 @@ func (y *syncer) addWindows(ctx context.Context, hash string, index int, starts 
 		if len(r.Windows) >= r.windowCap() {
 			break
 		}
-		w, err := y.readWindow(ctx, url, r.Probe, at)
+		w, err := y.readWindow(ctx, hash, url, r.Probe, at)
 		if err != nil {
 			if ctx.Err() != nil {
 				break
@@ -815,7 +864,11 @@ func (y *syncer) saveRef(fk string, st *syncRefState, r syncRef) {
 	}
 }
 
-func (y *syncer) readWindow(ctx context.Context, url string, p mediaProbe, at float64) (refWindow, error) {
+// readWindow reads one reference window of the file of hash, after a stream's start.
+func (y *syncer) readWindow(ctx context.Context, hash, url string, p mediaProbe, at float64) (refWindow, error) {
+	if !y.waitLine(ctx, hash) {
+		return refWindow{}, ctx.Err()
+	}
 	wctx, cancel := context.WithTimeout(ctx, syncWindowTimeout)
 	defer cancel()
 	return y.read(wctx, url, p, at, syncWindowLen)

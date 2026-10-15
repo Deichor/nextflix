@@ -405,8 +405,9 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 	y.early[fk] = true
 	y.mu.Unlock()
 	time.Sleep(syncReadDelay) // not during the playback start
-	ctx, cancel := context.WithTimeout(context.Background(), liveEarlyWindows*syncWindowTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), liveEarlyWindows*syncWindowTimeout+syncLineWait)
 	defer cancel()
+	ctx = y.withLineBudget(ctx)
 	st, release := y.refState(fk)
 	defer release()
 	var r syncRef
@@ -443,6 +444,9 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 	}
 	var got []refWindow
 	for i := range liveEarlyWindows {
+		if !y.waitLine(ctx, hash) {
+			break
+		}
 		wctx, wcancel := context.WithTimeout(ctx, syncWindowTimeout)
 		w, err := y.readSubs(wctx, url, r.Probe, at+float64(i)*syncWindowLen, syncWindowLen)
 		wcancel()
@@ -649,6 +653,7 @@ func (y *syncer) refitFile(f *liveFile) {
 	defer func() { <-y.liveSem }()
 	ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
 	defer cancel()
+	ctx = y.withLineBudget(ctx)
 	ref := y.liveRef(ctx, f.hash, f.index)
 	for _, s := range subs {
 		if m := y.meta(s.key); m != nil && !m.Live {

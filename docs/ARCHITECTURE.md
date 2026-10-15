@@ -359,7 +359,8 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    (`tsGatherJobs`, the reason is logged with the result count): every source it waits for answered (and the names
    lookup's queries did too); the fast ones answered (or 1.2 s passed) and the results already hold 3 usable,
    title-matched candidates of the top wanted resolution (2160p for HEVC clients without a cap, else 1080p or the cap;
-   a 4K needs 3 seeders); the fast ones answered and 1.2 s passed, or 1.5 s passed, and there are 3 of 1080p or more
+   a 4K needs 3 seeders; with a known home line, see Line below, only releases within it count, and the top is
+   1080p when even a typical 4K, 14 Mbit/s, is over it); the fast ones answered and 1.2 s passed, or 1.5 s passed, and there are 3 of 1080p or more
    (any mix of 1080p and 4K: 4K is preferred, not required, and a late one still becomes an upgrade); 3.5 s passed
    (longer only while nothing at all arrived). Ranking waits for the other names only when the title alone found
    fewer than 5 usable results. Slow indexers (1337x through FlareSolverr, ~15 s; any indexer whose
@@ -428,6 +429,23 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
      or the duration check. The languages found are the answer's `format.subs`.
    - Bitrate (`tsRateScore`): 6·log2 of size / runtime against the tier's typical one (2160p 14, 1080p 5, 720p 2.5,
      480p 1.2 Mbit/s), from -12 to +6; above 3× it falls again; season packs 0.
+   - Line (`tsLinePart`, `linerate.go`): swarm health is judged per torrent, so a TV (hevc, no cap) on a 28 Mbit
+     line (≈ 3.2 MB/s, test stack, no TorBox) got a 23.9 GB 2160p needing 3.5 MB/s: it played 10-22 s of preloaded
+     data, stalled, stepped down and resolved again (first stable picture after 42-69 s). Now a release whose need
+     (size / runtime) is over 0.75 of the known line gets -100 - 60·log2(need / that share): it ranks after the ones
+     that fit, and when none fits the lower need ranks first (logged `"<name>" needs 3.50 MB/s, the line does ~3.20
+     MB/s: ranked after the ones that fit`). Unknown line: 0. The line is what TorrServer downloads in all
+     (`download_speed` summed over its torrent list), polled every 2 s while a measurement reads TorrServer or a
+     stream plays. A poll counts while a measurement pulls without limit and two torrents download or one from ≥ 8
+     active peers, or while a playing torrent downloads ≥ 1.25× its file's bitrate (TorrServer fills its read-ahead
+     at line speed; once it is full the stream pulls just its bitrate: 0.6 MB/s from 10 peers says nothing about
+     the line). The median of 5 such polls in a row is an observation (an average of 3 rose to 3.71 MB/s on a line
+     shaped to 28 Mbit: TorrServer's speed counts bursts), and TorBox measurement reads are observations too (same
+     line, one per file). The highest observation is the estimate, but it is only used (and stored in
+     `line_rate`, so the first resolve after a restart knows it) once an observation of another torrent set (or
+     TorBox file) reached 0.8 of it, or one set counted for 30 s in a row (a first playback teaches it). It halves over 4 days without newer observations as high (a slower line is
+     learned). A TorBox-cached release or upgrade whose need fits what TorBox delivered in the last 10 minutes gets
+     no line part and is never refused for the line.
    - Seeders (`tsSeedScore`): 6·log2(1+s) up to 30, then only 2·log2 of the multiple; under 5 seeders -20. A big swarm
      no longer outweighs a better format of a well-seeded release, and a format-preferred one with almost no seeders
      does not block a healthy one. The format parts together (≤ 28) stay below a resolution step (45), so they only
@@ -439,7 +457,8 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    with its info hash, and for a name still cut off, a fuller name of the same size (within 2 %) that continues it
    word by word (`tsContinues`; hashes must not differ), so hashless cut-off copies ("... WEB-DL DD" with 1867
    seeders) are scored with their real tags and merge into their torrent. A check that finds a hash another check
-   already owns stops. A movie name whose first word after the title is a year more than 1 off the title's year is
+   already owns stops; the hash a check finds behind a hashless listing is remembered, so once the player avoids
+   that torrent the listing ranks last too (Detour: "[YTS AM]" took a check slot after its YTS twin was avoided). A movie name whose first word after the title is a year more than 1 off the title's year is
    another film (remake, namesake: "Night.Of.The.Living.Dead.2026...", the 1990 remake for the 1968 film) and is
    rejected; names without a year pass. Every path ranks through `tsScore` (resolve, TorBox boost, late results,
    upgrade / sidegrade searches, spares, `subalt`), so the year must be right: with a `tmdb_id` it is TMDB's release
@@ -480,7 +499,8 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
      25 s more) once the warm-up shows peers or data, instead of being killed and started over; one that failed early is
      retried once on a warm swarm. There is one ffprobe per file at a time: later callers (the player's probe, play)
      wait for the running one and only start their own when it fails. Background work passes the quiet gate before
-     it registers its probe, so a player never joins a probe that is put off. A verified file beats any file of unknown
+     it registers its probe, so a player never joins a probe that is put off; once resolve answered, a running probe
+     of a candidate that was not picked stops while a stream starts (see 6). A verified file beats any file of unknown
      duration. Without a runtime the header is
      still probed in the background, so the player's probe is a cache hit. The probe also gives the real resolution:
      the candidate's quality follows the video size (height ≥ 1600 or width ≥ 3200 → 2160p, ≥ 900 / ≥ 1800 → 1080p,
@@ -556,10 +576,13 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    hard wall that also cuts a grace short) it answers with a good one if there is one, else with the most playable
    source (`tsChoosePlayable`) among the finished checks and the snapshots of running ones (each check reports one as
    soon as its file is picked, then after every poll): alive (active peers or data, not dead) over a dead or silent
-   swarm, fit for the client (not unfit), measured (a verdict, or ≥ 2 s
+   swarm, fit for the client (not unfit, nor unprobed with a name it gets re-encoded by: an x265 for a browser
+   only wins when no H.264 delivers, and a good one only answers once nothing else is left), within the known line (need ≤ 0.75 of it, the line as it stands now:
+   checks that download fast raise it) over one that needs more, measured (a verdict, or ≥ 2 s
    of samples) over unmeasured (a 4K below 0.3 never beats a ≤ 1080p with a higher ratio), a verified duration over
    an unknown one (a failed probe, or one still running that the player would wait for) unless the verified one
-   delivers < 0.5 of its need and the other clearly more, a clearly better rate / need ratio (≥ 0.1 higher and
+   delivers < 0.5 of its need and the other clearly more, of two over the line the lower need (checks share the
+   line, so their ratios say little), a clearly better rate / need ratio (≥ 0.1 higher and
    ≥ 1.5×), the lower need (bitrate) when the ratios are close,
    then active peers, connected seeders and Jackett seeders. When nothing is measured yet at the cap (or only ones
    below 0.1 while other checks still lack a measurement) it waits up to 4 s more (`tsResolveCapExtra`) and answers as
@@ -573,14 +596,28 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    torrents, 2 at a time, a starving one gives way to the next after 2 rounds (each round re-measures a fresh part of
    the file; at most 2 background measurements and 3 titles at once). The first that keeps up with a verified duration
    replaces the cached source; `GET /api/torrent-stream/upgrade` offers it. Without a watcher (cached or saved source)
-   that endpoint starts a search restricted to higher resolutions, at most every 10 minutes per title. Up to 2 live
+   that endpoint starts a search restricted to higher resolutions, at most every 10 minutes per title. A higher
+   resolution over the known line is not kept running, warmed, offered or cached (logged `upgrade "<name>" needs …,
+   the line does ~…: not warmed` / `not offered`): it would only stall later. Late results, spares, caps fallbacks and
+   sidegrade / upgrade searches rank and pick the same way (`findSource`, `runChecks`). Up to 2 live
    alternatives of the picked resolution stay as spares; every other candidate is dropped from TorrServer at once.
 6. A starting stream gets the line (`quiet.go`): once resolve has answered, its background work (checks that keep
    running, upgrade warm-ups and upgrade searches, spare measurements, late candidate checks, sidegrade searches, their
-   probes) waits while another torrent starts: the player's `probe` of it runs, or its play stream is younger than 30 s
-   (every seek is a new stream; up to 90 s while the stream has not sent its first bytes, e.g. an MP4 whose `moov`
-   still comes from the end of the file), logged as
-   `warm: deferring … while … starts` / `resuming … after …`. A measurement interrupted before its verdict starts over
+   probes) waits while another torrent starts: the player's `probe` of it runs, or its play stream is not past its
+   start. A fixed 30 s was too short on a 28 Mbit line (a borderline 4K start stalled ~20 s after the background
+   reads came back), so the start now ends once the stream is healthy: `play.go` counts the bytes it delivers, and
+   it is past its start when it is 30 s of media ahead of real time (video copied; bytes at the rate of what the
+   stream carries: the video plus the copied audio track it plays, from ffprobe or Matroska's `BPS` tag, else the
+   file's bitrate), or has flowed 60 s without a 5 s gap and (rate known) kept up. A torrent's restarts and seeks
+   before that are one start (`tsPlayRun`), capped at 120 s from its first stream; after that cap its restarts and
+   seeks (the stall watchdog's too) join it without a new start, so a stream that keeps stalling never holds rescue
+   work back for good. Only a seek after a healthy stream is a new start. Logged as `warm: deferring … while … starts` /
+   `resuming … after …` and `warm: <hash> is past its start after 34s: 31 s ahead` (or `flows steadily`, `the start
+   took too long`). Candidates that were not picked stop their duration probe while a stream starts and probe again
+   (25 s) afterwards (on a 28 Mbit line a non-picked 1080p probe took 2.1-2.9 of 3.3 MB/s from the pick). While a
+   player waits for a new resolve of the title (a step down with `maxq`, a slow-start handover with `avoid`, any
+   capability variant), the earlier resolve's background work waits too (`while a player resolves the title again`),
+   so the new checks get the line. A measurement interrupted before its verdict starts over
    afterwards; one that already has a verdict ends with it. Work on a TorBox file does not wait for a starting TorBox
    stream (CDN reads take nothing from a swarm; GoT S01E01: the 4K upgrade warm-up waited 48 s behind the 1080p TorBox
    stream it was to replace), only for a starting torrent. Checks before the answer (Play, prefetch on the detail
@@ -937,7 +974,16 @@ source is linked through the source cache when it starts.
   `critical=1` (under 6 s of buffer) also allows a lower resolution. When no spare is left to measure, it starts a
   background search (`searchSidegrade`, at most every 3 minutes per title): the title is resolved again capped at the
   playing resolution, without the playing torrent and the avoided ones; its checks are background work (quiet gate).
-  Only a pick that finished good (keeps up, fitting length) becomes a spare, never the search's cap answer ("best so
+  It never starts before the playing torrent's stream sent its first bytes a minute ago (a `critical=1` during the
+  start buffer once ran a whole resolve next to the player's own step down), while a player waits for a resolve of
+  the title (step down, `avoid`), or without a known playing resolution (it would search uncapped); logged as
+  `warm: deferring the sidegrade search of <key>: <why>` (at most every 30 s). A source measured below 0.5 of its
+  need waives the minute (first bytes still count). While the title's source starves (measured below 0.5 and its
+  stream not healthy yet, or a `draining=1` / `critical=1` within 30 s) the search's checks and the spare measurements do not wait for a
+  starting stream (`rescueCtx`; logged `… does not wait for a starting stream: its source starves`): that start may
+  be the failing one (Night of the Living Dead, 28 Mbit: the pick at x0.11 held the check of a YTS that kept up for
+  55 s, until the start cap). Upgrades, late checks, other titles and subtitle reads still wait, and the search
+  ends once a player resolves the title. Only a pick that finished good (keeps up, fitting length) becomes a spare, never the search's cap answer ("best so
   far"); a later poll offers it under the rules above. `upgrade` likewise offers only a finished, measured
   higher resolution that keeps up with a fitting length.
 - TorrServer's `TorrentDisconnectTimeout` is 45 s: only the safety net for torrents Nextflix lost track of.
@@ -971,20 +1017,38 @@ A finished upgrade is logged (`[nextflix] upgraded to <hash> (TorBox) 26 s after
 in 4.1 s, lead 20 s)`) and the release of the replaced torrent carries it as `why=` (`player: dropping …` in the
 server log), so a slow switch shows its cause (late offer, slow preparation, overtaken / keyframe / seek restarts).
 When playback stalls (two stalls within 60 s or one over 8 s) it first asks `sidegrade` for a faster source of the
-same quality (at most every 2 minutes; a source resolve measured as starving is checked 8 s after it is ready, then
-every 15 s during the first 3 minutes, before the first frame too; a switch before the first frame starts at the
-resume position), else it re-resolves with `maxq=1080`, then `720`. A probe that reports `duration_mismatch`
-re-resolves with the file avoided, at most twice. While a sidegrade loads in the hidden slot (below), a stall does not
-step down: the step down waits for that preparation and runs only if it fails. A TorBox sidegrade that keeps up but
-could not be lined up seamlessly is switched to with a restart (loading screen) instead of stepping down.
+same quality (at most every 2 minutes; a source resolve measured as starving (`keeps_up: false` with a measured rate below need, not a measurement
+still running) is checked 8 s after it is ready, then every 15 s during the first 3 minutes, before the first frame
+too, sending `draining` / `critical` only when the buffer verdict says so; a switch before the first frame starts at the
+resume position), else it re-resolves with `maxq=1080`, then `720` (before the first frame the slow start below
+steps down instead). The cap is set only when the lower source is switched to: an answer that does not keep up
+leaves it (later sidegrades still see spares of the playing resolution) and the step down may run again after 60 s.
+A probe that reports `duration_mismatch` re-resolves with the file avoided, at most twice. While a sidegrade loads
+in the hidden slot (below), a stall does not step down: the step down waits for that preparation and runs only if it
+fails. A sidegrade that keeps up but could not be lined up seamlessly (TorBox, or no keyframe far enough ahead after
+3 tries) is switched to with a restart (loading screen) instead of stepping down; a keyframe failure never marks the
+source as slow.
 
 Slow start (web and TV): a torrent source (not TorBox) that shows no frame 12 s after it opened (`SLOW_START_MS`, the
 probe included) hands over at once: a sidegrade that keeps up, else the title is resolved again with that torrent in
 `avoid` (no `refresh`, so a TorBox source in the source cache is kept; a cached source that is in `avoid` is not
-answered, resolve searches again). The first start used to wait 30 s per restart of the same swarm (30 + 60 + 90 s).
+answered, resolve searches again). A handover never asks above the starving source (`handoverPlan`): a source
+above 1080p steps down to `maxq=1080` (the sidegrade too); a 1080p / 720p swarm is replaced at most at its own
+resolution, so a TV without `maxq` never lands on a 4K. A swarm slow to wake is no proof the line can't carry the
+file (Detour 1945: a starving YTS 1080p needing 0.28 MB/s was handed to a 720p needing 1.84 MB/s from 2-3
+seeders), and the stall step down still runs once it plays. A 4K's lowered cap is kept only when its answer plays
+well (keeps up, unmeasured, or measuring at its need); a starving answer still plays, uncapped. A 1080p ask for a
+4K that finds nothing resolves at the item's original cap (1080p is not asked again for the item). Up to 3
+handovers per item (`MAX_AUTO_REFRESH`); the last one resolves without the torrents earlier handovers left, still
+avoiding the one it replaces (as does any handover whose resolution has nothing new), so the server's fresh checks can pick an earlier swarm that
+woke up meanwhile (Detour: the first YTS answered its probe 13 s after it was left). Its source gets 30 s for a
+first frame (`LAST_START_MS` after the slow start), then the error with Retry. Worst case: 3 × 12 s + 30 s = 66 s
+plus 3 resolves; it used to be 3 handovers and then 30 + 60 + 90 s restarts of the same swarm (4-5 minutes).
+Live (28 Mbit, 4K first): handovers at +20.8, +63.4, +88.7 s and the first frame at 122.7 s before this.
 
 Recovery chain (web `TorrentStreamPlayer.tsx`; the TV engine has the same restarts, chain and pause keep-alive,
-without the kept frame): a stream that breaks before its first frame (an
+without the kept frame): a torrent without a first frame goes through the slow start above (its stall watchdog
+waits during the last try); a stream that breaks before its first frame (an
 element error: the server dropped or cut it) is restarted silently at the same position once per torrent; a stream
 that broke after playing (element error, ended well before the file end, stall watchdog, a paused element left without
 media) restarts silently up to 3 times. After that the source is replaced: the title is resolved again (`refresh`, a
@@ -1041,7 +1105,8 @@ seek, restart, switch or a pause resets it) the growth of the buffered end per s
 While draining or critical it asks `sidegrade` at once, then every 5 s backing off to 10 s (a 204 just means the
 server is still measuring its spares), never while another preparation runs, at most every 2 minutes after an offer
 (the server's own limit) and at most one source switch (any kind) per 60 s. An offer is prepared in the hidden slot
-like any switch, but its lead stays inside the visible buffer (`min(8 s, max(3 s, buffered ahead − 2 s))`), and with
+like any switch, but its lead stays inside the visible buffer (`min(8 s, max(3 s, buffered ahead − 2 s))`; a retry
+after a keyframe came out too close adds the lead used so far on top, past the buffer if need be), and with
 less than 13 s buffered 2 s from `t0` count as ready, so it takes over at a frame boundary before the visible stream
 runs dry; no toast, no overlay. A sidegrade still loading is dropped (its torrent released) once the visible stream
 was healthy again for 15 s. Torrents the player left for being slow (any sidegrade or step down away from them) and
@@ -1273,7 +1338,12 @@ that change at splits), simplified:
   from the dialogue channel (`pan=mono|c0=FC` for 5.1, else a downmix) at 8 kHz by a simple energy detector on 10 ms
   frames (`sync_vad.go`). Every window read goes through a local byte cap (1.25 × its share of the file + 16 MB):
   a subtitle read in a stretch without lines would otherwise continue to the end of the file. The reads start 20 s
-  after the first request (not during the playback start) and one window at a time.
+  after the first request and one window at a time, and every window (also the early own-track windows) first waits
+  while any stream starts, the file's own included (the quiet gate's start rule; subtitles owns the small
+  `LineGate` interface, streaming implements it, `main.go` wires it; logged `warm: deferring subtitle timing read of
+  …`): up to 12 windows of 60 s (~800 MB) took the line from a starting stream. The waits of one job share 2 minutes
+  (after that its reads go on without waiting, so seeks cannot make it run out of time; the job limit grew by
+  those 2 minutes), so timing just starts later; embedded-track and moviehash reads a player waits for never wait.
 - Alignment (`sync_align.go`): the signals are line starts (a cue's start; speech after a pause), each reference start
   spread to ±0.6 s, not ffsubsync's speech on/off: many subtitles chain cues back to back, and fan subtitles start
   lines up to a second early or late. For each ratio (1, 25/23.976, 24/23.976, 25/24 and back) every offset within

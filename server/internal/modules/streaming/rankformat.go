@@ -25,10 +25,11 @@ type tsScoreParts struct {
 	Lang    float64 // audio language hints of the name: dub-only markers, MULTi / Dual Audio (see lang.go)
 	Subs    float64 // the profile language's subtitle inside: name hints, then the check (see subs.go)
 	Penalty float64 // remux bitrate, Dolby Vision without base layer, undecodable video
+	Line    float64 // the file needs more than the home line carries (see tsLinePart)
 }
 
 func (p tsScoreParts) total() float64 {
-	return p.Match + p.Res + p.Source + p.Codec + p.HDR + p.Audio + p.Lang + p.Subs + p.Rate + p.Seeds + p.Penalty
+	return p.Match + p.Res + p.Source + p.Codec + p.HDR + p.Audio + p.Lang + p.Subs + p.Rate + p.Seeds + p.Penalty + p.Line
 }
 
 func (p tsScoreParts) String() string {
@@ -37,7 +38,7 @@ func (p tsScoreParts) String() string {
 		name string
 		v    float64
 	}{{"match", p.Match}, {"res", p.Res}, {"src", p.Source}, {"codec", p.Codec}, {"hdr", p.HDR}, {"audio", p.Audio},
-		{"lang", p.Lang}, {"subs", p.Subs}, {"rate", p.Rate}, {"seeds", p.Seeds}, {"penalty", p.Penalty}} {
+		{"lang", p.Lang}, {"subs", p.Subs}, {"rate", p.Rate}, {"seeds", p.Seeds}, {"penalty", p.Penalty}, {"line", p.Line}} {
 		if f.v != 0 {
 			fmt.Fprintf(&b, "%s %+.1f ", f.name, f.v)
 		}

@@ -65,6 +65,16 @@ type tsHealth struct {
 	cached bool
 }
 
+// MarshalJSON adds "measuring" for a health before its verdict, so players don't take a few
+// seconds of samples for a starving swarm.
+func (h tsHealth) MarshalJSON() ([]byte, error) {
+	type plain tsHealth
+	return json.Marshal(struct {
+		plain
+		Measuring bool `json:"measuring,omitempty"`
+	}{plain(h), h.partial})
+}
+
 func (h *tsHealth) ratio() float64 {
 	if h == nil || h.Need <= 0 {
 		return 0
@@ -147,12 +157,12 @@ func tsChoose(results []*tsResolveResult, finished []bool) (best int, final bool
 	fit := results
 	unfit := false
 	for _, r := range results {
-		unfit = unfit || (r != nil && r.unfit != "")
+		unfit = unfit || (r != nil && !r.fits())
 	}
 	if unfit {
 		fit = make([]*tsResolveResult, len(results))
 		for i, r := range results {
-			if r != nil && r.unfit == "" {
+			if r != nil && r.fits() {
 				fit[i] = r
 			}
 		}
@@ -260,9 +270,12 @@ func tsCapClearly(a, b float64) bool { return a-b >= 0.1 && a >= 1.5*b }
 // tsChoosePlayable picks, when nothing keeps up at the answer cap, the source most likely to
 // play: finished checks and snapshots of running ones alike (rs, best rank first). In order:
 // alive (active peers or data, not dead) over a dead or silent swarm, fit for the client
-// (not unfit; of two that break its caps the good one, then the lower resolution), measured over unmeasured (a 4K below 0.3 never beats a <= 1080p with a higher
-// ratio), a verified duration (unless it delivers under tsCapVerifiedMin and the other one
-// clearly more), a clearly better rate / need ratio, the lower need (bitrate) when the ratios
+// (not unfit, nor unprobed with a name it gets re-encoded by; of two that break its caps the
+// good one, then the lower resolution), within
+// the line over one that needs more than it carries (overLine), measured over unmeasured (a
+// 4K below 0.3 never beats a <= 1080p with a higher ratio), a verified duration (unless it
+// delivers under tsCapVerifiedMin and the other one clearly more), of two over the line the
+// lower need, a clearly better rate / need ratio, the lower need (bitrate) when the ratios
 // are close, then more active peers, connected seeders, Jackett seeders and the rank. -1 when
 // rs is empty.
 func tsChoosePlayable(rs []*tsResolveResult) int {
@@ -273,8 +286,15 @@ func tsChoosePlayable(rs []*tsResolveResult) int {
 		if (a.unfit == "") != (b.unfit == "") {
 			return a.unfit == ""
 		}
+		// Not probed yet: an x265 name for a browser is re-encoded, and its probe is slow
+		if a.nameUnfit != b.nameUnfit {
+			return b.nameUnfit
+		}
 		if a.overCaps && b.overCaps && (tsCheaperFallback(a, b) || tsCheaperFallback(b, a)) {
 			return tsCheaperFallback(a, b)
+		}
+		if a.overLine != b.overLine {
+			return b.overLine
 		}
 		if a.measured() != b.measured() {
 			return a.measured()
@@ -299,10 +319,15 @@ func tsChoosePlayable(rs []*tsResolveResult) int {
 				return va
 			}
 		}
+		na, nb := tsResultNeed(a), tsResultNeed(b)
+		// Nothing fits the line: the lowest need stalls least (the ratios of checks that
+		// share the line say little)
+		if a.overLine && na > 0 && nb > 0 && na != nb {
+			return na < nb
+		}
 		if tsCapClearly(ra, rb) || tsCapClearly(rb, ra) {
 			return ra > rb
 		}
-		na, nb := tsResultNeed(a), tsResultNeed(b)
 		if na > 0 && nb > 0 && (float64(na) < 0.8*float64(nb) || float64(nb) < 0.8*float64(na)) {
 			return na < nb
 		}
@@ -663,6 +688,11 @@ func (s *Service) measureOnce(ctx context.Context, hash string, index int, offse
 	// A read of TorrServer (also a TorBox file while TorBox is paused) is judged by TorrServer's
 	// own stat; a TorBox proxy read has no swarm
 	swarm := strings.HasPrefix(src, s.torrServerURL()+"/")
+	if swarm {
+		// It pulls without limit: what TorrServer downloads meanwhile shows the line (linerate.go)
+		s.line.reads.Add(1)
+		defer s.line.reads.Add(-1)
+	}
 	stat := func(ctx context.Context, out *tsSwarmStat) error {
 		sctx, cancel := context.WithTimeout(ctx, tsWarmPoll)
 		defer cancel()
@@ -796,6 +826,7 @@ func (s *Service) torrentStat(ctx context.Context, hash string, out any) error {
 
 // torrServerStat asks TorrServer itself, also about a debrid source.
 func (s *Service) torrServerStat(ctx context.Context, hash string, out any) error {
+	s.lineStart() // something downloads: the line sampler runs
 	statURL := s.torrServerURL() + "/stream?" + url.Values{"link": {hash}, "stat": {""}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statURL, nil)
 	if err != nil {

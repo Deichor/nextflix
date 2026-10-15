@@ -183,3 +183,17 @@ func TestResolveCachedTorBoxSourceSkipsSwarmCheck(t *testing.T) {
 		t.Fatalf("answer %s debrid %v, searched %v, TorrServer asked %d times", got.Hash, got.Debrid, searched, hits.Load())
 	}
 }
+
+// The player appends the torrents it leaves to ?avoid=: the newest tsAvoidMax count.
+func TestAvoidKeepsTheNewest(t *testing.T) {
+	hs := []string{hx('1'), hx('2'), hx('3'), hx('4'), hx('5'), hx('6'), hx('7')}
+	q, ok := parseResolveQuery(func() *gin.Context {
+		gin.SetMode(gin.TestMode)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("GET", "/?type=movie&title=Detour&avoid="+strings.Join(hs, ",")+",bad", nil)
+		return c
+	}())
+	if !ok || len(q.avoid) != tsAvoidMax || q.avoid[0] != hx('3') || q.avoid[tsAvoidMax-1] != hx('7') {
+		t.Fatalf("avoid %v", q.avoid)
+	}
+}

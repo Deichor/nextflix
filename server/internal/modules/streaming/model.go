@@ -53,6 +53,16 @@ type StreamSource struct {
 
 func (StreamSource) TableName() string { return "stream_sources" }
 
+// LineRate is what the home line was seen to download at least (single row, see linerate.go).
+type LineRate struct {
+	ID         uint  `gorm:"primaryKey"`
+	Rate       int64 // bytes/s
+	ObservedAt time.Time
+	UpdatedAt  time.Time
+}
+
+func (LineRate) TableName() string { return "line_rate" }
+
 func Models() []any {
-	return []any{&IndexerSettings{}, &StreamSource{}, &DebridSettings{}}
+	return []any{&IndexerSettings{}, &StreamSource{}, &DebridSettings{}, &LineRate{}}
 }

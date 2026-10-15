@@ -47,6 +47,9 @@ type Service struct {
 	home         *tsHome    // home releases of films in cinemas (homerelease.go)
 	speech       SpeechTap  // subtitle timing listens to the play streams (nil = off)
 	cues         CueTap     // and reads the file's own text track along (nil = off)
+	line         tsLine     // what the home line downloads at least (linerate.go)
+	// Indexer listing (tsListingKey) -> info hash a check found behind its link
+	listingHashes sync.Map
 
 	probeMu sync.Mutex
 	probing map[string]*tsProbeCall // "hash:index" -> running ffprobe
@@ -82,6 +85,9 @@ type Service struct {
 	starting    map[string]int       // hash -> running player probes (its stream is about to start)
 	playEndAt   map[string]time.Time // hash -> end of its last play stream (priority.go)
 	lastUse     map[string]time.Time // hash -> last request for it
+	// Starts of the play streams (quiet.go)
+	playStreams map[string][]*tsPlayStream // hash -> its running play streams, oldest first
+	playRuns    map[string]*tsPlayRun      // hash -> the start of its playback
 	// Stream guard (guard.go): no drop touches a torrent a player uses
 	streamEnd   map[string]time.Time            // hash -> end of its last play stream (kept streamKeep)
 	seeking     map[string]int                  // hash -> running seekpoint requests
@@ -108,6 +114,8 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		playing:       map[string]int{},
 		playStart:     map[string]time.Time{},
 		playFlowing:   map[string]bool{},
+		playStreams:   map[string][]*tsPlayStream{},
+		playRuns:      map[string]*tsPlayRun{},
 		starting:      map[string]int{},
 		probing:       map[string]*tsProbeCall{},
 		lastUse:       map[string]time.Time{},

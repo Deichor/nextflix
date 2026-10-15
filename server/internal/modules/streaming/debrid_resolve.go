@@ -63,6 +63,7 @@ func (s *Service) debridCandidates(ctx context.Context, q tsResolveQuery, raw []
 			// Nothing fits the caps by name: keep the fallback order (name fit, then cheapest)
 			cands = s.fallbackCandidates(q, raw, nil, items)
 		} else {
+			s.debridLineFit(all, cached, q)
 			tsDebridBoost(all, cached)
 			tsSortCandidates(all, q)
 			cands = tsTopCandidates(all, q)
@@ -77,6 +78,18 @@ func (s *Service) debridCandidates(ctx context.Context, q tsResolveQuery, raw []
 	log.Printf("resolve %q: torbox has %d of %d candidates cached (%s), %d of the checked ones", q.title, len(items), len(hashes),
 		time.Since(started).Round(time.Millisecond), n)
 	return cands, items
+}
+
+// debridLineFit drops the line part (linerate.go) of the cached candidates TorBox lately
+// delivered enough for: they play from its CDN, which showed the line carries them.
+func (s *Service) debridLineFit(cands []tsCandidate, cached func(tsCandidate) bool, q tsResolveQuery) {
+	for i := range cands {
+		c := &cands[i]
+		if c.parts.Line < 0 && cached(*c) && s.torBoxCarries(tsCandidateNeed(*c, q)) {
+			c.score -= c.parts.Line
+			c.parts.Line = 0
+		}
+	}
 }
 
 // tsDebridBoost raises every cached candidate by the same amount within its resolution so the

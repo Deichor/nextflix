@@ -36,8 +36,8 @@ func (h handler) play(c *gin.Context) {
 	}
 	h.s.adoptSaved(hash) // a saved TorBox source after a restart plays from TorBox
 	// A playing torrent is never dropped by the warm-up bookkeeping
-	h.s.playBegin(hash)
-	defer h.s.playEnd(hash)
+	stream := h.s.playBegin(hash)
+	defer h.s.playDone(hash, stream)
 	audio, _ := strconv.Atoi(c.DefaultQuery("audio", "0"))
 	if start < 0 {
 		start = 0
@@ -56,6 +56,7 @@ func (h handler) play(c *gin.Context) {
 		smallProbe = p.indexedContainer()
 	}
 	aplan := probe.audioPlan(audio, playAudioCodecs(c, track))
+	stream.setRate(probe, plan, aplan, audio, track)
 	args := streamArgs(h.s.fileURL(hash, index), start, audio, plan, aplan, smallProbe, track)
 	if c.Query("pace") == "1" {
 		args = pacedInput(args)
@@ -104,7 +105,7 @@ func (h handler) play(c *gin.Context) {
 	}
 
 	// The request context is cancelled when the viewer closes or seeks, which stops ffmpeg
-	out := &tsFirstWrite{w: c.Writer, first: func() { h.s.playFlows(hash) }}
+	out := &tsFirstWrite{w: c.Writer, first: func() { h.s.playFlows(hash) }, stream: stream}
 	var stderr strings.Builder
 	if err := tsRunPlay(c.Request.Context(), args, taps, out, &stderr, label); err != nil && c.Request.Context().Err() == nil {
 		log.Printf("torrent stream ffmpeg error (%s:%d): %v %s", hash, index, err, strings.TrimSpace(stderr.String()))
@@ -140,21 +141,30 @@ func tsTranscodeSlot(ctx context.Context, wait time.Duration) (release func(), o
 	return nil, false
 }
 
-// tsFirstWrite calls first once, on the first bytes written to w.
+// tsFirstWrite calls first once, on the first bytes written to w, and counts the bytes of
+// stream (optional) for the quiet gate.
 type tsFirstWrite struct {
-	w     io.Writer
-	first func()
-	wrote bool
+	w      io.Writer
+	first  func()
+	wrote  bool
+	stream *tsPlayStream
 }
 
 func (f *tsFirstWrite) Write(b []byte) (int, error) {
+	if f.stream != nil {
+		f.stream.writing(time.Now())
+	}
 	if len(b) > 0 && !f.wrote {
 		f.wrote = true
 		if f.first != nil {
 			f.first()
 		}
 	}
-	return f.w.Write(b)
+	n, err := f.w.Write(b)
+	if f.stream != nil && n > 0 {
+		f.stream.wrote(n, time.Now())
+	}
+	return n, err
 }
 
 // streamInput is the input side of a play stream up to -i. The seek point answer runs the same

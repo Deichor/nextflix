@@ -72,11 +72,11 @@ import {
   Availability,
   StreamApiError,
 } from '@/features/watch/api';
-import { SwitchPrep, matchAudioTrack, type PreparedStream, type SwitchHost, type SwitchKind, type SwitchResult, type VideoInfo } from '@/features/watch/seamlessSwitch';
+import { KEYFRAME_TOO_CLOSE, SwitchPrep, matchAudioTrack, type PreparedStream, type SwitchHost, type SwitchKind, type SwitchResult, type VideoInfo } from '@/features/watch/seamlessSwitch';
 import { lengthsMatch, timeScale } from '@/features/watch/switchLength';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch/bufferHealth';
 import { useScrollLock } from '@/features/watch/useScrollLock';
-import { healthRatio, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
+import { healthRatio, healthStarving, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
 import { savePosition } from '@/features/watch/progressSave';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
@@ -156,8 +156,10 @@ const STALL_MS = 12000;
 // The first start may wait for peers, so it gets more time
 const FIRST_START_MS = 30000;
 // A torrent without a first frame this long after it opened hands over to a faster source
-// (sidegrade, else a fresh resolve without it) instead of restarting the same swarm
+// (sidegrade, else a fresh resolve without it, a 4K at 1080p) instead of restarting the same swarm
 const SLOW_START_MS = 12000;
+// After the last handover a torrent without a frame gets this long more (30 s from its open), then the error (Retry)
+const LAST_START_MS = 18000;
 const MAX_RECOVERIES = 3;
 // A failed source is resolved again (without it) this many times per item before an error shows
 const MAX_AUTO_REFRESH = 3;
@@ -183,6 +185,8 @@ const LONG_STALL_MS = 8000;
 const STALL_WINDOW_MS = 60000;
 const MIN_STALL_MS = 1500;
 const MAX_DOWNGRADES = 2;
+// A step down whose answer did not keep up may be tried again after this
+const STEP_DOWN_RETRY_MS = 60000;
 const TOAST_MS = 4000;
 // Upgrade (Netflix-like start low, switch up): below 4K the server is asked UPGRADE_FIRST_MS
 // after the start (a TorBox 4K is often ready at once), then every UPGRADE_POLL_MS during the
@@ -245,6 +249,29 @@ const videoQuality = (w: number, h: number) => (w >= 3200 || h >= 1800 ? 2160 : 
 
 // The cap below a source of this quality, or null when it is already 720p or lower
 const lowerCap = (quality: number): QualityCap | null => (quality >= 2160 ? 1080 : quality >= 1080 ? 720 : null);
+
+// How a torrent without a first frame is replaced: the n-th handover (`handovers` before it), null once
+// MAX_AUTO_REFRESH ran. It never asks above the starving source: a 4K steps down to 1080p (step; unless
+// 1080p found nothing, `empty`), a 1080p or 720p swarm is replaced at most at its own resolution (a slow
+// swarm is no proof the line can't carry it; the stall step down still runs once it plays). The last one
+// resolves without the torrents earlier handovers left: one of them may have woken up since.
+interface HandoverPlan { maxq?: QualityCap; step: boolean; last: boolean }
+const handoverPlan = (quality: number, cap: QualityCap | undefined, handovers: number, empty: QualityCap[]): HandoverPlan | null => {
+  if (handovers >= MAX_AUTO_REFRESH) return null;
+  const last = handovers === MAX_AUTO_REFRESH - 1;
+  if (quality > 1080 && (!cap || cap > 1080) && !empty.includes(1080)) return { maxq: 1080, step: true, last };
+  const own: QualityCap | undefined = quality > 1080 || quality <= 0 ? undefined : quality >= 1080 ? 1080 : 720;
+  return { maxq: own && (!cap || own < cap) ? own : cap, step: false, last };
+};
+
+// Whether the answer of a handover resolve at a lowered cap may keep that cap: it keeps up, or is
+// unmeasured, or still measures at its need or above. A starving answer plays but leaves the cap.
+const keepsLowerCap = (h?: { rate: number; need: number; keeps_up?: boolean; dead?: boolean } | null): boolean =>
+  !h || !!h.keeps_up || (!h.dead && h.need > 0 && h.rate >= h.need);
+
+// The sidegrade state a buffer verdict reports: only a buffer that really drains says so
+const drainState = (v: BufferVerdict['state'] | null): 'draining' | 'critical' | undefined =>
+  v === 'draining' || v === 'critical' ? v : undefined;
 
 // `on` with hysteresis: turns true after it held onMs, false after it was off for offMs (no flicker
 // of the loading overlay between quick restarts)
@@ -395,7 +422,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // Set right before bumping `attempt`: resolve again skipping caches (or play switchTo), resuming at startAt.
   // wrongLength: the last file did not have the title's length. fresh: resolve (with avoid) even though
   // a saved or given source exists, without dropping the server's cached source.
-  const retryRef = useRef<{ refresh: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean }>({ refresh: false });
+  // maxq, step, last: a slow start handover (handoverPlan); a step's cap becomes the session's once its answer plays well
+  const retryRef = useRef<{ refresh: boolean; fresh?: boolean; startAt?: number; switchTo?: StreamSource; wrongLength?: boolean; maxq?: QualityCap; step?: boolean; last?: boolean }>({ refresh: false });
   // The server has no internet (or does not answer): the offline screen, left with
   // offlineRetryRef (the same source, where it stopped) once the connection is back
   const [net, setNet] = useState<Exclude<NetState, 'online'> | null>(null);
@@ -408,11 +436,18 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const [frameShown, setFrameShown] = useState(false);
   // Torrents of the wrong length for the current item; the server never picks them again
   const avoidRef = useRef<string[]>([]);
+  // Caps whose slow start resolve found nothing for the current item: not asked again
+  const emptyCapsRef = useRef<QualityCap[]>([]);
+  // Torrents slow start handovers left for the current item (the last handover allows them again)
+  const handoverAvoidRef = useRef<string[]>([]);
+  // The cap the item started with: a handover whose lowered cap found nothing goes back to it
+  const itemCapRef = useRef<QualityCap | undefined>(undefined);
   const lengthRetriesRef = useRef(0);
   // Adaptive quality, for the whole session: the cap only ever goes down
   const capRef = useRef<QualityCap | undefined>(undefined);
   const triedCapsRef = useRef<QualityCap[]>([]);
   const downgradesRef = useRef(0);
+  const stepDownRetryAtRef = useRef(0);
   const downgradeCtrl = useRef<AbortController | null>(null);
   const upgradedRef = useRef(false);
   // An upgrade whose preparation failed is tried once more after UPGRADE_RETRY_MS; the reason
@@ -450,6 +485,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   useEffect(() => {
     autoRefreshesRef.current = 0;
     avoidRef.current = [];
+    emptyCapsRef.current = [];
+    handoverAvoidRef.current = [];
+    itemCapRef.current = capRef.current;
     lengthRetriesRef.current = 0;
     pendingStepDownRef.current = null;
     // A new item starts where it was asked to; the last one's position no longer counts
@@ -518,7 +556,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           const a = await reuseSource(paramsOf(m, capRef.current), saved, start, ctrl.signal);
           if (cancelled) return;
           if (!a || a.action === 'play') {
-            const src = a?.source ? { ...sourceOf(a.source), starving: a.source.health?.keeps_up === false } : saved;
+            const src = a?.source ? { ...sourceOf(a.source), starving: healthStarving(a.source.health) } : saved;
             setResolved({ source: src, startAt: start, origin });
             setPhase('ready');
             return;
@@ -527,20 +565,37 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           console.info(`[nextflix] saved source ${h.slice(0, 8)} not reused (${a.reason || 'slow'}): resolving again`);
           if (!avoidRef.current.includes(h)) avoidRef.current = [...avoidRef.current, h];
         }
-        const r = await resolveSource({
-          type: m.media_type,
-          title: m.title,
-          tmdb_id: m.tmdb_id,
-          year: m.year,
-          season: m.season,
-          episode: m.episode,
-          runtime: m.runtime,
-          maxq: capRef.current,
-          cinema: m.cinema,
-        }, ctrl.signal, { refresh: retry.refresh, avoid: avoidRef.current });
+        // The last handover leaves out the torrents earlier handovers left (one of them may have woken up since),
+        // not the one it replaces
+        const avoidFor = (all: boolean) => {
+          if (all) return avoidRef.current;
+          const earlier = handoverAvoidRef.current.slice(0, -1);
+          return avoidRef.current.filter(x => !earlier.includes(x));
+        };
+        const resolveAt = (maxq: QualityCap | undefined, all: boolean) =>
+          resolveSource(paramsOf(m, maxq), ctrl.signal, { refresh: retry.refresh, avoid: avoidFor(all) });
+        let stepped = !!retry.step;
+        const r = await resolveAt(retry.maxq ?? capRef.current, !retry.last).catch(e => {
+          if (!retry.maxq || cancelled || !(e instanceof StreamApiError) || e.code === 'offline' || e.status === 425) throw e;
+          // Nothing at 1080p for a 4K: back to the item's original cap
+          if (stepped) {
+            stepped = false;
+            emptyCapsRef.current.push(retry.maxq);
+            console.info(`[nextflix] nothing at ${retry.maxq}p (${e.message}): resolving at the original cap`);
+            capRef.current = itemCapRef.current;
+            return resolveAt(itemCapRef.current, !retry.last);
+          }
+          if (retry.last) throw e;
+          // Nothing new at this resolution: a swarm an earlier handover left may have woken up
+          console.info(`[nextflix] nothing new at ${retry.maxq}p (${e.message}): resolving without the earlier handovers' avoids`);
+          return resolveAt(retry.maxq, false);
+        });
         if (cancelled) return;
+        // The cap only follows a lower resolution that plays well (a starving answer still plays, uncapped)
+        if (stepped && keepsLowerCap(r.health)) capRef.current = retry.maxq;
+        else if (stepped) console.info(`[nextflix] the ${retry.maxq}p answer does not keep up: the cap stays`);
         setResolved({
-          source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: r.health?.keeps_up === false, ratio: healthRatio(r.health), debrid: r.debrid, cinema: r.cinema },
+          source: { hash: r.hash, index: r.index, magnet: r.magnet, file_name: r.file_name, torrent_title: r.torrent_title, quality: r.quality, hdr: r.hdr, starving: healthStarving(r.health), ratio: healthRatio(r.health), debrid: r.debrid, cinema: r.cinema },
           startAt: start,
           origin: r.cached ? 'cached' : 'fresh',
         });
@@ -735,19 +790,24 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const stepDown = useCallback((quality: number) => {
     const m = item.meta;
     const cap = lowerCap(quality || releaseHeight(playingSource?.quality));
-    if (!m || !cap || downgradeCtrl.current || downgradesRef.current >= MAX_DOWNGRADES) return;
+    if (!m || !cap || downgradeCtrl.current || downgradesRef.current >= MAX_DOWNGRADES || Date.now() < stepDownRetryAtRef.current) return;
     if (triedCapsRef.current.includes(cap) || (capRef.current && cap > capRef.current)) return;
     triedCapsRef.current.push(cap);
     const ctrl = new AbortController();
     downgradeCtrl.current = ctrl;
     const current = playingSource;
-    resolveSource({ type: m.media_type, title: m.title, tmdb_id: m.tmdb_id, year: m.year, season: m.season, episode: m.episode, runtime: m.runtime, maxq: cap, cinema: m.cinema }, ctrl.signal, { avoid: avoidRef.current })
+    resolveSource(paramsOf(m, cap), ctrl.signal, { avoid: avoidRef.current })
       .then(r => {
         if (ctrl.signal.aborted) return;
+        // A lower quality that does not keep up either is no improvement: the cap stays (later
+        // sidegrades still find spares of the playing resolution) and the step down may run again later
+        if ((r.health && !r.health.keeps_up) ||
+            (current && r.hash.toLowerCase() === current.hash.toLowerCase() && r.index === current.index)) {
+          triedCapsRef.current = triedCapsRef.current.filter(c => c !== cap);
+          stepDownRetryAtRef.current = Date.now() + STEP_DOWN_RETRY_MS;
+          return;
+        }
         capRef.current = cap;
-        // A lower quality that does not keep up either is no improvement
-        if (r.health && !r.health.keeps_up) return;
-        if (current && r.hash.toLowerCase() === current.hash.toLowerCase() && r.index === current.index) return;
         downgradesRef.current++;
         hardSwitch(sourceOf(r));
         setToast('player.switchedHd');
@@ -760,10 +820,15 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   }, [item.meta, playingSource, hardSwitch]);
 
   // Swap a starving source for a spare that keeps up now, at the same position. True when it switched.
-  // proactive: asked while the buffer drains (playback still smooth), never next to another preparation
+  // proactive: asked while the buffer drains (playback still smooth), never next to another preparation.
+  // poll: an early look for a source measured as starving; it reports the buffer verdict only when the buffer
+  // really drains (the server searches harder for a draining player), else no state.
   const lastSidegradeRef = useRef(0);
+  // Last buffer verdict of the playing stream (null before its first sample)
+  const verdictRef = useRef<BufferVerdict['state'] | null>(null);
+  useEffect(() => { verdictRef.current = null; }, [playingSource]);
   const sidegradeBusy = useRef(false);
-  const trySidegrade = useCallback(async (quality: number, proactive = false): Promise<boolean> => {
+  const trySidegrade = useCallback(async (quality: number, proactive = false, cap?: QualityCap, poll = false): Promise<boolean> => {
     const m = metaRef.current;
     // By item, not by meta object: filled-in details replace the object for the same episode
     const key = itemKeyRef.current;
@@ -773,8 +838,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     if (proactive && (coreSwitchRef.current?.busy() || now - lastSwitchRef.current < SWITCH_EVERY_MS)) return false;
     sidegradeBusy.current = true;
     try {
-      const up = await checkSidegrade(paramsOf(m, capRef.current), src.hash, quality || releaseHeight(src.quality), undefined,
-        { state: proactive ? 'draining' : 'critical', avoid: Array.from(slowRef.current) });
+      const up = await checkSidegrade(paramsOf(m, cap ?? capRef.current), src.hash, quality || releaseHeight(src.quality), undefined,
+        { state: proactive ? 'draining' : poll ? drainState(verdictRef.current) : 'critical', avoid: Array.from(slowRef.current) });
       if (!up || up.hash.toLowerCase() === src.hash.toLowerCase() || itemKeyRef.current !== key) return false;
       lastSidegradeRef.current = Date.now();
       const next = sourceOf(up);
@@ -791,11 +856,12 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
         slowRef.current.add(src.hash.toLowerCase());
         return true;
       }
-      // A TorBox source that keeps up but could not be lined up seamlessly: switch with the loading
-      // screen rather than stepping down a resolution
-      if (res === 'abandoned' && next.debrid && up.health?.keeps_up !== false && itemKeyRef.current === key &&
-          coreSwitchRef.current?.failure() !== 'dropped by the player') {
-        console.info(`[nextflix] sidegrade to ${nextHash.slice(0, 8)} (TorBox) switches with a restart: ${coreSwitchRef.current?.failure() || 'unknown'}`);
+      // A source that keeps up but could not be lined up seamlessly (TorBox, or keyframes too far
+      // apart for the visible buffer): switch with the loading screen rather than dropping it
+      const failure = coreSwitchRef.current?.failure() || '';
+      if (res === 'abandoned' && (next.debrid || failure === KEYFRAME_TOO_CLOSE) && up.health?.keeps_up !== false &&
+          itemKeyRef.current === key && failure !== 'dropped by the player') {
+        console.info(`[nextflix] sidegrade to ${nextHash.slice(0, 8)}${next.debrid ? ' (TorBox)' : ''} switches with a restart: ${failure || 'unknown'}`);
         pendingStepDownRef.current = null;
         slowRef.current.add(src.hash.toLowerCase());
         hardSwitch(next);
@@ -804,8 +870,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       }
       if (res !== 'unavailable' || itemKeyRef.current !== key) {
         releaseUnused(nextHash, res === 'abandoned' ? `sidegrade dropped: ${coreSwitchRef.current?.failure() || 'unknown'}` : undefined);
-        // Not ready in time (or broken): not offered again this session
-        if (res === 'abandoned') slowRef.current.add(nextHash);
+        // Not ready in time (or broken): not offered again this session; the keyframe layout says nothing about the source
+        if (res === 'abandoned' && failure !== KEYFRAME_TOO_CLOSE) slowRef.current.add(nextHash);
         // The stall that waited for this preparation steps down now
         if (deferred !== null && res !== 'busy' && itemKeyRef.current === key) stepDown(deferred);
         return false;
@@ -832,19 +898,33 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
 
   // A torrent showed no frame SLOW_START_MS after it opened (a swarm far below the bitrate): a
   // sidegrade that keeps up, else resolve again without it at the same position (a TorBox or
-  // faster release). False when out of tries (the usual restarts go on).
+  // faster release), as handoverPlan says. False once the handovers ran out (PlayerCore gives the
+  // source a last, longer window).
   const slowStart = useCallback((position: number) => {
     const m = metaRef.current;
     const key = itemKeyRef.current;
     const src = playingSource;
-    if (!m || !src || src.debrid || autoRefreshesRef.current >= MAX_AUTO_REFRESH) return false;
+    if (!m || !src || src.debrid) return false;
+    const quality = qualityRef.current || releaseHeight(src.quality) || capRef.current || 0;
+    const plan = handoverPlan(quality, capRef.current, autoRefreshesRef.current, emptyCapsRef.current);
+    if (!plan) return false;
     const h = src.hash.toLowerCase();
     slowRef.current.add(h);
-    trySidegrade(qualityRef.current).then(switched => {
-      if (switched || itemKeyRef.current !== key) return;
+    trySidegrade(qualityRef.current, false, plan.maxq).then(switched => {
+      if (itemKeyRef.current !== key) return;
+      if (switched) {
+        if (plan.step) capRef.current = plan.maxq;
+        return;
+      }
       autoRefreshesRef.current++;
       if (!avoidRef.current.includes(h)) avoidRef.current = [...avoidRef.current, h];
-      retryRef.current = { refresh: false, fresh: true, startAt: position > 0 ? position : resolvedRef.current.startAt };
+      handoverAvoidRef.current = [...handoverAvoidRef.current.filter(x => x !== h), h]; // last = the one replaced now
+      console.info(`[nextflix] handover of ${h.slice(0, 8)} (${quality || '?'}p)${plan.maxq ? ` up to ${plan.maxq}p` : ''}` +
+        `${plan.last ? ' (last, earlier swarms allowed again)' : ''}`);
+      retryRef.current = {
+        refresh: false, fresh: true, startAt: position > 0 ? position : resolvedRef.current.startAt,
+        maxq: plan.maxq, step: plan.step, last: plan.last,
+      };
       setAttempt(a => a + 1);
     });
     return true;
@@ -854,6 +934,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   const proactiveRef = useRef({ next: 0, delay: PROACTIVE_POLL_MS });
   const onBufferHealth = useCallback((h: BufferVerdict) => {
     const core = coreSwitchRef.current;
+    verdictRef.current = h.state;
     if (h.healthyMs >= RECOVERED_MS) {
       pendingStepDownRef.current = null;
       // Recovered: a sidegrade that is still loading is not needed any more
@@ -883,7 +964,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const poll = async () => {
       if (stopped || Date.now() - started > SIDEGRADE_FOR_MS) return;
       // Also before the first frame: a switch then starts at the resume position (hardSwitch)
-      if (await trySidegrade(qualityRef.current)) return;
+      if (await trySidegrade(qualityRef.current, false, undefined, true)) return;
       if (!stopped) timer = setTimeout(poll, SIDEGRADE_POLL_MS);
     };
     timer = setTimeout(poll, SIDEGRADE_FIRST_MS);
@@ -1796,10 +1877,12 @@ function PlayerCore({
   useEffect(() => () => { if (longStallTimer.current) clearTimeout(longStallTimer.current); }, []);
 
   // A torrent that shows no frame SLOW_START_MS after it opened hands over at once (sidegrade or a
-  // fresh resolve) instead of restarting the same swarm (30 s, 60 s, 90 s: minutes of a spinner).
+  // fresh resolve, stepping down when needed) instead of restarting the same swarm (30 s, 60 s, 90 s:
+  // minutes of a spinner). With nothing left to hand over to, it gets a last, bounded try (lastTry).
   // TorBox sources start at line speed and keep the usual restarts.
   const onSlowStartRef = useRef(onSlowStart);
   useSyncRef(onSlowStartRef, onSlowStart);
+  const [lastTry, setLastTry] = useState(false);
   useEffect(() => {
     if (!source || source.debrid || !onSlowStartRef.current) return;
     const timer = setTimeout(() => {
@@ -1807,7 +1890,9 @@ function PlayerCore({
       console.info(`[nextflix] restart: no frame ${SLOW_START_MS / 1000} s after the start: trying another source`);
       freezeFrameRef.current?.(videoRef.current);
       onRecoveringRef.current?.();
-      if (!onSlowStartRef.current?.(stateRef.current.position)) onRecoveredRef.current?.();
+      if (onSlowStartRef.current?.(stateRef.current.position)) return;
+      onRecoveredRef.current?.();
+      setLastTry(true);
     }, SLOW_START_MS);
     return () => clearTimeout(timer);
     // PlayerCore is keyed by its source: counted once from its mount
@@ -2306,8 +2391,32 @@ function PlayerCore({
     onRecoveredRef.current?.();
   }, []);
 
+  // The handovers ran out: a source without a frame gets LAST_START_MS more, then the error (Retry);
+  // the stall watchdog waits meanwhile (armStall)
+  const lastTryRef = useRef(lastTry);
+  useSyncRef(lastTryRef, lastTry);
+  useEffect(() => {
+    if (!lastTry || error) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const wait = () => {
+      timer = setTimeout(() => {
+        if (everPlayed.current) return;
+        if (viewerPausedAtRef.current > 0) {
+          wait();
+          return;
+        }
+        clearStall();
+        if (!sourceFailed('no frame after the last handover')) failChain('player.connectionLost');
+      }, LAST_START_MS);
+    };
+    clearStall();
+    wait();
+    return () => clearTimeout(timer);
+  }, [lastTry, error, clearStall, sourceFailed, failChain]);
+
   const armStall = useCallback(() => {
     clearStall();
+    if (lastTryRef.current && !everPlayed.current) return;
     if (stallResetTimer.current) clearTimeout(stallResetTimer.current);
     // A stall right after a long pause, or on a stream that delivered nothing for a while (the
     // browser played what it had cached), is a stream that died: restart it quickly

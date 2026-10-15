@@ -13,6 +13,9 @@ export type SwitchKind = 'upgrade' | 'sidegrade' | 'subtitles';
 // busy: another preparation runs; unavailable: the visible stream can't hand over seamlessly;
 // cancelled: the player dropped it (the visible stream recovered)
 export type SwitchResult = 'switched' | 'abandoned' | 'cancelled' | 'busy' | 'unavailable';
+// Why a preparation was dropped when no keyframe of the new file lay far enough ahead: the source
+// itself may be fine (the player switches with a restart instead)
+export const KEYFRAME_TOO_CLOSE = 'keyframe too close to the visible position';
 
 // Video stream as the probe reports it; direct = sent untouched to this browser
 export interface VideoInfo {
@@ -269,13 +272,15 @@ export class SwitchPrep {
     const el = this.host.hidden();
     if (this.done || !info || !v || !el) return;
     const gen = ++this.gen;
-    let lead = this.lead + this.farLead;
+    let lead = this.lead;
     if (this.kind === 'sidegrade') {
       // The visible stream may be draining: switch inside what it still has, with a smaller ready margin
       const ahead = this.host.bufferedAhead();
       lead = Math.min(lead, Math.max(MIN_LEAD_S, ahead - SIDE_MARGIN_S));
       this.readyAhead = ahead < LEAD_S + READY_AHEAD_S ? READY_MIN_S : READY_AHEAD_S;
     }
+    // A keyframe that came out too close moves the start further ahead, past the visible buffer if need be
+    lead += this.farLead;
     const visiblePos = () => this.host.offset() + v.currentTime;
     // In the new file's time (the same moment when the lengths differ a little)
     const target = (visiblePos() + lead) * this.scale;
@@ -325,7 +330,7 @@ export class SwitchPrep {
     // (or behind) the visible position, so start again further ahead
     if (offset < (visiblePos() + lead / 2) * this.scale) {
       if (++this.farTries > 2) {
-        this.abandon('abandoned', 'keyframe too close to the visible position');
+        this.abandon('abandoned', KEYFRAME_TOO_CLOSE);
         return;
       }
       this.farLead += lead;

@@ -173,11 +173,15 @@ func parseResolveQuery(c *gin.Context) (tsResolveQuery, bool) {
 	if mq, _ := strconv.Atoi(c.Query("maxq")); mq == 1080 || mq == 720 {
 		q.maxQ = mq
 	}
-	// Torrents the player found broken or of the wrong length
+	// Torrents the player found broken or of the wrong length; it appends the newest, so the
+	// last tsAvoidMax count
 	for _, h := range strings.Split(c.Query("avoid"), ",") {
-		if h = strings.ToLower(strings.TrimSpace(h)); tsHashPattern.MatchString(h) && len(q.avoid) < tsAvoidMax {
+		if h = strings.ToLower(strings.TrimSpace(h)); tsHashPattern.MatchString(h) {
 			q.avoid = append(q.avoid, h)
 		}
+	}
+	if n := len(q.avoid); n > tsAvoidMax {
+		q.avoid = q.avoid[n-tsAvoidMax:]
 	}
 	if q.mediaType != "movie" && q.mediaType != "tv" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "type must be movie or tv"})

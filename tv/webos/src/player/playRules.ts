@@ -1,5 +1,7 @@
 // Pure decisions of the player engine (engine.ts), tested in playRules.test.mjs.
 
+import type { QualityCap } from '../lib/stream';
+
 /** A start this close to the end counts as the end (seconds) */
 export const END_ZONE_S = 10;
 
@@ -52,4 +54,42 @@ export function progressToSave(x: SaveInput): number | null {
   if (x.duration <= 0 || (!x.finished && !x.itemPlayed)) return null;
   const pos = x.finished ? x.duration : x.exact ? Math.min(x.duration, x.position) : x.offset;
   return pos < 10 ? null : pos;
+}
+
+/** The cap below a source of this resolution, or null at 720p and lower (the server's lowest maxq) */
+export function lowerCap(q: number): QualityCap | null {
+  return q >= 2160 ? 1080 : q >= 1080 ? 720 : null;
+}
+
+/** How a torrent without a first frame is replaced (handoverPlan) */
+export interface HandoverPlan {
+  /** maxq of the resolve; undefined: uncapped */
+  maxq?: QualityCap;
+  /** maxq steps a 4K source down to 1080p (the item keeps that cap when its answer plays well) */
+  step: boolean;
+  /** The last handover: it resolves without the torrents earlier handovers left (one of them may have woken up) */
+  last: boolean;
+}
+
+/**
+ * The n-th handover (`handovers` before it) of a torrent without a first frame, null once `max` ran. It never
+ * asks above the starving source: a 4K steps down to 1080p (unless 1080p found nothing, `empty`), a 1080p or
+ * 720p swarm is replaced at most at its own resolution (a slow swarm is no proof the line can't carry it; the
+ * stall step down still runs once it plays). An unknown resolution keeps the cap.
+ */
+export function handoverPlan(quality: number, cap: QualityCap | undefined, handovers: number, max: number, empty: QualityCap[] = []): HandoverPlan | null {
+  if (handovers >= max) return null;
+  const last = handovers === max - 1;
+  if (quality > 1080 && (!cap || cap > 1080) && empty.indexOf(1080) < 0) return { maxq: 1080, step: true, last };
+  const own: QualityCap | undefined = quality > 1080 || quality <= 0 ? undefined : quality >= 1080 ? 1080 : 720;
+  return { maxq: own && (!cap || own < cap) ? own : cap, step: false, last };
+}
+
+/**
+ * Whether the answer of a handover resolve at a lowered cap may keep that cap: it keeps up, or is unmeasured,
+ * or still measures at its need or above. A starving answer plays but leaves the cap where it was.
+ */
+export function keepsLowerCap(h?: { rate: number; need: number; keeps_up?: boolean; dead?: boolean } | null): boolean {
+  if (!h || h.keeps_up) return true;
+  return !h.dead && h.need > 0 && h.rate >= h.need;
 }

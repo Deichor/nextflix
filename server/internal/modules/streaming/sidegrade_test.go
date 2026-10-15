@@ -46,6 +46,7 @@ func TestSidegradeDrainingKeepsFastSource(t *testing.T) {
 	slow := measured(hx('b'), "1080p", 0.51, 1.02)
 	slow.DurationVerified, slow.durationChecked = true, true
 	var calls atomic.Int32
+	playedLong(t, s, hx('a'))
 	s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
 		calls.Add(1)
 		_, cancel := context.WithCancel(ctx)
@@ -102,6 +103,7 @@ func TestSidegradeSearchesWhenNoSpareLeft(t *testing.T) {
 	var asked atomic.Value
 	found := result(hx('d'), "1080p", 5) // clearly faster than the source (x3)
 	found.DurationVerified, found.durationChecked = true, true
+	playedLong(t, s, hx('a'))
 	s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
 		calls.Add(1)
 		asked.Store(q)
@@ -161,5 +163,150 @@ func TestSpareWindowFollowsDrain(t *testing.T) {
 	s.warmTick(now)
 	if got := rec.list(); got != "b" {
 		t.Fatalf("dropped %q, want only the old spare", got)
+	}
+}
+
+// playedLong marks hash as a stream that has played for two minutes.
+func playedLong(t *testing.T, s *Service, hash string) {
+	t.Helper()
+	s.playBegin(hash)
+	t.Cleanup(func() { s.playEnd(hash) })
+	s.warmMu.Lock()
+	s.playRuns[hash].firstAt = time.Now().Add(-2 * time.Minute)
+	s.warmMu.Unlock()
+}
+
+// The player's critical=1 during its start buffer starts no search: not before the stream
+// played a minute, not while a player resolves the title (its step down), never without the
+// playing resolution (the search is capped at it).
+func TestSidegradeSearchWaitsForPlayback(t *testing.T) {
+	s, _, key, w := drainService(t)
+	var calls atomic.Int32
+	s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
+		calls.Add(1)
+		return nil, nil, errNoSource
+	}
+	q := tsResolveQuery{mediaType: "movie", title: "Carnival of Souls", year: 1962}
+	crit := tsSideOpts{draining: true, critical: true}
+	searched := func() bool {
+		time.Sleep(30 * time.Millisecond)
+		s.warmMu.Lock()
+		defer s.warmMu.Unlock()
+		return calls.Load() > 0 || w.searching || !w.searchAt.IsZero()
+	}
+	s.playBegin(hx('a')) // no bytes yet
+	defer s.playEnd(hx('a'))
+	s.sidegradeFor(key, q, hx('a'), 1080, crit)
+	if searched() {
+		t.Fatal("searched during the stream's start")
+	}
+	s.playFlows(hx('a'))
+	s.sidegradeFor(key, q, hx('a'), 1080, crit)
+	if searched() {
+		t.Fatal("searched right after the first bytes")
+	}
+	s.warmMu.Lock()
+	s.playRuns[hx('a')].firstAt = time.Now().Add(-2 * time.Minute)
+	s.warmMu.Unlock()
+	// A player waits for the step down (maxq=720, another capability variant of the title)
+	step := q
+	step.maxQ = 720
+	f, _ := s.flights.start(tsResolveKey(step), func() (*tsResolveResult, error) {
+		time.Sleep(200 * time.Millisecond)
+		return nil, errNoSource
+	})
+	f.waiters.Add(1)
+	s.sidegradeFor(key, q, hx('a'), 1080, crit)
+	if searched() {
+		t.Fatal("searched while a player resolves the title")
+	}
+	<-f.done
+	f.waiters.Add(-1)
+	s.sidegradeFor(key, q, hx('a'), 0, crit)
+	if searched() {
+		t.Fatal("searched without a cap (playing resolution unknown)")
+	}
+	s.sidegradeFor(key, q, hx('a'), 1080, crit)
+	if !searched() {
+		t.Fatal("no search once the stream played a minute")
+	}
+}
+
+// Night of the Living Dead on a 28 Mbit line: the pick (x0.11) never got past its start, and
+// the search's check of a source that kept up waited behind it until the start cap. While the
+// title's source starves, its sidegrade search (and spare measurements) pass the start-quiet
+// gate, start without the minute, and still end when a player resolves the title.
+func TestRescuePassesStartOfStarvingSource(t *testing.T) {
+	shortQuiet(t, time.Minute)
+	s, _, key, w := drainService(t)
+	s.useSource(w, result(hx('a'), "1080p", 0.11))
+	s.playBegin(hx('a')) // starting: no bytes for a while
+	defer s.playEnd(hx('a'))
+	s.playFlows(hx('a'))
+	if s.startingStream(hx('b')) != hx('a') {
+		t.Fatal("the starving stream does not start")
+	}
+	type seen struct{ background, yields, ended bool }
+	got := make(chan seen, 1)
+	s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
+		other, _ := s.yieldReason(ctx, hx('b'))
+		v := seen{background: tsInBackground(ctx), yields: other != ""}
+		select {
+		case <-ctx.Done():
+			v.ended = true
+		case <-time.After(time.Second):
+		}
+		got <- v
+		return nil, nil, errNoSource
+	}
+	q := tsResolveQuery{mediaType: "movie", title: "Carnival of Souls", year: 1962}
+	s.sidegradeFor(key, q, hx('a'), 1080, tsSideOpts{draining: true})
+	time.Sleep(50 * time.Millisecond)
+	// The player steps down meanwhile: the search ends
+	step := q
+	step.maxQ = 720
+	release := make(chan struct{})
+	defer close(release)
+	f, _ := s.flights.start(tsResolveKey(step), func() (*tsResolveResult, error) { <-release; return nil, errNoSource })
+	f.waiters.Add(1)
+	defer f.waiters.Add(-1)
+	select {
+	case v := <-got:
+		if v.background || v.yields || !v.ended {
+			t.Fatalf("search: background %v, waits for the start %v, ended by the step down %v", v.background, v.yields, v.ended)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no search while the source starves")
+	}
+	// A healthy title's rescue work stays background
+	ok := s.holdWarm(tsResolveKey(tsResolveQuery{mediaType: "movie", title: "Detour", year: 1945}))
+	s.useSource(ok, result(hx('c'), "1080p", 3))
+	if !tsInBackground(s.rescueCtx(ok, "spare measurement")) {
+		t.Fatal("a title whose source keeps up skips the start-quiet gate")
+	}
+}
+
+// Resolve's early measurement below half the need stops counting as starving once the
+// source's stream got healthy; a draining player still counts.
+func TestRescueEndsWhenStreamHealthy(t *testing.T) {
+	shortQuiet(t, time.Minute)
+	shortStart(t, 30*time.Second, time.Minute, time.Second)
+	s, _, _, w := drainService(t)
+	s.useSource(w, result(hx('a'), "1080p", 0.41))
+	st := s.playBegin(hx('a'))
+	defer s.playDone(hx('a'), st)
+	if tsInBackground(s.rescueCtx(w, "spare measurement")) {
+		t.Fatal("a source measured at 0.41 does not count as starving while it starts")
+	}
+	st.rate.Store(1000)
+	_, _ = (&tsFirstWrite{w: discard{}, stream: st}).Write(make([]byte, 31*1000))
+	if !tsInBackground(s.rescueCtx(w, "spare measurement")) {
+		t.Fatal("a healthy stream still counts as starving by resolve's measurement")
+	}
+	s.warmMu.Lock()
+	w.drainAt = time.Now()
+	s.warmMu.Unlock()
+	if tsInBackground(s.rescueCtx(w, "spare measurement")) {
+		t.Fatal("a draining player does not count")
 	}
 }

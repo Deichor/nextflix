@@ -181,7 +181,8 @@ func tsLongerCut(title string) bool {
 // returns an error when its duration does not fit the expected runtime. verified is true
 // when it fits. A cold swarm can be too slow for the header: after tsDurationProbe the same
 // probe goes on (up to tsDurationRetry more) only once warm says the swarm delivers (true);
-// false or nil ends it. A probe that failed early is tried again on a warm swarm.
+// false or nil ends it. A probe that failed early is tried again on a warm swarm. Once the
+// check is background work (resolve answered) its probe yields to a starting stream (quiet.go).
 // headerRead (optional) is called once the probe ended, also when the runtime is unknown.
 func (s *Service) checkDuration(ctx context.Context, c tsCandidate, q tsResolveQuery, hash string, index int, warm <-chan bool,
 	headerRead func()) (dur float64, verified bool, err error) {
@@ -204,14 +205,20 @@ func (s *Service) checkDuration(ctx context.Context, c tsCandidate, q tsResolveQ
 		p   *tsProbe
 		err error
 	}
-	got := make(chan outcome, 1)
-	pctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		p, err := s.probeFileTimeout(pctx, hash, index, tsDurationProbe+tsDurationRetry)
-		ended()
-		got <- outcome{p, err}
-	}()
+	var got chan outcome
+	stop := func() {}
+	defer func() { stop() }()
+	probe := func(timeout time.Duration) {
+		pctx, cancel := context.WithCancel(ctx)
+		ch := make(chan outcome, 1)
+		got, stop = ch, cancel
+		go func() {
+			p, err := s.probeFileTimeout(pctx, hash, index, timeout)
+			ended()
+			ch <- outcome{p, err}
+		}()
+	}
+	probe(tsDurationProbe + tsDurationRetry)
 	alive := func() bool {
 		if warm == nil {
 			return false
@@ -225,28 +232,51 @@ func (s *Service) checkDuration(ctx context.Context, c tsCandidate, q tsResolveQ
 	}
 	slow := time.NewTimer(tsDurationProbe)
 	defer slow.Stop()
+	gate := time.NewTicker(tsQuietPoll)
+	defer gate.Stop()
+	last := false // the probe running now is the last try
 	var o outcome
-	select {
-	case o = <-got:
-		if o.err != nil && ctx.Err() == nil && alive() {
-			log.Printf("resolve %q: duration of %q: probing again on the warm swarm", q.title, c.raw.Title)
-			o.p, o.err = s.probeFileTimeout(ctx, hash, index, tsDurationRetry)
-		}
-	case <-slow.C:
-		// Killing the probe would throw away the pieces it asked for: it goes on while the
-		// swarm delivers
-		if !alive() {
-			o.err = fmt.Errorf("no header after %s on a cold swarm", tsDurationProbe)
-			break
-		}
-		log.Printf("resolve %q: duration of %q: still probing on the warm swarm", q.title, c.raw.Title)
+wait:
+	for {
 		select {
 		case o = <-got:
+			if o.err != nil && !last && ctx.Err() == nil && alive() {
+				log.Printf("resolve %q: duration of %q: probing again on the warm swarm", q.title, c.raw.Title)
+				last = true
+				probe(tsDurationRetry)
+				continue
+			}
+			break wait
+		case <-slow.C:
+			if last {
+				continue
+			}
+			// Killing the probe would throw away the pieces it asked for: it goes on while the
+			// swarm delivers
+			if !alive() {
+				o.err = fmt.Errorf("no header after %s on a cold swarm", tsDurationProbe)
+				break wait
+			}
+			log.Printf("resolve %q: duration of %q: still probing on the warm swarm", q.title, c.raw.Title)
+			last = true
+		case <-gate.C:
+			// Once resolve answered, the probe of a candidate that was not picked gives the line
+			// to a starting stream: it stops, and runs again (tsDurationRetry) once the start is over
+			if !tsInBackground(ctx) {
+				continue
+			}
+			if other, _ := s.yieldReason(ctx, hash); other == "" {
+				continue
+			}
+			stop()
+			if !s.waitQuiet(ctx, hash, "duration probe") {
+				return 0, false, nil
+			}
+			last = true
+			probe(tsDurationRetry)
 		case <-ctx.Done():
 			return 0, false, nil
 		}
-	case <-ctx.Done():
-		return 0, false, nil
 	}
 	if o.err != nil {
 		if ctx.Err() == nil {

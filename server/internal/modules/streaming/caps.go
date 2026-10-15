@@ -162,7 +162,9 @@ func (s *Service) fallbackCandidates(q tsResolveQuery, raw []JackettResult, chec
 	q.overCap = true
 	all := tsRankAll(raw, q)
 	if len(items) > 0 && !s.debrid.settings().PreferDisabled {
-		tsDebridBoost(all, func(c tsCandidate) bool { return items[strings.ToLower(c.hash)] != nil && !tsAvoided(c, q) })
+		cached := func(c tsCandidate) bool { return items[strings.ToLower(c.hash)] != nil && !tsAvoided(c, q) }
+		s.debridLineFit(all, cached, q)
+		tsDebridBoost(all, cached)
 		tsSortCandidates(all, q)
 	}
 	var fit, unfit []tsCandidate

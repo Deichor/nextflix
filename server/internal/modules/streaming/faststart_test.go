@@ -291,7 +291,7 @@ func TestQuietGate(t *testing.T) {
 	shortQuiet(t, 150*ms)
 	s := NewService(nil, Config{})
 	playing, other := hx('p'), hx('o')
-	s.playBegin(playing)
+	st := s.playBegin(playing)
 	defer s.playEnd(playing)
 
 	if !s.waitQuiet(context.Background(), other, "check") {
@@ -305,7 +305,10 @@ func TestQuietGate(t *testing.T) {
 	if !s.waitQuiet(bg, other, "check") || time.Since(start) < 120*ms {
 		t.Fatalf("background work went on after %s while a stream started", time.Since(start))
 	}
-	// A seek is a new stream: quiet again
+	// A seek after the stream got healthy is a new start: quiet again
+	st.rate.Store(1000)
+	_, _ = (&tsFirstWrite{w: discard{}, stream: st}).Write(make([]byte, 40*1000))
+	s.startingStream(other)
 	s.playBegin(playing)
 	defer s.playEnd(playing)
 	if s.startingStream(other) != playing {

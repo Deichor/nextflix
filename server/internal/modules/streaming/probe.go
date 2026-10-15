@@ -22,6 +22,7 @@ type tsProbeStream struct {
 	RFrameRate    string            `json:"r_frame_rate"`
 	Channels      int               `json:"channels"`
 	ChannelLayout string            `json:"channel_layout"`
+	BitRate       string            `json:"bit_rate"` // bits per second (often missing in Matroska: see the BPS tag)
 	Tags          map[string]string `json:"tags"`
 	Disposition   map[string]int    `json:"disposition"` // default, forced, ... (0 or 1)
 	SideData      []struct {
@@ -36,6 +37,7 @@ type tsProbe struct {
 	Format  struct {
 		FormatName string `json:"format_name"`
 		Duration   string `json:"duration"`
+		BitRate    string `json:"bit_rate"` // bits per second of the whole file
 	} `json:"format"`
 	// Container chapters (Matroska / MP4), read from the header with the rest
 	Chapters []struct {

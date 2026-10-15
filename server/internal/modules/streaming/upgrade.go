@@ -95,6 +95,11 @@ func (s *Service) endUpgrade(u *tsUpgrade) {
 // offerUpgrade makes up the ready upgrade of key; the first one wins. It becomes the cached
 // source and the title's warm source; the source it replaces is dropped unless it plays.
 func (s *Service) offerUpgrade(key string, q tsResolveQuery, up *tsResolveResult) bool {
+	if s.overLine(up, q) {
+		log.Printf("resolve %q: upgrade %q %s: not offered", q.title, up.TorrentTitle,
+			tsLineNote(tsNeedOf(up, q), s.lineFor(q)))
+		return false
+	}
 	v, _ := s.upgrades.LoadOrStore(key, &tsUpgrade{})
 	u := v.(*tsUpgrade)
 	u.mu.Lock()
@@ -144,7 +149,7 @@ func (s *Service) afterPick(key string, res *tsResolveResult, seed *tsUpgradeSee
 		}
 	}
 	improve := func(r *tsResolveResult) {
-		if res.keepsUp() || r.Health == nil || r.Health.Dead || !r.durationOK() || r.unfit != "" {
+		if res.keepsUp() || r.Health == nil || r.Health.Dead || !r.durationOK() || r.unfit != "" || s.overLine(r, q) {
 			return
 		}
 		// A lower resolution only replaces a starving pick when it keeps up
@@ -339,9 +344,15 @@ func (w *tsUpgradeWatch) arrived(r *tsResolveResult) bool {
 	return taken
 }
 
-// offer queues r unless it is dead, unfit for the client, a torrent already tried or over the limit.
+// offer queues r unless it is dead, unfit for the client, more than the line carries, a
+// torrent already tried or over the limit.
 func (w *tsUpgradeWatch) offer(r *tsResolveResult) bool {
 	if r == nil || (r.Health != nil && r.Health.Dead) || r.unfit != "" {
+		return false
+	}
+	if q := w.seed.q; w.s.overLine(r, q) {
+		log.Printf("resolve %q: upgrade %q %s: not warmed", q.title, r.TorrentTitle,
+			tsLineNote(tsNeedOf(r, q), w.s.lineFor(q)))
 		return false
 	}
 	w.mu.Lock()
@@ -512,7 +523,8 @@ func (s *Service) upgradeFor(key string, q tsResolveQuery, current string, curQ 
 	}
 	better := func(r *tsResolveResult) bool {
 		return r != nil && r.Hash != current && tsQualityHeight(r.Quality) > curQ && r.Health != nil && r.Health.KeepsUp &&
-			!r.Health.Dead && !r.partial && r.durationOK() && r.unfit == "" && r.CapsFallback == "" && s.capsMiss(r, q) == ""
+			!r.Health.Dead && !r.partial && r.durationOK() && r.unfit == "" && r.CapsFallback == "" && s.capsMiss(r, q) == "" &&
+			!s.overLine(r, q)
 	}
 	var u *tsUpgrade
 	if v, ok := s.upgrades.Load(key); ok {

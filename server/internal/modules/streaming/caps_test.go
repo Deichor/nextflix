@@ -348,3 +348,46 @@ func TestDebridGateIgnoresUnfitPick(t *testing.T) {
 		t.Fatalf("lower check stopped: %v", err)
 	}
 }
+
+// Detour (1945) on a browser: the x265 SARTRE release won at the cap before its probe told
+// it is re-encoded (15-87 s probe, no frame in the slow-start window).
+func TestNameUnfitLosesToH264(t *testing.T) {
+	x265 := measured("sartre", "1080p", 0.9, 1.0)
+	x265.nameUnfit = true
+	h264 := measured("oft", "1080p", 0.3, 1.0)
+	if i := tsChoosePlayable([]*tsResolveResult{x265, h264}); i != 1 {
+		t.Fatalf("got %d, want the H.264 that delivers", i)
+	}
+	dead := measured("rarbg", "1080p", 0, 0.3)
+	dead.Health.Dead = true
+	if i := tsChoosePlayable([]*tsResolveResult{x265, dead}); i != 0 {
+		t.Fatalf("got %d, want the x265 when nothing else delivers", i)
+	}
+	// Both keep up: the H.264 is picked although the x265 ranks first
+	x265.Health, h264.Health = newHealth(3*tsMB, tsMB, 3, 2), newHealth(2*tsMB, tsMB, 3, 2)
+	if i, final := tsChoose([]*tsResolveResult{x265, h264}, []bool{true, true}); i != 1 || !final {
+		t.Fatalf("got %d (final %v), want the H.264", i, final)
+	}
+	if i, final := tsChoose([]*tsResolveResult{x265, nil}, []bool{true, false}); i != 0 || final {
+		t.Fatalf("got %d (final %v), want the x265 only once nothing else is left", i, final)
+	}
+}
+
+// A listing without a hash whose link a check found to be an avoided torrent ranks last.
+func TestKnownAvoidedListing(t *testing.T) {
+	s := NewService(nil, Config{})
+	yts := JackettResult{Title: "Detour (1945) [BluRay] (1080p) [YTS AM]", Seeders: 21, Size: 1080 * tsMB, Link: "http://jackett/dl/yts"}
+	oft := JackettResult{Title: "Detour 1945 1080p BluRay x264-OFT", Seeders: 4, Size: 2830 * tsMB,
+		MagnetUri: "magnet:?xt=urn:btih:" + strings.Repeat("b", 40)}
+	avoided := strings.Repeat("f", 40)
+	s.listingHashes.Store(tsListingKey(yts), avoided)
+	q := tsResolveQuery{mediaType: "movie", title: "Detour", year: 1945, runtime: 68}
+	if raw := s.knownAvoided(q, []JackettResult{yts, oft}); raw[0].InfoHash != "" {
+		t.Fatal("a listing that is not avoided lost its link")
+	}
+	q.avoid = []string{avoided}
+	cands := tsRankAll(s.knownAvoided(q, []JackettResult{yts, oft}), q)
+	if len(cands) != 2 || !strings.Contains(cands[0].raw.Title, "OFT") {
+		t.Fatalf("got %q first, want the OFT before the avoided YTS", cands[0].raw.Title)
+	}
+}

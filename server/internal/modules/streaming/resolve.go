@@ -82,7 +82,15 @@ type tsResolveResult struct {
 	// The probed video breaks the client's caps (see applyProbedCaps); unfit says why.
 	// reencode: play has to re-encode its video for the client
 	overCaps, reencode bool
+	// The file needs more than the home line carries (see linerate.go)
+	overLine bool
+	// Not probed yet, and the name says play re-encodes its video for the client (x265 for a
+	// browser): it only wins when nothing else delivers
+	nameUnfit bool
 }
+
+// fits: nothing (probe or name) says the client cannot use the file as it is.
+func (r *tsResolveResult) fits() bool { return r.unfit == "" && !r.nameUnfit }
 
 // demoted: the probed file is smaller than its release name claimed.
 func (r *tsResolveResult) demoted() bool {
@@ -138,6 +146,8 @@ type tsResolveQuery struct {
 	overCap bool
 	// The viewer asked for a cinema recording of a film still in cinemas (?cinema=1, cinema.go)
 	cinema bool
+	// What the home line downloads at least, bytes/s (linerate.go; 0 = unknown)
+	line float64
 	// Warm-up bookkeeping of the title (nil in tests): the torrents this resolve adds and
 	// the context of its background work
 	warm *tsWarm
@@ -631,6 +641,7 @@ func tsScore(r JackettResult, q tsResolveQuery, titleTokens []string) (tsCandida
 	p.Subs = tsSubNameScore(rest, q.lang, q.origLang)
 	c.rest = rest
 	p.Rate = tsRateScore(r.Size, c.quality, q.runtime, q.mediaType, c.kind)
+	p.Line = tsLinePart(tsCandidateNeed(c, q), q.line)
 	p.Seeds = tsSeedScore(r.Seeders)
 
 	c.parts = p
@@ -875,6 +886,9 @@ func tsResolveLink(ctx context.Context, link, jackettBase, name string) (string,
 // errDuplicateTorrent: another candidate of the same resolve already checks this torrent.
 var errDuplicateTorrent = errors.New("same torrent as a better-ranked candidate")
 
+// errAvoidedTorrent: a listing without an info hash turned out to be a torrent the player avoids.
+var errAvoidedTorrent = errors.New("avoided torrent")
+
 // checkCandidate loads a candidate in TorrServer, picks the file to play, warms its swarm up
 // for at most window while measuring whether it keeps up with the file's bitrate, and
 // checks the file's duration. claim (optional) reserves the torrent for this check; a
@@ -893,6 +907,12 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 		magnet = m
 	}
 	added := tsHashFromMagnet(magnet)
+	if c.hash == "" && added != "" {
+		s.listingHashes.Store(tsListingKey(c.raw), added) // later rankings know it (tsKnownHashes)
+	}
+	if tsAvoided(tsCandidate{hash: added}, q) {
+		return nil, errAvoidedTorrent
+	}
 	if added != "" && claim != nil && !claim(added) {
 		return nil, errDuplicateTorrent
 	}
@@ -942,6 +962,9 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 		added = hash
 		s.trackTorrent(q.warm, hash)
 	}
+	if tsAvoided(tsCandidate{hash: hash}, q) {
+		return nil, errAvoidedTorrent
+	}
 	res = &tsResolveResult{
 		Magnet:          magnet,
 		Hash:            hash,
@@ -955,8 +978,8 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 		durationChecked: q.runtime > 0,
 		nameQ:           c.quality,
 		rank:            c.score,
-		avoided:         tsAvoided(c, q),
 		Cinema:          c.cinema,
+		nameUnfit:       tsNameReencode(c, q),
 	}
 	nameTags := c.tags
 	res.Format = &nameTags
@@ -1036,6 +1059,9 @@ func (s *Service) checkCandidate(ctx context.Context, c tsCandidate, q tsResolve
 	subsMoved := s.applyProbedSubs(res, c, q, stat.FileStats, file)
 	// A file above the client's cap or with video it cannot decode is unfit for it
 	s.applyProbedCaps(res, q)
+	if p := s.cachedProbe(res.Hash, res.Index); p != nil && p.video() != nil {
+		res.nameUnfit = false // the probe knows (unfit says so when it is)
+	}
 	if formatMoved || subsMoved || res.unfit != "" {
 		log.Printf("resolve %q: %q probed as {%s}: rank %.1f -> %.1f%s", q.title, c.raw.Title, res.Format, c.score, res.rank,
 			tsUnfitNote(res.unfit))
@@ -1239,7 +1265,30 @@ func (s *Service) searchTitle(ctx context.Context, q tsResolveQuery, started tim
 // addLate appends a batch of a slower indexer to raw, without the releases a length check
 // already rejected (like the first batch, see withoutRejectedHome).
 func (s *Service) addLate(q tsResolveQuery, raw, batch []JackettResult) []JackettResult {
-	return append(raw, s.withoutRejectedHome(q, batch)...)
+	return append(raw, s.knownAvoided(q, s.withoutRejectedHome(q, batch))...)
+}
+
+// tsListingKey names an indexer listing without an info hash (a Jackett download link).
+func tsListingKey(r JackettResult) string { return fmt.Sprintf("%s|%d", r.Title, r.Size) }
+
+// knownAvoided gives listings without an info hash the one an earlier check found behind
+// their link when q avoids it, so they rank last (an avoided torrent listed once more under
+// another name, "Detour (1945) [BluRay] (1080p) [YTS AM]", took a check slot in every
+// resolve after the player avoided it). Others keep their link (its trackers). raw is
+// changed in place and returned.
+func (s *Service) knownAvoided(q tsResolveQuery, raw []JackettResult) []JackettResult {
+	if len(q.avoid) == 0 {
+		return raw
+	}
+	for i, r := range raw {
+		if r.InfoHash != "" || tsHashFromMagnet(r.MagnetUri) != "" {
+			continue
+		}
+		if h, ok := s.listingHashes.Load(tsListingKey(r)); ok && tsAvoided(tsCandidate{hash: h.(string)}, q) {
+			raw[i].InfoHash = h.(string)
+		}
+	}
+	return raw
 }
 
 // findSource searches Jackett, ranks the releases and returns the best one TorrServer can open.
@@ -1247,6 +1296,9 @@ func (s *Service) addLate(q tsResolveQuery, raw, batch []JackettResult) []Jacket
 // and the indexers still searching; the caller passes it to afterPick or cancels it.
 func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
 	started := time.Now()
+	if line, ok := s.lineRate(); ok {
+		q.line = line
+	}
 	runtime := s.lookupRuntime(q)
 	names := s.titleNamesLater(q)
 	sr, q, named, err := s.searchTitle(ctx, q, started, names)
@@ -1259,7 +1311,7 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	q.runtime, from, rtTook = runtime()
 	log.Printf("resolve %q: expected runtime %dm (%s, lookup %s)", q.title, q.runtime, from, rtTook.Round(time.Millisecond))
 
-	raw := s.withoutRejectedHome(q, sr.raw) // another video under the film's name (homedur.go)
+	raw := s.knownAvoided(q, s.withoutRejectedHome(q, sr.raw)) // another video under the film's name (homedur.go)
 	cands := tsRankCandidates(raw, q)
 	// Nothing usable from the fast indexers: wait for the slow ones
 	for len(cands) == 0 && sr.late != nil {
@@ -1286,6 +1338,15 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	}
 	// Releases TorBox has cached play from it (debrid_resolve.go)
 	cands, debridItems := s.debridCandidates(ctx, rq, raw, cands)
+	// An upgrade the line cannot carry is not worth a check (over-line ones rank after the
+	// rest; a TorBox-cached one TorBox delivered enough for has no line part)
+	if q.upgradeFrom > 0 && len(cands) > 0 {
+		if cands = slices.DeleteFunc(cands, func(c tsCandidate) bool { return c.parts.Line < 0 }); len(cands) == 0 {
+			log.Printf("resolve %q: every release above %dp needs more than the line does (~%.2f MB/s)", q.title, q.upgradeFrom,
+				q.line/float64(tsMB))
+			return nil, nil, errNoSource
+		}
+	}
 	pendingNote := ""
 	if sr.late != nil {
 		pendingNote = " (slower indexers still searching)"
@@ -1296,6 +1357,7 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 		return nil, nil, errNoSource
 	}
 	tsLogRanking(q, cands)
+	tsLogOverLine(q, raw)
 	s.noteRanked(q, raw) // releases a subtitle scan may try later (subalt.go)
 
 	checkStart := time.Now()
@@ -1350,6 +1412,14 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	if !res.durationOK() {
 		log.Printf("resolve %q: no candidate of verified duration, using one of unknown length", q.title)
 	}
+	if res.nameUnfit {
+		log.Printf("resolve %q: nothing that fits the client delivers, using %q (its name says the video is re-encoded)", q.title,
+			res.TorrentTitle)
+	}
+	if res.overLine && !res.good() {
+		log.Printf("resolve %q: nothing that fits the line plays, %q %s", q.title, res.TorrentTitle,
+			tsLineNote(tsNeedOf(res, q), s.lineFor(q)))
+	}
 	log.Printf("resolve %q: candidate #%d (%s) validated in %s", q.title, pick.best+1, res.Quality, time.Since(checkStart).Round(time.Millisecond))
 	return res, seed, nil
 }
@@ -1396,9 +1466,19 @@ func (s *Service) runChecks(ctx context.Context, q tsResolveQuery, cands []tsCan
 			floor = tsQualityHeight(pick.Quality)
 		}
 		if upgradable && floor > 0 && cands[i].quality > floor {
-			return true
+			// An upgrade the line cannot carry would only stall later
+			need := tsCandidateNeed(cands[i], q)
+			return !tsOverLine(need, s.lineFor(q)) || (items[strings.ToLower(cands[i].hash)] != nil && s.torBoxCarries(need))
 		}
 		return q.upgradeFrom == 0 && pick != nil && cands[i].quality == floor
+	}
+	// Results and snapshots learn whether the line carries their file (the line may have shown
+	// more since the ranking)
+	mark := func(r *tsResolveResult) *tsResolveResult {
+		if r != nil {
+			r.overLine = s.overLine(r, q)
+		}
+		return r
 	}
 	claim := tsClaims(cands)
 	live := newLive(len(cands))
@@ -1408,11 +1488,12 @@ func (s *Service) runChecks(ctx context.Context, q tsResolveQuery, cands []tsCan
 		if cands[i].quality == topQ {
 			window = tsWarmWindowTop
 		}
-		return gate.check(ctx, i, q, func(h string) bool { return claim(h, i) }, func(r *tsResolveResult) { live.set(i, r) },
+		res, err := gate.check(ctx, i, q, func(h string) bool { return claim(h, i) }, func(r *tsResolveResult) { live.set(i, mark(r)) },
 			func(ctx context.Context) (*tsResolveResult, error) {
 				return s.checkCandidate(ctx, cands[i], q, base, window, func(h string) bool { return claim(h, i) },
-					func(r *tsResolveResult) { live.set(i, r) })
+					func(r *tsResolveResult) { live.set(i, mark(r)) })
 			})
+		return mark(res), err
 	}, live)
 	phase.background.Store(true)
 	return pick, warmCtx, warmCancel
@@ -1850,7 +1931,7 @@ func tsPickBestKeep(ctx, checkCtx context.Context, n int, graceFor func(best int
 	}
 	goodNow := func() int {
 		merged := view(true)
-		if best, _ := tsChoose(merged, finished); best >= 0 && merged[best].good() && merged[best].unfit == "" {
+		if best, _ := tsChoose(merged, finished); best >= 0 && merged[best].good() && merged[best].fits() {
 			return best
 		}
 		return -1
@@ -1874,7 +1955,7 @@ func tsPickBestKeep(ctx, checkCtx context.Context, n int, graceFor func(best int
 		}
 		waiting := false
 		for i, r := range current() {
-			if r.measured() && r.Health.ratio() >= tsCapUsable && r.unfit == "" {
+			if r.measured() && r.Health.ratio() >= tsCapUsable && r.fits() {
 				return true
 			}
 			waiting = waiting || (!finished[i] && !r.measured())
@@ -1895,7 +1976,7 @@ func tsPickBestKeep(ctx, checkCtx context.Context, n int, graceFor func(best int
 				return true
 			}
 			r := live.get(j)
-			if r == nil || r.Health == nil || r.Health.Dead || r.unfit != "" || tsQualityHeight(r.Quality) < bq {
+			if r == nil || r.Health == nil || r.Health.Dead || !r.fits() || tsQualityHeight(r.Quality) < bq {
 				continue
 			}
 			if r.Health.ratio() >= tsPromising {
@@ -1982,7 +2063,7 @@ func tsPickBestKeep(ctx, checkCtx context.Context, n int, graceFor func(best int
 				case now:
 					return done(g)
 				case g >= 0: // in the grace of a promising better-ranked check
-				case p.results[best].good() && p.results[best].unfit == "":
+				case p.results[best].good() && p.results[best].fits():
 					setGrace(graceFor(best))
 				default:
 					// Starving, or unfit for the client: the running checks may still give a good one

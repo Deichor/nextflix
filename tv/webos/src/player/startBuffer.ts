@@ -28,6 +28,19 @@ export function healthRatio(h?: { rate: number; need: number; dead?: boolean } |
   return h.need > 0 ? h.rate / h.need : undefined;
 }
 
+/**
+ * An explicit starving verdict: keeps_up false with a measured rate below need (or a dead swarm). An answer
+ * still measuring (`measuring`, or nothing sampled yet) only counts below half its need.
+ */
+export function healthStarving(
+  h?: { rate: number; need: number; keeps_up?: boolean; dead?: boolean; measuring?: boolean } | null,
+): boolean {
+  if (!h || h.keeps_up !== false) return false;
+  if (h.dead) return true;
+  const limit = h.measuring ? 0.5 * h.need : h.need;
+  return h.rate > 0 && h.need > 0 && h.rate < limit;
+}
+
 /** A source whose start waits for a larger buffer: measured and borderline (unknown starts at once) */
 export function needsStartHold(ratio: number | undefined): boolean {
   return ratio !== undefined && ratio < START_BUFFER.HEALTHY_RATIO;

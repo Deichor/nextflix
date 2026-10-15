@@ -238,6 +238,7 @@ func (s *Service) pruneState(now time.Time) {
 			delete(s.streamEnd, h)
 		}
 	}
+	s.pruneRunsLocked(now)
 	held := map[string]bool{}
 	for _, w := range s.warms {
 		for h := range w.hashes {

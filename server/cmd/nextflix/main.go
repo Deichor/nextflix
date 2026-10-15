@@ -158,6 +158,7 @@ func run() error {
 		LiveTiming:      true,
 		AIDir:           envOr("AI_SUBTITLE_DIR", "/app/data/ai-subtitles"),
 		NextEpisode:     catalogSvc.NextEpisode,
+		LineGate:        streamingSvc, // timing reads wait while a stream starts
 	})
 	streamingSvc.SetSpeechTap(speechTap{subtitlesSvc})
 	streamingSvc.SetCueTap(cueTap{subtitlesSvc})
