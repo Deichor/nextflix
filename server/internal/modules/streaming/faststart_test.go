@@ -273,12 +273,12 @@ func TestSidegradeWorthy(t *testing.T) {
 			t.Errorf("%.2f vs 0.2: %v", tc.rate, got)
 		}
 	}
-	// Against a source that keeps up only one that keeps up and is clearly faster
+	// A source that keeps up is never left, however much faster the spare is
 	ok := measured("cur", "1080p", 2, 1).Health
 	for _, tc := range []struct {
 		rate float64
 		want bool
-	}{{0.9, false}, {2.5, false}, {3, true}} {
+	}{{0.9, false}, {2.5, false}, {3, false}, {9.34, false}} {
 		if got := tsSidegradeWorthy(measured("r", "1080p", tc.rate, 1), ok); got != tc.want {
 			t.Errorf("%.2f vs a healthy 2: %v", tc.rate, got)
 		}

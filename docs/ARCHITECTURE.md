@@ -964,11 +964,15 @@ source is linked through the source cache when it starts.
   without Play) it waits first and any new intent cancels it. With `hash=`: the torrents a closing player used.
 - Spares are dropped 60 s after the pick without playback, or 3 minutes into playback (counted from the spare's
   arrival or the player's last `draining=1` poll when those are later). `GET /sidegrade` offers only a spare that
-  keeps up (`tsSidegradeWorthy`), measured within 45 s (else it measures them in the background), and, when the
-  playing source's last measurement kept up too, has ≥ 1.5× its rate / need (against an unmeasured, starving or dead
-  source keeping up is enough); at most one per title every 2 minutes, never one in `avoid=` (such spares are
-  dropped). A spare that does not keep up is never offered, whatever the player reports: a switch reloads or
-  restarts the player (the TV once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a
+  keeps up (`tsSidegradeWorthy`), measured within 45 s (else it measures them in the background), and only while
+  the playing source's last measurement does not keep up (unmeasured, starving or dead: `tsSideWhy`); at most one
+  per title every 2 minutes, never one in `avoid=` (such spares are dropped). A source that keeps up is never left,
+  however fast a spare is and whatever the player reports (`draining` / `critical` also come from a paused or
+  autoplay-blocked player): nothing is offered, measured or searched, logged `warm: no sidegrade from <hash>: it
+  keeps up at x<ratio> (draining=… critical=…)` at most every 30 s (an iPhone whose Safari blocked autoplay left a
+  TorBox file at x3.05 for another encode at x9.34: restart at 0:00, subtitle timing lost). A sidegrade is logged
+  with the reason and the player's flags. A spare that does not keep up is never offered either: a switch reloads
+  or restarts the player (the TV once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a
   starving source a spare of a lower resolution counts too when it keeps up (the playing resolution or higher is
   preferred).
 - A draining player (`draining=1`, polled every 5-10 s while its buffer drains) keeps the spares alive;
