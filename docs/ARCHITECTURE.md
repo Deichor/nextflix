@@ -16,7 +16,8 @@ web/                        Next.js 16 (App Router), React 19, TypeScript
 tv/webos/                   LG webOS app (Vite + React + TypeScript), see tv/webos/README.md
 tv/android/                 Android TV / Google TV app (Kotlin, Compose for TV, Media3), see tv/android/README.md
 deploy/                     docker-compose.yml, server.Dockerfile, web.Dockerfile, config/*.env.example
-scripts/                    check-backend.sh, check-frontend.sh, tidy-backend.sh, playback-log.sh, migrate-from-homeflix.sh
+scripts/                    check-backend.sh, check-frontend.sh, tidy-backend.sh, playback-log.sh, migrate-from-homeflix.sh,
+                            subtitle-truth/ (subtitle timing measured against the speech, see its README)
 docs/                       this folder
 ```
 
@@ -1601,6 +1602,10 @@ Measured on S02E07 (text-matched against the file's English track): the HDTV sub
 (10 % of lines within 1 s); timed from 10 windows of the file's own track: 0.41 s (83 %; 89 % is the best any timing
 of this subtitle reaches, its own line timing is loose), from speech detection alone: 0.37 s (83 %). The S02E06
 subtitle (another episode) is rejected.
+
+Ground truth from the speech itself, for files without a usable own track and for reported slips:
+`scripts/subtitle-truth/` (see its README) transcribes the played file's dialogue (ASR word starts, CTC-aligned;
+87 % of lines within 0.2 s of The Mentalist S03E02's own PGS track) and scores what was served against it.
 
 Evaluation on real data (`sync_eval_test.go`, run with `NFX_TESTDATA` pointing at a copy of `/app/data`; skipped
 otherwise): the truth is the file's own text track (per read window, the subtitle's offset by its line starts and
