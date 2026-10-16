@@ -613,6 +613,7 @@ func replayLive(t *testing.T, f *snapFile, sub []span, withRead bool, order []in
 	base, _ := svc.File(context.Background(), inner)
 	lf := y.liveFile(hash, 1)
 	lf.setDuration(ref.Probe.Duration)
+	trustOwnTrack(lf) // replays of the aligner with the file's own windows as they were used
 	if order == nil {
 		for i := range f.live {
 			order = append(order, i)
@@ -1199,7 +1200,7 @@ func loadFixtureAlt(t *testing.T, name string) (*snapFile, []span, []span) {
 	if err := json.Unmarshal(b, &fx); err != nil {
 		t.Fatal(err)
 	}
-	f := &snapFile{name: syncHash, ref: syncRef{Probe: mediaProbe{Duration: fx.Duration, FPS: 23.976, Audio: 1, TextSub: 2}}}
+	f := &snapFile{name: syncHash, ref: syncRef{Probe: mediaProbe{Duration: fx.Duration, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}}}
 	for _, w := range fx.Subs {
 		f.ref.Windows = append(f.ref.Windows, w.window())
 	}

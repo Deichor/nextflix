@@ -23,8 +23,6 @@ import {
   subtitleRetryAt,
   type SubtitleFailure,
   type SubtitleFile,
-  LIVE_CUES_POLL_MS,
-  AI_CUES_POLL_MS,
   SUBALT_RETRY_MAX,
   fetchSubtitles,
   groupSubtitles,
@@ -35,9 +33,11 @@ import {
   normLang,
   pickAudioTrack,
   pickSubtitle,
+  pretimeSubtitle,
   readPlayerPrefs,
   writePlayerPrefs,
 } from '@/features/watch/subtitles';
+import { pretimeNext } from '@/features/watch/pretime';
 import { AUDIO_ORIGINAL, SUBTITLE_SIZE_SCALE } from '@/features/settings/playerPrefs';
 import {
   StreamMeta,
@@ -62,6 +62,7 @@ import {
   checkUpgrade,
   checkSidegrade,
   checkSubAlt,
+  getCachedSource,
   runtimeCheckQuery,
   nextWarmDue,
   holdPlaying,
@@ -69,6 +70,7 @@ import {
   releaseTorrents,
   keepSourceAlive,
   ResolveParams,
+  type ResolvedSource,
   Availability,
   StreamApiError,
 } from '@/features/watch/api';
@@ -85,8 +87,9 @@ import { UpscaleLog } from '@/features/watch/upscaleLog';
 import { PlaybackNotes, deviceToken } from '@/features/watch/playbackLog';
 import { attachStream, detachStream, fedFetching, fedStoppedByPause, setFeedNote, usesFedStream } from '@/features/watch/streamSource';
 import {
-  DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
+  DELAY_SETTLE_MS, DelayLog, idHash, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
 } from '@/features/watch/subsLog';
+import { LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, cuePollMs } from '@/features/watch/cuePoll';
 import upscaleCss from '@/features/watch/components/upscale.module.css';
 import { useHomeScreenHint, useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
@@ -1206,8 +1209,10 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     return unhold;
   }, [item.meta]);
 
-  // Next episode warmed near the end of this one (released when the player closes first)
+  // Next episode warmed near the end of this one (released when the player closes first), and the
+  // pre-timing of its subtitle (stopped when the player moves on)
   const nextWarmRef = useRef<ResolveParams | null>(null);
+  const pretimeRef = useRef<{ cancelled: boolean } | null>(null);
 
   const playNext = useCallback(() => {
     if (!next || !item.meta) return;
@@ -1215,6 +1220,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     playHoldRef.current?.();
     releaseTitle(paramsOf(item.meta));
     nextWarmRef.current = null;
+    if (pretimeRef.current) pretimeRef.current.cancelled = true;
     setItem({ meta: { ...item.meta, season: next.season, episode: next.episode, episode_title: undefined, runtime: undefined } });
     setItemKey(k => k + 1);
     // PlayerCore unmounts in this same render: it never sees the next episode's meta with this
@@ -1225,15 +1231,34 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     setFrameShown(false);
   }, [next, item.meta]);
 
-  // Resolve and warm the next episode once 10 minutes are left (85 % of short episodes), once per episode
-  const prefetchNext = useCallback((position: number, duration: number) => {
+  // Resolve and warm the next episode once 10 minutes are left (85 % of short episodes), once per episode;
+  // once its source is known the subtitle this player would show there is timed before it opens
+  const prefetchNext = useCallback((position: number, duration: number, audioLang?: string) => {
     const m = item.meta;
     if (!m || m.media_type !== 'tv' || !next) return;
     const params: ResolveParams = { type: 'tv', title: m.title, tmdb_id: m.tmdb_id, season: next.season, episode: next.episode, maxq: capRef.current };
     if (nextWarmRef.current && JSON.stringify(nextWarmRef.current) === JSON.stringify(params)) return;
     nextWarmRef.current = params;
     prefetchResolve(params, { next: { position, duration } });
-  }, [item.meta, next]);
+    if (pretimeRef.current) pretimeRef.current.cancelled = true;
+    const run = { cancelled: false };
+    pretimeRef.current = run;
+    const langs = locale === 'tr' ? ['tr', 'en'] : ['en', 'tr'];
+    void pretimeNext<ResolvedSource, SubtitleItem>({
+      cachedSource: () => getCachedSource(params),
+      subtitles: src => fetchSubtitles({
+        tmdb_id: m.tmdb_id, media_type: 'tv', season: next.season, episode: next.episode, hash: src.hash.toLowerCase(),
+        index: src.index, langs, title: src.torrent_title || src.file_name || undefined, year: m.year, ui_lang: locale,
+      }),
+      // The open's default pick (the episode's audio is taken to be in this one's language)
+      pick: items => pickSubtitle(groupSubtitles(items, langs, locale), {
+        profileLang: locale, pref: readPlayerPrefs(getActiveProfileId()).sub, audioLang,
+      }),
+      pretime: pretimeSubtitle,
+      wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      cancelled: () => run.cancelled,
+    });
+  }, [item.meta, next, locale]);
 
   // Torrents played in this session. A replaced source (upgrade, sidegrade, step down, next
   // episode from another torrent) is dropped at once; closing the player drops the rest,
@@ -1259,6 +1284,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
       if (m) releaseTitle(paramsOf(m));
       if (nextWarmRef.current) releaseTitle(nextWarmRef.current);
       nextWarmRef.current = null;
+      if (pretimeRef.current) pretimeRef.current.cancelled = true;
       releaseTorrents(Array.from(playedRef.current));
     };
     window.addEventListener('pagehide', release);
@@ -1481,8 +1507,8 @@ interface PlayerCoreProps {
   subtitle: string;
   nextLabel: string;
   onNext?: () => void;
-  /** Called while the next episode's warm window is open (see nextWarmDue; the parent dedupes) */
-  onPrefetchNext?: (position: number, duration: number) => void;
+  /** Called while the next episode's warm window is open (see nextWarmDue; the parent dedupes); audioLang: the track playing */
+  onPrefetchNext?: (position: number, duration: number, audioLang?: string) => void;
   /** The source failed; returns true when the parent retries with another source */
   onSourceFailed: (position: number, auto: boolean) => boolean;
   /** A recovery chain runs (the parent shows one stable overlay until onRecovered) */
@@ -1731,6 +1757,7 @@ function PlayerCore({
   const subLogRef = useRef<PlaybackNotes | null>(null);
   const subWhyRef = useRef<SubsWhy>('open');
   const subShownRef = useRef<SubsShown | null>(null);
+  const subOnRef = useRef<{ id: string; at: number } | null>(null);
   const subLoggedAtRef = useRef(0);
   const subPickedRef = useRef(false);
   const delayLogRef = useRef<DelayLog | null>(null);
@@ -2033,21 +2060,22 @@ function PlayerCore({
     if (!e) return;
     const id = subIdRef.current;
     const s = id ? subsRef.current?.find(x => x.id === id) : undefined;
-    subLogRef.current?.note('subdelay', { ...e, id: id ? logToken(id, 24) : undefined, provider: s ? logToken(s.source, 16) : undefined });
+    subLogRef.current?.note('subdelay', { ...e, id: id ? idHash(id) : undefined, provider: s ? logToken(s.source, 16) : undefined });
   }, []);
   const noteSubsNone = useCallback((why: string, extra?: SubsFields, items?: SubtitleItem[]) => {
     subLogRef.current?.note('subs-none', noneFields(why, localeRef.current, items ?? subsRef.current, extra));
   }, []);
-  // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew)
+  // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew);
+  // moves near what the viewer sees at once
   const noteSubs = useCallback((id: string, f: SubtitleFile) => {
     const prev = subShownRef.current;
     const next: SubsShown = { id, cues: f.cues, partial: f.partial, sync: f.sync };
-    const change = subsChange(prev, next, Date.now() - subLoggedAtRef.current);
+    const change = subsChange(prev, next, Date.now() - subLoggedAtRef.current, filePosRef.current - delayLog().current);
     if (!change.log) return;
     subShownRef.current = next;
     subLoggedAtRef.current = Date.now();
     const why = prev?.id === id ? 'poll' : subWhyRef.current;
-    subLogRef.current?.note('subs', subsFields(subsRef.current?.find(s => s.id === id), next, why, delayLog().current, change));
+    subLogRef.current?.note('subs', subsFields(subsRef.current?.find(s => s.id === id), next, why, delayLog().current, change.moves));
   }, [delayLog]);
   // The viewer's delay change is logged once it settled
   const changeSubDelay = useCallback((d: number) => {
@@ -2275,7 +2303,7 @@ function PlayerCore({
       subWhyRef.current = 'fallback';
       setSubId(next);
     } else if (current) {
-      noteSubsNone('failed', { id: logToken(id, 24) });
+      noteSubsNone('failed', { id: idHash(id) });
     }
   }, [noteSubsNone]);
 
@@ -2289,24 +2317,33 @@ function PlayerCore({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let errors = 0;
-    // Asked again every LIVE_CUES_POLL_MS while partial: a live embedded track (read from the playing position
-    // on, it grows) and a subtitle the server still times to the file alike; the final answer stops it
-    const load = () => {
-      // It answered before (a poll, or a seek while partial): a failure now (network, 5xx) asks again, keeping the cues
+    // When this subtitle was put on (seeks keep it): untimed answers are asked for sooner at first
+    if (subOnRef.current?.id !== subId) subOnRef.current = { id: subId, at: Date.now() };
+    const on = subOnRef.current;
+    // Asked again while partial (cuePollMs): a live embedded track (read from the playing position on, it grows)
+    // and a subtitle the server still times to the file alike; then, while the viewer watches (whilePlaying),
+    // every minute while its timing is not final
+    const load = (whilePlaying = false) => {
+      const v = videoRef.current;
+      if (whilePlaying && (!v || v.paused)) {
+        timer = setTimeout(() => load(true), PROVISIONAL_CUES_POLL_MS);
+        return;
+      }
+      // It answered before (a poll, or a seek): a failure (network, 5xx) or an empty answer now keeps the cues and asks again
       const answered = subShownRef.current?.id === subId;
       fetchSubtitleFile(subId, filePosRef.current, answered).then(f => {
         if (cancelled) return;
+        if (answered && (f.failed || (f.cues.length === 0 && !f.partial))) {
+          timer = setTimeout(() => load(), LIVE_CUES_POLL_MS);
+          return;
+        }
         if (f.failed) {
-          if (answered) {
-            timer = setTimeout(load, LIVE_CUES_POLL_MS);
-            return;
-          }
           setCues([]);
           // Another subtitle takes over when there is one (this effect then ends); a server or network
           // error is asked again after its short wait (5 s, doubling) instead of failing for minutes
           if (errors++ === 0) subtitleFailed(subId, f.failed);
           const at = subtitleRetryAt(subId);
-          if (f.failed === 'error' && at) timer = setTimeout(load, Math.max(1000, at - Date.now()));
+          if (f.failed === 'error' && at) timer = setTimeout(() => load(), Math.max(1000, at - Date.now()));
           return;
         }
         if (errors > 0 && failedSubsRef.current.has(subId)) {
@@ -2319,7 +2356,8 @@ function PlayerCore({
         setAiTranslating(!!f.translating);
         // The overlay looks the cue up again in the new list; the delay stays
         if (f.cues.length > 0 || !f.partial) setCues(f.cues);
-        if (f.partial) timer = setTimeout(load, f.translating ? AI_CUES_POLL_MS : LIVE_CUES_POLL_MS);
+        const wait = cuePollMs(f, Date.now() - on.at);
+        if (wait !== null) timer = setTimeout(() => load(!f.partial), wait);
       });
     };
     load();
@@ -3102,7 +3140,7 @@ function PlayerCore({
   const nextDue = nextWarmDue(position, duration);
   useEffect(() => {
     // posRef / durationRef were synced in this commit's layout phase
-    if (nextDue) onPrefetchNext?.(posRef.current, durationRef.current);
+    if (nextDue) onPrefetchNext?.(posRef.current, durationRef.current, audioTracksRef.current.find(a => a.index === audioRef.current)?.language);
   }, [nextDue, onPrefetchNext]);
 
   // Skip intro / end credits of the episode (skipSegments.ts)

@@ -73,7 +73,7 @@ func newLiveTest(t *testing.T, duration float64) *Service {
 	t.Cleanup(func() { syncReadDelay = saved })
 	svc := NewService(nil, Config{CacheDir: t.TempDir(), TorrServerURL: "http://torrserver", LiveTiming: true})
 	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
-		return mediaProbe{Duration: duration, FPS: 23.976, Audio: 1, TextSub: -1, Bitrate: 2 << 20}, nil
+		return mediaProbe{Duration: duration, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none", Bitrate: 2 << 20}, nil
 	}
 	svc.sync.read = func(context.Context, string, mediaProbe, float64, float64) (refWindow, error) {
 		t.Error("a window was read from a file above the byte budget")
@@ -510,7 +510,7 @@ func TestLiveFindsTheTitleSequenceEarly(t *testing.T) {
 // Live audio re-fits by itself (debounced) once enough of it came in.
 func TestLiveRefitIsScheduled(t *testing.T) {
 	svc := newLiveTest(t, episode)
-	svc.sync.refitDelay, svc.sync.refitGap = 10*time.Millisecond, 0
+	svc.sync.refitDelay, svc.sync.refitGap, svc.sync.pendingGap = 10*time.Millisecond, 0, 0
 	svc.sync.onGrow = svc.sync.scheduleRefit
 	file := dialogue(17, episode)
 	inner := cacheProviderSub(t, svc, "1|s|2|10|1", subtitleFor(file, 1, func(float64) float64 { return -2 }))

@@ -18,8 +18,9 @@ import (
 
 // The timing reference is read from a few windows of the playing file: ffmpeg seeks with
 // -ss (only that stretch of the file is read, through TorrServer or the TorBox proxy) and
-// takes the cues of the file's own text subtitle track there or, without one, decodes the
-// dialogue channel as 8 kHz mono PCM for speech detection.
+// takes the cues of the file's own subtitle track there (a text track, else the packet times
+// of a PGS picture track) or, without one, decodes the dialogue channel as 8 kHz mono PCM for
+// speech detection.
 
 const syncSampleRate = 8000
 
@@ -27,10 +28,29 @@ const syncSampleRate = 8000
 type mediaProbe struct {
 	Duration float64 `json:"duration"`
 	FPS      float64 `json:"fps"`
-	Audio    int     `json:"audio"`    // stream index of the audio read for speech, -1 none
-	Center   bool    `json:"center"`   // that audio has a front centre (dialogue) channel
-	TextSub  int     `json:"text_sub"` // stream index of a text subtitle track, -1 none
-	Bitrate  float64 `json:"bitrate"`  // bytes per second of the file (0 = unknown)
+	Audio    int     `json:"audio"`  // stream index of the audio read for speech, -1 none
+	Center   bool    `json:"center"` // that audio has a front centre (dialogue) channel
+	// OwnSub is the stream index of the own subtitle track the timing reads (a text track, else
+	// a PGS one), -1 none, and SubCodec its codec ("none" without one). Probes saved before
+	// picture tracks counted have no sub_codec (text_sub then names a text track or none).
+	OwnSub   int     `json:"text_sub"`
+	SubCodec string  `json:"sub_codec"`
+	Bitrate  float64 `json:"bitrate"` // bytes per second of the file (0 = unknown)
+}
+
+// picture reports whether the own subtitle track is a picture one (cues from packet times).
+func (p mediaProbe) picture() bool { return pictureSubCodecs[p.SubCodec] }
+
+// subsKnown is false for probes saved before picture tracks counted that found no text track:
+// the file may have a picture one.
+func (p mediaProbe) subsKnown() bool { return p.OwnSub >= 0 || p.SubCodec != "" }
+
+// ownKind names the own track in logs.
+func (p mediaProbe) ownKind() string {
+	if p.picture() {
+		return "PGS"
+	}
+	return "text"
 }
 
 type mediaProbeOutput struct {
@@ -68,7 +88,7 @@ func parseMediaProbe(out []byte) (mediaProbe, error) {
 	if err := json.Unmarshal(out, &p); err != nil {
 		return mediaProbe{}, err
 	}
-	m := mediaProbe{Audio: -1, TextSub: -1}
+	m := mediaProbe{Audio: -1, OwnSub: -1, SubCodec: "none"}
 	m.Duration, _ = strconv.ParseFloat(p.Format.Duration, 64)
 	if br, _ := strconv.ParseFloat(p.Format.BitRate, 64); br > 0 {
 		m.Bitrate = br / 8
@@ -94,19 +114,31 @@ func parseMediaProbe(out []byte) (mediaProbe, error) {
 			}
 		case "subtitle":
 			score := ownTrackScore(s.CodecName, s.Tags["language"], s.Tags["title"], s.Disposition["forced"] == 1,
-				s.Disposition["hearing_impaired"] == 1)
+				s.Disposition["hearing_impaired"] == 1, frameCount(s.Tags), m.Duration)
 			if score > subScore {
-				subScore, m.TextSub = score, s.Index
+				subScore, m.OwnSub, m.SubCodec = score, s.Index, s.CodecName
 			}
 		}
 	}
 	return m, nil
 }
 
+// pictureSubCodecs are picture subtitle codecs whose packet times give cue times: a PGS display
+// set with a picture starts a cue, the next one ends it (VobSub and DVB are not used).
+var pictureSubCodecs = map[string]bool{"hdmv_pgs_subtitle": true}
+
 // ownTrackScore rates a subtitle track of the file as the timing reference (higher is better, -1
-// not usable).
-func ownTrackScore(codec, lang, title string, forced, hi bool) int {
-	if !textSubCodecs[codec] {
+// not usable). Any text track beats a picture one; frames is the container's packet count (0
+// unknown), duration the file's.
+func ownTrackScore(codec, lang, title string, forced, hi bool, frames int, duration float64) int {
+	kind := 10
+	switch {
+	case pictureSubCodecs[codec]:
+		kind = 0
+		if !pictureFull(frames, duration) {
+			return -1 // an unmarked forced track (signs, foreign parts)
+		}
+	case !textSubCodecs[codec]:
 		return -1
 	}
 	f, h := subFlags(title)
@@ -114,12 +146,48 @@ func ownTrackScore(codec, lang, title string, forced, hi bool) int {
 		return -1 // a few lines only
 	}
 	if hi || h {
-		return 1 // sound descriptions blur the speech timing a little
+		return kind + 1 // sound descriptions blur the speech timing a little
 	}
 	if iso639To1(lang) == "en" {
-		return 3 // a line per cue (some languages merge lines)
+		return kind + 3 // a line per cue (some languages merge lines)
 	}
-	return 2
+	return kind + 2
+}
+
+// frameCount is a track's packet count from its Matroska statistics tag NUMBER_OF_FRAMES, in
+// any case and also as older mkvmerge versions name it ("NUMBER_OF_FRAMES-eng"); 0 unknown.
+func frameCount(tags map[string]string) int {
+	n, suffixed := 0, 0
+	for k, v := range tags {
+		name, lang, found := strings.Cut(k, "-")
+		if !strings.EqualFold(name, "NUMBER_OF_FRAMES") {
+			continue
+		}
+		if c, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && c > 0 {
+			if !found {
+				n = c
+			} else if lang != "" {
+				suffixed = c
+			}
+		}
+	}
+	if n > 0 {
+		return n
+	}
+	return suffixed
+}
+
+// pictureFull reports whether a picture track's packet count looks like dialogue all through:
+// two packets per line (picture, clear), 2 lines a minute at least (The Mentalist S03 d3g: 20
+// a minute); unknown counts pass.
+func pictureFull(frames int, duration float64) bool {
+	switch {
+	case frames <= 0:
+		return true
+	case duration > 0:
+		return float64(frames) >= 4*duration/60
+	}
+	return frames >= 100
 }
 
 // isDefaultStream reports whether the stream has the default disposition.
@@ -170,7 +238,7 @@ type syncWindowReader func(ctx context.Context, url string, p mediaProbe, start,
 // go through a byte cap (a subtitle read in a stretch without lines would read on to the next
 // cue, possibly the end of the file).
 func ffmpegSyncWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
-	capped, used, stop, err := cappedURL(url, windowByteCap(p, length))
+	capped, used, stop, err := cappedURL(url, windowByteCap(p, length), readRate(ctx))
 	if err != nil {
 		return refWindow{}, err
 	}
@@ -180,10 +248,10 @@ func ffmpegSyncWindow(ctx context.Context, url string, p mediaProbe, start, leng
 	return w, err
 }
 
-// ffmpegSubsWindow reads only the cues of the file's own text track in [start, start+length)
+// ffmpegSubsWindow reads only the cues of the file's own subtitle track in [start, start+length)
 // (the early windows of a file above the byte budget; no audio fallback).
 func ffmpegSubsWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
-	capped, used, stop, err := cappedURL(url, windowByteCap(p, length))
+	capped, used, stop, err := cappedURL(url, windowByteCap(p, length), readRate(ctx))
 	if err != nil {
 		return refWindow{}, err
 	}
@@ -196,23 +264,108 @@ func ffmpegSubsWindow(ctx context.Context, url string, p mediaProbe, start, leng
 	return w, err
 }
 
-// readSubsWindow reads the cues of the text track in the window; ok when there are enough.
+// readSubsWindow reads the cues of the own subtitle track in the window; ok when there are
+// enough. A picture track is copied into framecrc (packet times and sizes, see pictureCues).
 func readSubsWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, bool, error) {
-	if p.TextSub < 0 {
+	if p.OwnSub < 0 {
 		return refWindow{}, false, nil
 	}
 	// -copyts: after -ss a subtitle's times count from the keyframe before start, not from start
 	args := withInput([]string{"-nostdin", "-v", "error",
 		"-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
 		"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-copyts", "-start_at_zero"}, url)
-	args = append(args, "-map", fmt.Sprintf("0:%d", p.TextSub), "-c:s", "webvtt",
-		"-to", strconv.FormatFloat(start+length, 'f', 3, 64), "-f", "webvtt", "pipe:1")
+	to := strconv.FormatFloat(start+length, 'f', 3, 64)
+	if p.picture() {
+		args = append(args, "-map", fmt.Sprintf("0:%d", p.OwnSub), "-c", "copy", "-to", to, "-f", "framecrc", "pipe:1")
+	} else {
+		args = append(args, "-map", fmt.Sprintf("0:%d", p.OwnSub), "-c:s", "webvtt", "-to", to, "-f", "webvtt", "pipe:1")
+	}
 	out, err := runFFmpeg(ctx, args, 4<<20)
 	if ctx.Err() != nil {
 		return refWindow{}, false, err
 	}
+	// also when the cap ended the read: the window's lines are in
+	if p.picture() {
+		w, ok := spanWindow(pictureCues(framePackets(out), start+length), start, int(length*syncRate))
+		return w, ok, nil
+	}
 	w, ok := cueWindow(out, start, int(length*syncRate))
-	return w, ok, nil // also when the cap ended the read: the window's lines are in
+	return w, ok, nil
+}
+
+// PGS display sets (one packet each in Matroska): up to pgsClear bytes one clears the screen;
+// while a cue shows, one below pgsUpdate bytes only changes it (palette or position). A cue the
+// next set ends within pgsMinLine is no line: steps of a fade, one read as a clear and the next
+// as a picture (real lines show 0.9 s and more: The Mentalist S03E01 / S03E02, 1842 lines). The
+// play streams' cue tap (streaming/cuetap.go) reads them by the same rule.
+const (
+	pgsClear   = 64
+	pgsUpdate  = 1500
+	pgsMinLine = 0.25
+)
+
+// framePacket is a packet of stream 0 of a framecrc output (seconds, bytes).
+type framePacket struct {
+	at   float64
+	size int
+}
+
+// framePackets reads the stream 0 packets of a framecrc output ("#tb 0: 1/1000" sets the time
+// base; "0, dts, pts, duration, size, crc" lines).
+func framePackets(out []byte) []framePacket {
+	var tb float64
+	var ps []framePacket
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimSpace(l)
+		if rest, ok := strings.CutPrefix(l, "#tb 0:"); ok {
+			if a, b, ok := strings.Cut(strings.TrimSpace(rest), "/"); ok {
+				num, err1 := strconv.ParseFloat(a, 64)
+				den, err2 := strconv.ParseFloat(b, 64)
+				if err1 == nil && err2 == nil && num > 0 && den > 0 {
+					tb = num / den
+				}
+			}
+			continue
+		}
+		f := strings.Split(l, ",")
+		if tb == 0 || len(f) != 6 || strings.TrimSpace(f[0]) != "0" {
+			continue
+		}
+		pts, err1 := strconv.ParseInt(strings.TrimSpace(f[2]), 10, 64)
+		size, err2 := strconv.Atoi(strings.TrimSpace(f[4]))
+		if err1 == nil && err2 == nil && pts != math.MinInt64 {
+			ps = append(ps, framePacket{float64(pts) * tb, size})
+		}
+	}
+	return ps
+}
+
+// pictureCues turns PGS display sets into cues: one with a picture starts a cue that shows
+// until the next one that clears or replaces it; one still showing at end (where the read
+// stopped) shows until there, ownMaxCue at most. Packets of one time are one display set (some
+// remuxes keep a packet per segment).
+func pictureCues(ps []framePacket, end float64) []span {
+	var out []span
+	open := math.NaN()
+	for i := 0; i < len(ps); {
+		at, size := ps[i].at, 0
+		for ; i < len(ps) && ps[i].at == at; i++ {
+			size += ps[i].size
+		}
+		if !math.IsNaN(open) && (size <= pgsClear || size >= pgsUpdate) {
+			if at-open >= pgsMinLine {
+				out = append(out, span{open, at})
+			}
+			open = math.NaN()
+		}
+		if size > pgsClear && math.IsNaN(open) {
+			open = at
+		}
+	}
+	if !math.IsNaN(open) && end > open {
+		out = append(out, span{open, math.Min(end, open+ownMaxCue)})
+	}
+	return out
 }
 
 func readSyncWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
@@ -269,14 +422,19 @@ func runFFmpeg(ctx context.Context, args []string, max int) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// cueWindow turns a window's cues (times of the file) into a reference window; ok
+// cueWindow turns a window's cues (WebVTT, times of the file) into a reference window; ok
 // is false when there are too few cues to rely on.
 func cueWindow(vtt []byte, start float64, frames int) (refWindow, bool) {
-	var cues []liveCue
+	var cues []span
 	parseVTTStream(bytes.NewReader(vtt), func(c liveCue) bool {
-		cues = append(cues, c)
+		cues = append(cues, span{c.start, c.end})
 		return true
 	})
+	return spanWindow(cues, start, frames)
+}
+
+// spanWindow is cueWindow for cue times.
+func spanWindow(cues []span, start float64, frames int) (refWindow, bool) {
 	if len(cues) < 4 {
 		return refWindow{}, false
 	}
@@ -328,14 +486,16 @@ func windowByteCap(p mediaProbe, length float64) int64 {
 	return int64(p.Bitrate*length*1.25) + 16<<20
 }
 
-// cappedURL serves url to ffmpeg through a local proxy that stops after max bytes in total
-// (Range requests are passed on); used reports the bytes passed, stop ends the proxy.
-func cappedURL(url string, max int64) (capped string, used func() int64, stop func(), err error) {
+// cappedURL serves url to ffmpeg through a local proxy that stops after max bytes in total and
+// passes at most rate bytes/s (0: no limit; a pre-timing read beside playing streams). Range
+// requests are passed on; used reports the bytes passed, stop ends the proxy.
+func cappedURL(url string, max int64, rate float64) (capped string, used func() int64, stop func(), err error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, nil, err
 	}
 	var n atomic.Int64
+	began := time.Now()
 	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if n.Load() >= max {
 			http.Error(w, "byte cap reached", http.StatusServiceUnavailable)
@@ -365,10 +525,14 @@ func cappedURL(url string, max int64) (capped string, used func() int64, stop fu
 		for {
 			k, rerr := resp.Body.Read(buf)
 			if k > 0 {
-				if n.Add(int64(k)) > max {
+				total := n.Add(int64(k))
+				if total > max {
 					return // cut off: ffmpeg ends with what it has
 				}
 				if _, werr := w.Write(buf[:k]); werr != nil {
+					return
+				}
+				if rate > 0 && !pace(r.Context(), began, total, rate) {
 					return
 				}
 			}
@@ -379,4 +543,20 @@ func cappedURL(url string, max int64) (capped string, used func() int64, stop fu
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	return "http://" + ln.Addr().String() + "/file", n.Load, func() { _ = srv.Close() }, nil
+}
+
+// pace waits until n bytes since began are at most rate bytes/s; false when ctx ended.
+func pace(ctx context.Context, began time.Time, n int64, rate float64) bool {
+	ahead := time.Duration(float64(n)/rate*float64(time.Second)) - time.Since(began)
+	if ahead <= 0 {
+		return true
+	}
+	t := time.NewTimer(ahead)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

@@ -102,6 +102,26 @@ object SubtitleRules {
     /** Wait before asking a file again after its n-th server or network error in a row: 5 s doubling up to 5 min. */
     fun retryMs(n: Int): Long = minOf(5 * 60 * 1000L, 5000L shl (n - 1).coerceIn(0, 20))
 
+    /** X-Subtitle-Sync states whose timing no longer changes (docs/API.md). */
+    private val FINAL_SYNC = setOf("synced", "unchanged", "replaced", "poor", "original")
+
+    /** An answer of a subtitle file that will not change: complete and finally timed (only these are kept). */
+    fun finalCues(partial: Boolean, sync: String): Boolean = !partial && sync in FINAL_SYNC
+
+    /**
+     * When to ask a subtitle file again (ms), null once its answer is final: partial every LIVE_CUES_POLL_MS
+     * (AI_CUES_POLL_MS while the lines at the position are being translated, PENDING_CUES_POLL_MS while still
+     * untimed in the first PENDING_FAST_FOR_MS after it was put on: [shownMs]), complete but with timing that may
+     * still change (live, pending, failed) every PROVISIONAL_CUES_POLL_MS while the viewer watches.
+     */
+    fun pollMs(partial: Boolean, sync: String, translating: Boolean = false, shownMs: Long = Long.MAX_VALUE): Long? = when {
+        partial && translating -> SubtitleRepository.AI_CUES_POLL_MS
+        partial && sync == "pending" && shownMs < SubtitleRepository.PENDING_FAST_FOR_MS -> SubtitleRepository.PENDING_CUES_POLL_MS
+        partial -> SubtitleRepository.LIVE_CUES_POLL_MS
+        finalCues(false, sync) -> null
+        else -> SubtitleRepository.PROVISIONAL_CUES_POLL_MS
+    }
+
     /** Delay as kept: within ±[MAX_DELAY_S], rounded to 0.1 s. */
     fun clampDelay(seconds: Double): Double {
         if (seconds.isNaN()) return 0.0

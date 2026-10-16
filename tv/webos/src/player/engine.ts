@@ -3,16 +3,17 @@ import type { Locale, MessageKey } from '../lib/i18n';
 import { getProfileId } from '../lib/profile';
 import { seasonEpisodes, tvSeasons, isPlaceholderEpisodeName, type SeasonInfo } from '../lib/catalog';
 import {
-  StreamError, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
+  StreamError, cachedSource, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
   keepSourceAlive, playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, reuseSource, runtimeCheckQuery,
   saveProgress, sourceOf, titleProgress, writePlayerPrefs,
   type Availability, type PlayRequest, type QualityCap, type ResolveParams, type ResolvedSource, type StreamMeta, type StreamSource, restrictToSafeAudio,
 } from '../lib/stream';
 import {
-  AI_CUES_POLL_MS, LATE_SUBTITLE_POLL_MS, LIVE_CUES_POLL_MS, SUBALT_RETRY_MAX, bestSubtitleOf, fetchCueFile, fetchSubtitles,
-  hasSubtitleLang, lateSubtitles, mergeSubtitles, normLang, pickAudioTrack, pickSubtitle,
+  LATE_SUBTITLE_POLL_MS, SUBALT_RETRY_MAX, bestSubtitleOf, fetchCueFile, fetchSubtitles,
+  hasSubtitleLang, lateSubtitles, mergeSubtitles, normLang, pickAudioTrack, pickSubtitle, pretimeSubtitle,
   type AudioTrackInfo, type Cue, type SubtitleItem,
 } from '../lib/subtitles';
+import { pretimeNext } from './pretime';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from './bufferHealth';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuffer';
 import { lengthsMatch, timeScale } from './switchLength';
@@ -21,8 +22,13 @@ import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
 import { DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addSample, leadOf, leadSample, loadSamples, saveSamples } from './clockLead';
 import { isWebOS } from '../lib/webos';
 import { checkNet, type NetState } from '../lib/netStatus';
-import { canSeek, cueAnswer, handoverPlan, keepsLowerCap, lowerCap, openStart, progressToSave, subtitleRetryMs } from './playRules';
-import { DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy } from './subsLog';
+import {
+  LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs, handoverPlan, keepsLowerCap, lowerCap, openStart, progressToSave,
+  subtitleRetryMs,
+} from './playRules';
+import {
+  DELAY_SETTLE_MS, DelayLog, idHash, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
+} from './subsLog';
 
 // Port of web/src/features/watch/components/TorrentStreamPlayer.tsx for one <video> element.
 // The stream is a live fragmented MP4 requested at `t` that really starts at `offset`
@@ -301,6 +307,8 @@ export class PlayerEngine {
   private played = new Set<string>();
   private current = '';
   private nextWarm: ResolveParams | null = null;
+  // The next episode's subtitle timed before it opens (pretime.ts); stopped when the player moves on
+  private nextPretime: { cancelled: boolean } | null = null;
   private saveTimer: ReturnType<typeof setInterval>;
   private countdownTimer?: ReturnType<typeof setInterval>;
   private toastTimer?: Timer;
@@ -399,7 +407,8 @@ export class PlayerEngine {
 
   /** Exact playback position in the file (seconds). */
   positionNow(): number {
-    if (this.splitMode && this.video.buffered.length === 0) return this.startPos;
+    // A split stream's element still says 0 until it was moved to the asked position (align-split after the first data)
+    if (this.splitMode && (this.video.buffered.length === 0 || (this.mse && !this.mse.aligned))) return this.startPos;
     // (a muxed stream from 0 starts a few frames before 0)
     return Math.max(0, this.offset + (this.video.currentTime || 0));
   }
@@ -436,7 +445,7 @@ export class PlayerEngine {
     if (!e) return;
     const id = this.state.subId;
     const s = this.subItem(id);
-    this.plog?.note('subdelay', { ...e, id: id ? logToken(id, 24) : undefined, provider: s ? logToken(s.source, 16) : undefined });
+    this.plog?.note('subdelay', { ...e, id: id ? idHash(id) : undefined, provider: s ? logToken(s.source, 16) : undefined });
   }
 
   private stale(session: number) {
@@ -1074,7 +1083,31 @@ export class PlayerEngine {
     if (m.media_type === 'tv' && next && !this.nextWarm && nextWarmDue(position, this.state.duration)) {
       this.nextWarm = { type: 'tv', title: m.title, tmdb_id: m.tmdb_id, season: next.season, episode: next.episode, maxq: this.cap };
       prefetchResolve(this.nextWarm, { position, duration: this.state.duration });
+      this.pretimeNextEpisode(this.nextWarm);
     }
+  }
+
+  /** Once the next episode's source is known, the subtitle the open would pick there is timed before it opens. */
+  private pretimeNextEpisode(params: ResolveParams) {
+    const m = this.meta;
+    if (!m.tmdb_id) return;
+    if (this.nextPretime) this.nextPretime.cancelled = true;
+    const run = { cancelled: false };
+    this.nextPretime = run;
+    const langs = this.locale === 'tr' ? ['tr', 'en'] : ['en', 'tr'];
+    // The episode's audio is taken to be in this one's language
+    const audioLang = this.state.audioTracks.find(a => a.index === this.state.audio)?.language;
+    void pretimeNext<ResolvedSource, SubtitleItem>({
+      cachedSource: () => cachedSource(params),
+      subtitles: src => fetchSubtitles({
+        tmdb_id: m.tmdb_id, media_type: 'tv', season: params.season, episode: params.episode, hash: src.hash.toLowerCase(),
+        index: src.index, langs, title: src.torrent_title || src.file_name || undefined, year: m.year, ui_lang: this.locale,
+      }),
+      pick: items => pickSubtitle(items, { profileLang: this.locale, pref: readPlayerPrefs(this.pid).sub, audioLang }),
+      pretime: pretimeSubtitle,
+      wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      cancelled: () => run.cancelled || this.destroyed,
+    });
   }
 
   private onEnded() {
@@ -1771,13 +1804,21 @@ export class PlayerEngine {
     this.set({ subId: id, cues: [], aiTranslating: false });
     if (!id) return;
     const session = this.session;
+    // Untimed answers are asked for sooner in the first minutes after it was put on (cuePollMs)
+    const shownAt = Date.now();
     let loads = 0;
     let errors = 0;
     // The answer of the last `subs` event
     let logged: SubsShown | null = null;
     let loggedAt = 0;
-    // Asked again every LIVE_CUES_POLL_MS while partial: a live embedded track (read from the playing position
-    // on, it grows) and a subtitle the server still times to the file alike; the final answer stops it
+    // A complete answer whose timing may still change is asked again while the viewer watches
+    const whilePlaying = () => {
+      if (this.stale(session) || this.state.subId !== id) return;
+      if (this.state.playing) load();
+      else this.cueTimer = setTimeout(whilePlaying, PROVISIONAL_CUES_POLL_MS);
+    };
+    // Asked again while partial (cuePollMs): a live embedded track (read from the playing position on, it grows)
+    // and a subtitle the server still times to the file alike; then every minute while its timing is not final
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
       if (this.stale(session) || this.state.subId !== id) return;
       const answer = cueAnswer(f.cues.length, f.partial, loads);
@@ -1793,7 +1834,7 @@ export class PlayerEngine {
           this.applySubtitle(alt, 'fallback');
           return;
         }
-        if (errors === 0) this.noteSubsNone('failed', { id: logToken(id, 24) });
+        if (errors === 0) this.noteSubsNone('failed', { id: idHash(id) });
         // A server or network error without another subtitle to show: the same one again soon
         if (f.failed) this.cueTimer = setTimeout(load, subtitleRetryMs(++errors));
         return;
@@ -1801,18 +1842,20 @@ export class PlayerEngine {
       errors = 0;
       this.subFailed.delete(id);
       loads++;
-      // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew)
+      // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew);
+      // moves near what the viewer sees at once
       const next: SubsShown = { id, cues: f.cues, partial: f.partial, sync: f.sync };
-      const change = subsChange(logged, next, Date.now() - loggedAt);
+      const change = subsChange(logged, next, Date.now() - loggedAt, this.subtitleTime());
       if (change.log) {
-        this.plog?.note('subs', subsFields(this.subItem(id), next, logged ? 'poll' : why, this.state.subDelay, change));
+        this.plog?.note('subs', subsFields(this.subItem(id), next, logged ? 'poll' : why, this.state.subDelay, change.moves));
         logged = next;
         loggedAt = Date.now();
       }
       // The overlay looks the cue up again in the new list; the delay stays
       if (!!f.translating !== this.state.aiTranslating) this.set({ aiTranslating: !!f.translating });
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
-      if (f.partial) this.cueTimer = setTimeout(load, f.translating ? AI_CUES_POLL_MS : LIVE_CUES_POLL_MS);
+      const wait = cuePollMs(f, Date.now() - shownAt);
+      if (wait !== null) this.cueTimer = setTimeout(f.partial ? load : whilePlaying, wait);
     });
     load();
   }
@@ -2049,6 +2092,7 @@ export class PlayerEngine {
     // The finished episode is done; the next one was warmed for this moment
     releaseTitle(paramsOf(this.meta));
     this.nextWarm = null;
+    if (this.nextPretime) this.nextPretime.cancelled = true;
     this.meta = { ...this.meta, season: next.season, episode: next.episode, episode_title: undefined, runtime: undefined };
     this.startAt = undefined;
     this.given = undefined;

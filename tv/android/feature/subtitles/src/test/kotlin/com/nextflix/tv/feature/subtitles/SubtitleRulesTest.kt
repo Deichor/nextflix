@@ -125,6 +125,42 @@ class SubtitleRulesTest {
     }
 
     @Test
+    fun onlyACompleteAnswerWithFinalTimingIsFinal() {
+        for (sync in listOf("synced", "unchanged", "replaced", "poor", "original")) {
+            assertTrue(sync, SubtitleRules.finalCues(false, sync))
+            assertFalse(sync, SubtitleRules.finalCues(true, sync))
+        }
+        // Provisional timing without the partial mark (no live audio for 90 s), or an unknown state
+        for (sync in listOf("live", "pending", "failed", "-", "")) assertFalse(sync, SubtitleRules.finalCues(false, sync))
+    }
+
+    @Test
+    fun partialAnswersArePolledEvery15sProvisionalOnesEveryMinuteFinalOnesNever() {
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "live"))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "original"))
+        assertEquals(SubtitleRepository.AI_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", translating = true))
+        assertEquals(SubtitleRepository.PROVISIONAL_CUES_POLL_MS, SubtitleRules.pollMs(false, "live"))
+        assertEquals(SubtitleRepository.PROVISIONAL_CUES_POLL_MS, SubtitleRules.pollMs(false, "pending"))
+        assertEquals(SubtitleRepository.PROVISIONAL_CUES_POLL_MS, SubtitleRules.pollMs(false, "failed"))
+        assertNull(SubtitleRules.pollMs(false, "synced"))
+        assertNull(SubtitleRules.pollMs(false, "original"))
+        assertEquals(listOf(15_000L, 3_000L, 60_000L), listOf(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRepository.AI_CUES_POLL_MS, SubtitleRepository.PROVISIONAL_CUES_POLL_MS))
+    }
+
+    @Test
+    fun untimedPartialAnswersArePolledEvery5sInTheFirst3Minutes() {
+        val fast = SubtitleRepository.PENDING_FAST_FOR_MS
+        assertEquals(SubtitleRepository.PENDING_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", shownMs = 0))
+        assertEquals(SubtitleRepository.PENDING_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", shownMs = fast - 1))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", shownMs = fast))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending"))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "live", shownMs = 0))
+        assertEquals(SubtitleRepository.AI_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", translating = true, shownMs = 0))
+        assertEquals(SubtitleRepository.PROVISIONAL_CUES_POLL_MS, SubtitleRules.pollMs(false, "pending", shownMs = 0))
+        assertEquals(listOf(5_000L, 180_000L), listOf(SubtitleRepository.PENDING_CUES_POLL_MS, fast))
+    }
+
+    @Test
     fun delayIsLimitedAndRounded() {
         assertEquals(1.5, SubtitleRules.clampDelay(1.5), 0.0)
         assertEquals(0.3, SubtitleRules.clampDelay(0.30000000004), 0.0)

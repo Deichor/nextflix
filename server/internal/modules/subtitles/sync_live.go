@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"sort"
@@ -19,7 +20,9 @@ import (
 // streams (a seek starts a new one; ranges overlap, in any order) merge. Every 30 s of new
 // audio re-fits the subtitles served for the file with all windows, read and live. Until the
 // file is covered such results stay provisional: answers are partial while it plays, so the
-// players keep asking (every 15 s) and take the better timing.
+// players keep asking (every 15 s) and take the better timing. While a subtitle served in the
+// first minutes of a viewing is untimed, every 10 s of audio re-fits it (at most every 5 s), so
+// its first timing comes as soon as the windows allow.
 
 const (
 	liveWindowFrames  = int(syncWindowLen * syncRate) // frames per grid window
@@ -40,6 +43,11 @@ const (
 	liveSessionGap    = 5 * time.Minute               // a request after this long starts a new session
 	liveRefitDelay    = 3 * time.Second               // batches a burst of audio (syncer.refitDelay)
 	liveRefitGap      = 15 * time.Second              // between re-fits of one file (syncer.refitGap)
+	livePendingGrowth = 10.0                          // seconds of new audio that re-fit a file with an untimed served subtitle
+	livePendingGap    = 5 * time.Second               // between re-fits of such a file (syncer.pendingGap)
+	livePendingFor    = 5 * time.Minute               // of a viewing, in which an untimed subtitle is re-fitted that often
+	liveNearFor       = 2 * time.Minute               // a player position this recent counts for the move log
+	liveNearAhead     = 300.0                         // seconds ahead of the viewer whose cue moves are logged
 )
 
 // liveFile is the live reference of one file. Lock order: syncer.mu before liveFile.mu.
@@ -56,7 +64,10 @@ type liveFile struct {
 	ownRead  map[int]int     // frames read per unfinished own-track window
 	ownDone  map[int]liveWin // finished own-track windows
 	ownTaps  int
-	ownGrown float64 // seconds of own track read since the last re-fit was asked for
+	ownGrown float64  // seconds of own track read since the last re-fit was asked for
+	ownPic   bool     // the cue tap reads a picture (PGS) track
+	check    ownCheck // the own track against the speech (sync_owncheck.go)
+	checkN   int      // stretches that check compared (it is redone when there are more)
 	duration float64
 	complete bool
 	taps     int
@@ -67,6 +78,9 @@ type liveFile struct {
 	refit    bool    // a re-fit loop runs
 	again    bool    // more audio arrived meanwhile
 	lastFit  time.Time
+	// pending: a subtitle served in a viewing's first minutes is untimed (re-fit sooner)
+	pending bool
+	wake    chan struct{} // the re-fit loop's wait is computed again
 }
 
 // liveWin is a finished window: its speech frames (own-track windows: frames a cue shows), one
@@ -81,12 +95,40 @@ type liveSaved struct {
 	Windows  map[int]liveWin `json:"windows"`
 	Own      map[int]liveWin `json:"own,omitempty"`
 	Complete bool            `json:"complete,omitempty"`
+	Check    *ownSaved       `json:"check,omitempty"` // the own-track check, once decided
 }
 
 func newLiveFile(hash string, index int) *liveFile {
 	return &liveFile{fk: syncFileKey(hash, index), hash: strings.ToLower(hash), index: index,
 		chunks: map[int][]uint8{}, covered: map[int]int{}, done: map[int]liveWin{},
-		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}}
+		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}, wake: make(chan struct{}, 1)}
+}
+
+// growStep is the new audio (or own track) in seconds that re-fits the file (f.mu held).
+func (f *liveFile) growStep() float64 {
+	if f.pending {
+		return livePendingGrowth
+	}
+	return liveRefitGrowth
+}
+
+// setPending marks whether an untimed subtitle is served in a viewing's first minutes.
+func (f *liveFile) setPending(p bool) {
+	f.mu.Lock()
+	changed := f.pending != p
+	f.pending = p
+	f.mu.Unlock()
+	if changed {
+		f.nudge()
+	}
+}
+
+// nudge makes a waiting re-fit loop compute its wait again.
+func (f *liveFile) nudge() {
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
 }
 
 // windowFrames is the length of grid window w (the last one ends with the file).
@@ -189,7 +231,7 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 	}
 	f.checkComplete()
 	f.heard += float64(len(frames)) / syncRate
-	if f.grown >= liveRefitGrowth {
+	if f.grown >= f.growStep() {
 		f.grown = 0
 		return true
 	}
@@ -199,10 +241,16 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 // windows returns the live reference windows (finished ones, and unfinished ones with at least
 // liveMinRun frames heard in one stretch) and the seconds they cover. Own-track windows come
 // first; a speech window of the same stretch is left out.
-func (f *liveFile) windows() ([]refWindow, float64) {
+func (f *liveFile) windows() ([]refWindow, float64) { return f.windowsOf(true) }
+
+// windowsOf is windows, without own-track windows unless withOwn.
+func (f *liveFile) windowsOf(withOwn bool) ([]refWindow, float64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := f.ownWindows()
+	var out []refWindow
+	if withOwn {
+		out = f.ownWindows()
+	}
 	own := len(out)
 	for w, d := range f.done {
 		lw := refWindow{Start: float64(w) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)}
@@ -390,15 +438,16 @@ func (y *syncer) openSpeech(hash string, index int, start float64) *SpeechSink {
 	return &SpeechSink{y: y, f: f, start: start, base: int(math.Round(start * syncRate)), frame: -1, lastW: -1}
 }
 
-// readEarly reads, once per file, the cues of its own text track in the first liveEarlyWindows
-// minutes from where playback starts, when the file reads no windows (above the byte budget):
-// the player fetches those bytes anyway (from TorrServer's cache), and exact lines fit sooner
-// and better than the speech heard so far (Avatar: Seven Havens S01E02 replayed: the first fit
-// after 120 s of audio instead of 180 s, the first 5 minutes within 0.3 s 81 % instead of 66 %).
+// readEarly reads, once per file, the cues of its own subtitle track in the first
+// liveEarlyWindows minutes from where playback starts, when the file reads no windows (above
+// the byte budget): the player fetches those bytes anyway (from TorrServer's cache), and exact
+// lines fit sooner and better than the speech heard so far (Avatar: Seven Havens S01E02
+// replayed: the first fit after 120 s of audio instead of 180 s, the first 5 minutes within
+// 0.3 s 81 % instead of 66 %).
 func (y *syncer) readEarly(hash string, index int, start float64) {
 	fk := syncFileKey(hash, index)
 	y.mu.Lock()
-	if p, known := y.probes[fk]; y.early[fk] || known && p.TextSub < 0 {
+	if p, known := y.probes[fk]; y.early[fk] || known && p.OwnSub < 0 {
 		y.mu.Unlock()
 		return
 	}
@@ -428,8 +477,19 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 			time.Sleep(5 * time.Second)
 		}
 	}
-	if !r.Skipped || r.Probe.TextSub < 0 || len(r.Windows) > 0 || y.liveFile(hash, index).ownTapping() {
-		return // (the play stream's cue tap brings those cues)
+	if f := y.liveFile(hash, index); !r.Skipped || len(r.Windows) > 0 || f.ownTapping() || f.ownState() == ownOther {
+		return // (the play stream's cue tap brings those cues; not timed to the file: no use)
+	}
+	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
+	if !r.Probe.subsKnown() {
+		p, err := y.probeFile(ctx, hash, index, url)
+		if err != nil {
+			return
+		}
+		r.Probe = y.updateRefSubs(fk, st, p)
+	}
+	if r.Probe.OwnSub < 0 {
+		return
 	}
 	select {
 	case y.sem <- struct{}{}:
@@ -437,7 +497,6 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 	case <-ctx.Done():
 		return
 	}
-	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
 	at := math.Floor(start)
 	if r.Probe.Duration > 0 {
 		at = math.Max(0, math.Min(at, r.Probe.Duration-liveEarlyWindows*syncWindowLen))
@@ -464,8 +523,8 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 		y.saveRef(fk, st, r)
 	}
 	st.mu.Unlock()
-	log.Printf("subtitles: timing reference of %s:%d: %d early windows of its own track from %.0fs, %d MB read", hash[:8], index,
-		len(got), at, readBytes(got)>>20)
+	log.Printf("subtitles: timing reference of %s:%d: %d early windows of its own %s track from %.0fs, %d MB read", hash[:8], index,
+		len(got), r.Probe.ownKind(), at, readBytes(got)>>20)
 	y.onGrow(y.liveFile(hash, index))
 }
 
@@ -495,6 +554,10 @@ func (y *syncer) liveFile(hash string, index int) *liveFile {
 				}
 			}
 			f.complete = saved.Complete
+			if c := saved.Check; c != nil && (c.State == ownTimed || c.State == ownOther) {
+				f.check = ownCheck{State: c.State, Tight: c.Tight && c.State == ownTimed, Pairs: c.Pairs}
+				f.checkN = c.Pairs
+			}
 		}
 	}
 	y.mu.Lock()
@@ -549,6 +612,9 @@ func (y *syncer) saveLive(f *liveFile) {
 			saved.Own[w] = d
 		}
 	}
+	if f.check.State != "" {
+		saved.Check = &ownSaved{State: f.check.State, Tight: f.check.Tight, Pairs: f.check.Pairs}
+	}
 	f.dirty = false
 	f.mu.Unlock()
 	if b, err := json.Marshal(saved); err == nil {
@@ -583,10 +649,7 @@ func (y *syncer) scheduleRefit(f *liveFile) {
 	f.mu.Unlock()
 	go func() {
 		for {
-			f.mu.Lock()
-			wait := max(y.refitDelay, y.refitGap-time.Since(f.lastFit))
-			f.mu.Unlock()
-			time.Sleep(wait)
+			y.waitRefit(f)
 			y.refitFile(f)
 			f.mu.Lock()
 			f.lastFit = time.Now()
@@ -601,16 +664,47 @@ func (y *syncer) scheduleRefit(f *liveFile) {
 	}()
 }
 
+// waitRefit waits refitDelay (a burst of audio is one re-fit) and refitGap since the file's last
+// re-fit (pendingGap while it has an untimed subtitle); a nudge computes the wait again.
+func (y *syncer) waitRefit(f *liveFile) {
+	start := time.Now()
+	for {
+		f.mu.Lock()
+		gap := y.refitGap
+		if f.pending {
+			gap = y.pendingGap
+		}
+		due := start.Add(y.refitDelay)
+		if d := f.lastFit.Add(gap); d.After(due) {
+			due = d
+		}
+		f.mu.Unlock()
+		wait := time.Until(due)
+		if wait <= 0 {
+			return
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-t.C:
+			return
+		case <-f.wake:
+			t.Stop()
+		}
+	}
+}
+
 type servedSub struct {
 	key, inner, fk string
 	hash           string
 	index          int
 	first, last    time.Time
+	// the player's position at its last request (seconds of the file, 0 unknown)
+	at float64
 }
 
-// noteServed records a file request of a subtitle served for a file; fresh is true during the
-// first liveGrace of a viewing session.
-func (y *syncer) noteServed(key, inner, hash string, index int) (fresh bool) {
+// noteServed records a file request of a subtitle served for a file at the player's position t;
+// first is true for the first request of a viewing session, fresh during its first liveGrace.
+func (y *syncer) noteServed(key, inner, hash string, index int, t float64) (first, fresh bool) {
 	now := time.Now()
 	y.mu.Lock()
 	defer y.mu.Unlock()
@@ -625,9 +719,127 @@ func (y *syncer) noteServed(key, inner, hash string, index int) (fresh bool) {
 		}
 		s = &servedSub{key: key, inner: inner, fk: syncFileKey(hash, index), hash: strings.ToLower(hash), index: index, first: now}
 		y.served[key] = s
+		first = true
 	}
 	s.last = now
-	return now.Sub(s.first) < liveGrace
+	if t > 0 {
+		s.at = t
+	}
+	return first, now.Sub(s.first) < liveGrace
+}
+
+// viewerAt is where the player of a served subtitle is now (seconds of the file), from its last
+// request with a position; false when unknown or not recent.
+func (y *syncer) viewerAt(key string) (float64, bool) {
+	y.mu.Lock()
+	s := y.served[key]
+	var at float64
+	var since time.Duration
+	if s != nil {
+		at, since = s.at, time.Since(s.last)
+	}
+	y.mu.Unlock()
+	if s == nil || at <= 0 || since > liveNearFor {
+		return 0, false
+	}
+	if y.livePlaying(s.fk) {
+		at += since.Seconds() // it played on since (a pause is not known here)
+	}
+	return at, true
+}
+
+// servedCues is what a player of key shows with result m (the subtitle as it is while untimed).
+func (y *syncer) servedCues(key string, base []byte, m *syncMeta) []liveCue {
+	if !untimedMeta(m) {
+		if a, ok := y.result(key, base); ok {
+			return vttCues(a.VTT)
+		}
+	}
+	return vttCues(base)
+}
+
+// logNear logs how a change of what is served moved the cues within liveNearAhead seconds ahead
+// of the viewer (the player's last position), so slips near the viewer show in the log.
+func (y *syncer) logNear(key, inner, hash string, index int, before, after []liveCue) {
+	at, ok := y.viewerAt(key)
+	if !ok {
+		return
+	}
+	mv := movesNear(before, after, at, at+liveNearAhead)
+	if mv.moved == 0 && mv.other == 0 {
+		return
+	}
+	other := ""
+	if mv.other > 0 {
+		other = fmt.Sprintf(", %d lines of another subtitle", mv.other)
+	}
+	log.Printf("subtitles: timing of %s on %s:%d moved %d of %d cues within %.0f s of the viewer at %.0fs: max %+.2fs, median %+.2fs%s",
+		shortSubID(inner), hash[:8], index, mv.moved, mv.cues, liveNearAhead, at, mv.max, mv.median, other)
+}
+
+type cueMoves struct {
+	cues, moved, other int     // cues in the range, moved by 0.1 s or more, without a partner (another subtitle)
+	max, median        float64 // signed: the largest move in size, the median move of the moved ones
+}
+
+// movesNear compares two served cue lists in [from, to) (old or new start): each cue is matched to
+// the old cue of the same text that started nearest to it.
+func movesNear(before, after []liveCue, from, to float64) cueMoves {
+	old := map[string][]float64{}
+	for _, c := range before {
+		old[c.text] = append(old[c.text], c.start)
+	}
+	var mv cueMoves
+	var moves []float64
+	for _, c := range after {
+		starts := old[c.text]
+		best, found := 0.0, false
+		for _, s := range starts {
+			if !found || math.Abs(s-c.start) < math.Abs(best-c.start) {
+				best, found = s, true
+			}
+		}
+		in := c.start >= from && c.start < to
+		if found {
+			in = in || best >= from && best < to
+		}
+		if !in {
+			continue
+		}
+		mv.cues++
+		if !found {
+			mv.other++
+			continue
+		}
+		if d := c.start - best; math.Abs(d) >= 0.1 {
+			mv.moved++
+			moves = append(moves, d)
+			if math.Abs(d) > math.Abs(mv.max) {
+				mv.max = d
+			}
+		}
+	}
+	if len(moves) > 0 {
+		sort.Float64s(moves)
+		mv.median = moves[len(moves)/2]
+	}
+	return mv
+}
+
+// untimedMeta reports a result served as the subtitle is: none yet, a provisional one that does
+// not fit (yet), or a pre-timed one its played audio did not back yet.
+func untimedMeta(m *syncMeta) bool {
+	return m == nil || m.Live && (m.Pre || !m.fits() && m.State != syncStateReplaced)
+}
+
+// markPending notes that the file serves an untimed subtitle in a viewing's first minutes, and
+// re-fits it soon when it has live windows.
+func (y *syncer) markPending(hash string, index int) {
+	f := y.liveFile(hash, index)
+	f.setPending(true)
+	if _, covered := f.windows(); covered > 0 {
+		y.onGrow(f)
+	}
 }
 
 func (y *syncer) servedFor(fk string) []servedSub {
@@ -647,8 +859,20 @@ func (y *syncer) servedFor(fk string) []servedSub {
 func (y *syncer) refitFile(f *liveFile) {
 	subs := y.servedFor(f.fk)
 	if len(subs) == 0 {
+		f.setPending(false)
 		return
 	}
+	y.refitSubs(f, subs)
+	pending := false
+	for _, s := range subs {
+		if time.Since(s.first) < livePendingFor && untimedMeta(y.meta(s.key)) {
+			pending = true
+		}
+	}
+	f.setPending(pending)
+}
+
+func (y *syncer) refitSubs(f *liveFile, subs []servedSub) {
 	y.liveSem <- struct{}{}
 	defer func() { <-y.liveSem }()
 	ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
@@ -677,11 +901,13 @@ func (y *syncer) refitFile(f *liveFile) {
 }
 
 // liveRef is the file's read reference when there is one, without waiting for a read that
-// runs (then, like for files above the byte budget, only the probe).
+// runs (then, like for files above the byte budget, only the probe; Busy).
 func (y *syncer) liveRef(ctx context.Context, hash string, index int) syncRef {
 	fk := syncFileKey(hash, index)
 	st, release := y.refState(fk)
+	busy := true
 	if st.mu.TryLock() {
+		busy = false
 		ok := y.loadRef(fk, st)
 		var r syncRef
 		if ok {
@@ -695,7 +921,7 @@ func (y *syncer) liveRef(ctx context.Context, hash string, index int) syncRef {
 	}
 	release()
 	p, _ := y.probeFile(ctx, hash, index, torrFileURL(y.svc.cfg.TorrServerURL, hash, index))
-	return syncRef{Probe: p, Skipped: true}
+	return syncRef{Probe: p, Skipped: true, Busy: busy}
 }
 
 // kickLive re-fits the file soon when it has live windows (a timing whose read failed).

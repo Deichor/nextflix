@@ -109,9 +109,20 @@ func localOffset(starts, own []float64, search float64) (float64, bool) {
 	return d, float64(on) >= refineMinShare*float64(len(starts))
 }
 
-// refineWindows are the own-track windows the refinement uses: read and live ones, also where
-// they overlap (the fit takes one window per stretch).
-func refineWindows(read, live []refWindow) []refWindow {
+// refineWindows are the own-track windows the refinement uses: none unless the own track was
+// checked to be timed to the file and tight (sync_owncheck.go; moving lines onto loose roll-up
+// captions made them worse: S02E22, of the lines moved, 78 % within 0.3 s of the speech before,
+// 39 % after).
+func refineWindows(ref syncRef, live []refWindow) []refWindow {
+	if !ref.Own.Tight {
+		return nil
+	}
+	return subsWindowsOf(ref.Windows, live)
+}
+
+// subsWindowsOf are the own-track windows of read and live ones, also where they overlap (the
+// fit takes one window per stretch).
+func subsWindowsOf(read, live []refWindow) []refWindow {
 	var out []refWindow
 	for _, w := range append(append([]refWindow(nil), read...), live...) {
 		if w.Kind == "subs" {

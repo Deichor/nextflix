@@ -366,7 +366,7 @@ export class MseStream {
   private objectUrl: string;
   private lanes: Lane[];
   private stopped = false;
-  private aligned = false;
+  private alignDone = false;
   private ready = false;
   private job: SpliceJob | null = null;
   private timer: ReturnType<typeof setInterval>;
@@ -389,6 +389,11 @@ export class MseStream {
     video.addEventListener('waiting', this.onWaiting);
     video.src = this.objectUrl;
     this.timer = setInterval(() => this.maintain(), 1000);
+  }
+
+  /** The first data is in and the element was moved to where the stream starts (split: the asked position) */
+  get aligned(): boolean {
+    return this.alignDone;
   }
 
   /** Still downloading (false once the file is in, or while paused with a full buffer) */
@@ -489,8 +494,8 @@ export class MseStream {
     if (b.length > 0 && lane.mediaFrom < 0) lane.mediaFrom = b.start(0);
     lane.settledAppend();
     const v = this.video;
-    if (!this.aligned && v.buffered.length > 0) {
-      this.aligned = true;
+    if (!this.alignDone && v.buffered.length > 0) {
+      this.alignDone = true;
       const start = v.buffered.start(0);
       if (this.split) {
         // Split streams start on the keyframe before the asked position: play from that position

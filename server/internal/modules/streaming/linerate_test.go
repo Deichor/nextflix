@@ -164,6 +164,56 @@ func TestLineLoad(t *testing.T) {
 	}
 }
 
+// The next episode's subtitle timing reads only with a known line that the playing streams (of
+// known bitrate) leave half of, and takes half of what they leave; a file of the playing torrent
+// (a season pack) also needs that room on its measured swarm rate.
+func TestRoomToRead(t *testing.T) {
+	s := NewService(nil, Config{})
+	s.line.once.Do(func() {}) // no stored value, no sampler
+	if s.RoomToRead("dd") != 0 {
+		t.Fatal("room on an unknown line")
+	}
+	s.line.load(4*mbps, time.Now())
+	if r := s.RoomToRead("dd"); !near(r, 2) {
+		t.Fatalf("%.2f MB/s while nothing plays", r/mbps)
+	}
+	s.playing["aa"] = 1
+	p := &tsProbe{}
+	p.Format.BitRate = "15938355" // 1.9 MB/s
+	s.probeCache.Store("aa:1", p)
+	if r := s.RoomToRead("dd"); !near(r, 1.05) {
+		t.Fatalf("%.2f MB/s beside a stream needing 1.9 of 4 MB/s", r/mbps)
+	}
+	// The next episode in the playing torrent: its swarm has to leave room too
+	if s.RoomToRead("AA") != 0 {
+		t.Fatal("room on a swarm of unknown rate")
+	}
+	s.warms["show:1:1"] = &tsWarm{source: "aa", health: &tsHealth{Rate: int64(3 * mbps)}}
+	if s.RoomToRead("aa") != 0 {
+		t.Fatal("room on a swarm delivering 3 MB/s for a stream of 1.9")
+	}
+	s.warms["show:1:1"].health.Rate = int64(4.5 * mbps)
+	if r := s.RoomToRead("aa"); !near(r, 1.05) {
+		t.Fatalf("%.2f MB/s on a swarm delivering 4.5 MB/s", r/mbps)
+	}
+	s.warms["show:1:1"].health.Rate = int64(math.Round(3.9 * mbps))
+	if r := s.RoomToRead("aa"); !near(r, 1) {
+		t.Fatalf("%.2f MB/s on a swarm delivering 3.9 MB/s", r/mbps)
+	}
+	q := &tsProbe{}
+	q.Format.BitRate = "4194304" // 0.5 MB/s
+	s.playing["bb"] = 1
+	s.probeCache.Store("bb:2", q)
+	if s.RoomToRead("dd") != 0 {
+		t.Fatal("room beside streams needing 2.4 of 4 MB/s")
+	}
+	delete(s.playing, "bb")
+	s.playing["cc"] = 1 // bitrate unknown
+	if s.RoomToRead("dd") != 0 {
+		t.Fatal("room beside a stream of unknown bitrate")
+	}
+}
+
 func TestLineState(t *testing.T) {
 	s := NewService(nil, Config{})
 	s.playing["aa"] = 1

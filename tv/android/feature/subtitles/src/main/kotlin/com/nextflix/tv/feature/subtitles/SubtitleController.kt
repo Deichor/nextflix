@@ -27,6 +27,9 @@ internal interface SubtitleBackend {
     suspend fun list(query: SubtitleQuery, refresh: Boolean): List<SubtitleTrack>
     suspend fun cues(id: String, at: Double?): CueFile
 
+    /** The server times a subtitle of a file that does not play yet (the next episode). */
+    suspend fun pretime(id: String)
+
     /** The profile's last subtitle choice (PlayerPrefs.subtitle). */
     fun choice(): SubtitleChoice?
 
@@ -46,6 +49,7 @@ private class CoreBackend(private val core: Core) : SubtitleBackend {
 
     override suspend fun list(query: SubtitleQuery, refresh: Boolean) = repository.list(query, refresh)
     override suspend fun cues(id: String, at: Double?) = repository.cues(id, at)
+    override suspend fun pretime(id: String) = repository.pretime(id)
     override fun choice(): SubtitleChoice? = core.playerPrefs.get(core.session.profileId).subtitle
 
     // Undispatched: the in-memory prefs change before this returns, and writes queue on the mutex in call order
@@ -75,15 +79,17 @@ private class CoreBackend(private val core: Core) : SubtitleBackend {
  * - default pick: the profile's last choice (PlayerPrefs.subtitle: off / language + id), else for a Turkish profile
  *   Turkish unless the audio is Turkish (pickSubtitle);
  * - load cues of the selected subtitle; poll partial files (live tracks, timing in progress) every 15 s with the
- *   position, AI translations every 3 s; a subtitle without cues is replaced by the next one of its language
- *   (another provider first);
+ *   position (every 5 s while untimed in its first 3 minutes), AI translations every 3 s, complete files whose
+ *   timing may still change (live, pending, failed) every minute while playing; a subtitle without cues is replaced
+ *   by the next one of its language (another provider first);
+ * - [pretime]: the next episode's subtitle (the open's default pick) is timed by the server before it opens;
  * - [select] saves the viewer's choice in PlayerPrefs; [setDelay] changes the timing (±60 s, 0.5 s steps in the
  *   panel) and keeps it per file (SubtitleTimingStore).
  *
  * The player calls [start] once the playing file (hash / index) is known (every fresh open of a source),
- * [onPosition] about once a second, [restart] when it splices another file in seamlessly (the old subtitle stays
- * until the new list picks one), and [stop] when it closes. [events] asks for the subalt lookup and announces late
- * subtitles; [log] receives the `subs` / `subs-none` / `subdelay` playback log events.
+ * [onPosition] about once a second (with whether it plays), [restart] when it splices another file in seamlessly
+ * (the old subtitle stays until the new list picks one), and [stop] when it closes. [events] asks for the subalt
+ * lookup and announces late subtitles; [log] receives the `subs` / `subs-none` / `subdelay` playback log events.
  * All methods are meant for the main thread.
  */
 class SubtitleController internal constructor(
@@ -109,6 +115,7 @@ class SubtitleController internal constructor(
     private var query: SubtitleQuery? = null
     private var audioLang: String? = null
     private var position = 0.0
+    private var playing = true
 
     // Everything of the playing file: list, retries, late checks, cue polling
     private var session: Job? = null
@@ -192,9 +199,10 @@ class SubtitleController internal constructor(
         return d
     }
 
-    /** Current playback position (s, file timeline); drives live-track and AI polling. */
-    fun onPosition(seconds: Double) {
+    /** Current playback position (s, file timeline); drives live-track and AI polling. [playing]: not paused or stalled. */
+    fun onPosition(seconds: Double, playing: Boolean? = null) {
         if (seconds.isFinite() && seconds >= 0) position = seconds
+        if (playing != null) this.playing = playing
     }
 
     /** The audio track changed (the default pick may change). */
@@ -206,6 +214,16 @@ class SubtitleController internal constructor(
         if (userPicked || !decided || list.isEmpty() || backend.choice() != null) return
         val id = SubtitleRules.pick(list, profileLanguage(q), null, lang)
         if (id != _state.value.selectedId) apply(id, SubsLog.Why.Auto)
+    }
+
+    /**
+     * The next episode plays [query]'s file: its list is asked and the subtitle the open would pick there (the
+     * playing audio's language taken for it) is timed by the server before it opens (webOS player/pretime.ts).
+     */
+    fun pretime(query: SubtitleQuery): Job = root.launch {
+        val items = backend.list(query, refresh = false)
+        val id = SubtitleRules.pick(items, profileLanguage(query), backend.choice(), audioLang) ?: return@launch
+        backend.pretime(id)
     }
 
     fun stop() {
@@ -364,12 +382,14 @@ class SubtitleController internal constructor(
     }
 
     // Asked again while partial: a live embedded track (read from the position on, it grows), a subtitle the server
-    // still times to the file and an AI translation alike; the final answer stops it
+    // still times to the file and an AI translation alike; then every minute while playing until the timing is final
     private suspend fun loadCues(id: String, why: SubsLog.Why) {
         var loads = 0
         var errors = 0
         var logged: SubsLog.Shown? = null
         var loggedAt = 0L
+        // Untimed answers are asked for sooner in the first minutes after it was put on
+        val shownAt = clock()
         while (true) {
             val f = backend.cues(id, position)
             if (_state.value.selectedId != id) return
@@ -386,7 +406,7 @@ class SubtitleController internal constructor(
                         apply(alt, SubsLog.Why.Fallback)
                         return
                     }
-                    if (errors == 0) noteNone("failed", mapOf("id" to SubsLog.token(id, 24)))
+                    if (errors == 0) noteNone("failed", mapOf("id" to SubsLog.idHash(id)))
                     // A server or network error without another subtitle to show: the same one again soon
                     if (!f.failed) return
                     delay(SubtitleRules.retryMs(++errors))
@@ -397,12 +417,14 @@ class SubtitleController internal constructor(
             errors = 0
             failed.remove(id)
             loads++
-            // Logged when it starts and when an answer moved, replaced or finished the cues (not when a live track grew)
+            // Logged when it starts and when an answer moved, replaced or finished the cues (not when a live track grew);
+            // moves near what the viewer sees at once
             val next = SubsLog.Shown(id, f.cues, f.partial, f.sync)
             val now = clock()
-            val change = SubsLog.change(logged, next, now - loggedAt)
+            val delaySeconds = _state.value.delaySeconds
+            val change = SubsLog.change(logged, next, now - loggedAt, position - delaySeconds)
             if (change.log) {
-                note("subs", SubsLog.subsFields(item(id), next, if (logged != null) SubsLog.Why.Poll else why, _state.value.delaySeconds, change))
+                note("subs", SubsLog.subsFields(item(id), next, if (logged != null) SubsLog.Why.Poll else why, delaySeconds, change.moves))
                 logged = next
                 loggedAt = now
             }
@@ -414,8 +436,10 @@ class SubtitleController internal constructor(
                     sync = f.sync,
                 )
             }
-            if (!f.partial) return
-            delay(if (f.translating) SubtitleRepository.AI_CUES_POLL_MS else SubtitleRepository.LIVE_CUES_POLL_MS)
+            val wait = SubtitleRules.pollMs(f.partial, f.sync, f.translating, clock() - shownAt) ?: return
+            delay(wait)
+            // Timing that may still change: asked again once the viewer watches
+            if (!f.partial) while (!playing) delay(SubtitleRepository.PROVISIONAL_CUES_POLL_MS)
         }
     }
 
@@ -436,7 +460,7 @@ class SubtitleController internal constructor(
         note("subdelay", buildMap {
             put("subdelay", change.subdelay)
             put("from", change.from)
-            id?.let { put("id", SubsLog.token(it, 24)) }
+            id?.let { put("id", SubsLog.idHash(it)) }
             item(id)?.let { put("provider", SubsLog.token(it.source, 16)) }
         })
     }

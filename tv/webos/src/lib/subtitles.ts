@@ -2,6 +2,7 @@ import { getJson, request } from './http';
 import { intlLocale, type Locale } from './i18n';
 import type { PlayerPrefs } from './stream';
 import { SYNC_NONE, syncValue } from '../player/subsLog';
+import { finalCues } from '../player/playRules';
 
 // Ported from web/src/features/watch/subtitles.ts
 
@@ -192,7 +193,7 @@ export interface Cue {
   text: string;
 }
 
-// Parsed subtitle files, least recently used first (a few files only: they can be large)
+// Parsed subtitle files with final timing, least recently used first (a few files only: they can be large)
 const cueCache = new Map<string, Promise<{ cues: Cue[]; sync: string }>>();
 const CUE_CACHE_MAX = 5;
 
@@ -206,10 +207,6 @@ function rememberCues(id: string, cues: Cue[], sync: string) {
 const PARTIAL_NOTE = 'NOTE nextflix-partial';
 // ...and an AI translation with this one while the lines at the position are being translated
 const AI_NOTE = 'NOTE nextflix-ai-translating';
-// A live (partial) subtitle file is fetched again this often while it plays
-export const LIVE_CUES_POLL_MS = 15000;
-// An AI translation still missing the lines at the position is asked again this often
-export const AI_CUES_POLL_MS = 3000;
 // Late uploads: while the profile's language is missing the list is asked again this often, bypassing caches
 export const LATE_SUBTITLE_POLL_MS = 10 * 60 * 1000;
 // How often the player asks again for a release with the profile's subtitle while the server scans
@@ -221,7 +218,7 @@ export function fetchCues(id: string): Promise<Cue[]> {
 
 /**
  * Cues of a subtitle. `at` (seconds of the file) is where the viewer is: a live embedded track is read from
- * there on. A partial answer is not cached; ask again (LIVE_CUES_POLL_MS) for the cues read since.
+ * there on. Only a final answer is cached (finalCues); ask again (cuePollMs) for the cues read or timed since.
  */
 export interface CueFile {
   cues: Cue[];
@@ -253,9 +250,14 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
     })
     .catch((): CueFile => ({ cues: [], partial: false, sync: SYNC_NONE, failed: 'error' }));
   req.then(f => {
-    if (f.cues.length > 0 && !f.partial) rememberCues(id, f.cues, f.sync);
+    if (f.cues.length > 0 && finalCues(f)) rememberCues(id, f.cues, f.sync);
   });
   return req;
+}
+
+/** The server times a subtitle of a file that does not play yet (the next episode, see player/pretime.ts). */
+export function pretimeSubtitle(id: string): Promise<void> {
+  return request(`/api/subtitles/file?id=${encodeURIComponent(id)}&pre=1`).then(() => undefined, () => undefined);
 }
 
 // An AI translation does not count: a real subtitle that turns up later still replaces it

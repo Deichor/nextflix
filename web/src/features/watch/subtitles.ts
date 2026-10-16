@@ -3,6 +3,7 @@ import { intlLocale, type Locale } from '@/shared/i18n/core';
 import { type SubtitleSize } from '@/features/settings/playerPrefs';
 import { normLang } from '@/features/watch/lang';
 import { SYNC_NONE, syncValue } from '@/features/watch/subsLog';
+import { finalCues } from '@/features/watch/cuePoll';
 
 export { normLang };
 export { pickAudioTrack, type AudioTrackInfo } from '@/features/watch/audioPick';
@@ -193,10 +194,6 @@ export const hasSubtitleLang = (items: SubtitleItem[], lang: string) =>
 
 // Late uploads: while the profile's language is missing the list is asked again this often, bypassing caches
 export const LATE_SUBTITLE_POLL_MS = 10 * 60 * 1000;
-// A live (partial) subtitle file is fetched again this often while it plays
-export const LIVE_CUES_POLL_MS = 15000;
-// An AI translation still missing the lines at the position is asked again this often
-export const AI_CUES_POLL_MS = 3000;
 // After the retries: how often the player asks for a release that carries the profile's subtitle
 export const SUBALT_RETRY_MAX = 4;
 
@@ -302,7 +299,7 @@ export function fetchSubtitleCues(id: string): Promise<Cue[]> {
 
 /**
  * Cues of a subtitle. `at` (seconds of the file) is where the viewer is: a live embedded track is read from
- * there on. A partial answer is not cached; ask again (LIVE_CUES_POLL_MS) for the cues read since.
+ * there on. Only a final answer is cached (finalCues); ask again (cuePollMs) for the cues read or timed since.
  */
 export interface SubtitleFile {
   cues: Cue[];
@@ -340,11 +337,16 @@ export function fetchSubtitleFile(id: string, at?: number, poll = false): Promis
       return { cues: [], partial: false, sync: SYNC_NONE, failed: 'error' };
     });
   req.then(f => {
-    if (f.cues.length > 0 && !f.partial) cueCache.set(id, Promise.resolve({ cues: f.cues, sync: f.sync }));
+    if (f.cues.length > 0 && finalCues(f)) cueCache.set(id, Promise.resolve({ cues: f.cues, sync: f.sync }));
   });
   return req;
 }
 
+
+/** The server times a subtitle of a file that does not play yet (the next episode, see pretime.ts); nothing is shown. */
+export function pretimeSubtitle(id: string): Promise<void> {
+  return fetch(`${getApiUrl()}/api/subtitles/file?id=${encodeURIComponent(id)}&pre=1`).then(() => undefined, () => undefined);
+}
 
 const TIME = /(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})/;
 

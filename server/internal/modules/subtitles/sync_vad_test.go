@@ -2,6 +2,7 @@ package subtitles
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"math"
 	"math/rand"
@@ -75,8 +76,46 @@ func TestParseMediaProbe(t *testing.T) {
 	 {"index":4,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng","title":"English [SDH]"}},
 	 {"index":5,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle"}]}`)
 	p, err := parseMediaProbe(out)
-	if err != nil || p.Duration != 2562.048 || math.Abs(p.FPS-23.976) > 0.001 || p.Audio != 1 || !p.Center || p.TextSub != 3 || p.Bitrate != 7063218.0/8 || p.maxWindows() != 10 {
+	if err != nil || p.Duration != 2562.048 || math.Abs(p.FPS-23.976) > 0.001 || p.Audio != 1 || !p.Center || p.OwnSub != 3 ||
+		p.SubCodec != "subrip" || p.picture() || p.Bitrate != 7063218.0/8 || p.maxWindows() != 10 {
 		t.Fatalf("probe %+v %v", p, err)
+	}
+	// Without a text track the PGS one (The Mentalist S03E02 d3g: 1940 display sets in 43 min);
+	// not a forced-only one (few packets) and none at all: "none", so the file is not probed again
+	pgsTagged := func(key, frames string) []byte {
+		return []byte(`{"format":{"duration":"2595.456"},"streams":[
+		 {"index":0,"codec_type":"video","codec_name":"hevc"},
+		 {"index":1,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","title":"Forced"}},
+		 {"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","` + key + `":"` + frames + `"}},
+		 {"index":3,"codec_type":"subtitle","codec_name":"dvd_subtitle","tags":{"language":"eng"}}]}`)
+	}
+	pgs := func(frames string) []byte { return pgsTagged("NUMBER_OF_FRAMES", frames) }
+	if p, _ := parseMediaProbe(pgs("1940")); p.OwnSub != 2 || !p.picture() || !p.subsKnown() {
+		t.Fatalf("PGS probe %+v", p)
+	}
+	if p, _ := parseMediaProbe(pgs("40")); p.OwnSub != -1 || p.SubCodec != "none" || !p.subsKnown() {
+		t.Fatalf("forced-only PGS probe %+v", p)
+	}
+	// Older mkvmerge versions name the tag with its language; any case
+	for _, key := range []string{"NUMBER_OF_FRAMES-eng", "number_of_frames"} {
+		if p, _ := parseMediaProbe(pgsTagged(key, "40")); p.OwnSub != -1 {
+			t.Fatalf("forced-only PGS probe (%s) %+v", key, p)
+		}
+		if p, _ := parseMediaProbe(pgsTagged(key, "1940")); p.OwnSub != 2 {
+			t.Fatalf("PGS probe (%s) %+v", key, p)
+		}
+	}
+	if n := frameCount(map[string]string{"NUMBER_OF_FRAMES-eng": "1744", "NUMBER_OF_FRAMES": "1940", "DURATION-eng": "x"}); n != 1940 {
+		t.Fatalf("frame count %d, the plain tag says 1940", n)
+	}
+	// A probe saved before picture tracks counted
+	var old mediaProbe
+	if json.Unmarshal([]byte(`{"duration":2595.456,"fps":23.976,"audio":1,"center":true,"text_sub":-1,"bitrate":360178}`), &old) != nil ||
+		old.OwnSub != -1 || old.subsKnown() || old.picture() {
+		t.Fatalf("old probe %+v", old)
+	}
+	if json.Unmarshal([]byte(`{"duration":2595.456,"text_sub":3}`), &old) != nil || old.OwnSub != 3 || !old.subsKnown() || old.picture() {
+		t.Fatalf("old probe with a text track %+v", old)
 	}
 }
 
@@ -87,7 +126,7 @@ func TestCappedURL(t *testing.T) {
 		http.ServeContent(w, r, "f.mkv", time.Time{}, bytes.NewReader(data))
 	}))
 	defer up.Close()
-	url, used, stop, err := cappedURL(up.URL, 1<<20)
+	url, used, stop, err := cappedURL(up.URL, 1<<20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,5 +152,21 @@ func TestCappedURL(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("after the cap: %d", resp.StatusCode)
+	}
+
+	// A pre-timing read keeps to its rate: 4 MB at 8 MB/s
+	slow, used, stopSlow, err := cappedURL(up.URL, 4<<20, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopSlow()
+	start := time.Now()
+	if resp, err = http.Get(slow); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if took := time.Since(start); took < 400*time.Millisecond || len(got) < 3<<20 || used() > 4<<20+64<<10 {
+		t.Fatalf("%d bytes in %s (used %d)", len(got), took, used())
 	}
 }

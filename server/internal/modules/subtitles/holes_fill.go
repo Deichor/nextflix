@@ -230,12 +230,13 @@ func holeOrder(subs []Sub) []Sub {
 // holeEvidence is the file's own-track and speech windows (read and played) and its length.
 func (y *syncer) holeEvidence(hash string, index int) (holeEvidence, float64) {
 	fk := syncFileKey(hash, index)
-	var read []refWindow
+	read := syncRef{Busy: true} // while the reference is read: the own-track check as it stands
 	duration := 0.0
 	st, release := y.refState(fk)
 	if st.mu.TryLock() {
+		read.Busy = false
 		if y.loadRef(fk, st) {
-			read, duration = st.ref.Windows, st.ref.Probe.Duration
+			read, duration = *st.ref, st.ref.Probe.Duration
 		}
 		st.mu.Unlock()
 	}
@@ -246,10 +247,15 @@ func (y *syncer) holeEvidence(hash string, index int) (holeEvidence, float64) {
 	}
 	if duration <= 0 {
 		y.mu.Lock()
-		duration = y.probes[fk].Duration
+		p := y.probes[fk]
 		y.mu.Unlock()
+		duration = p.Duration
+		if read.Busy {
+			read.Probe = p
+		}
 	}
-	return evidenceOf(mergeWindows(read, live)), duration
+	read, live = y.checkOwnTrack(hash, index, read, live) // own-track windows only when timed to the file
+	return evidenceOf(mergeWindows(read.Windows, live)), duration
 }
 
 // withHoles compares a subtitle served for a file with a reference and fills its holes.

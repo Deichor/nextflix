@@ -3,6 +3,8 @@ package subtitles
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -69,7 +71,8 @@ func vttOf(cues []span) []byte {
 	return renderVTT(lc, false)
 }
 
-// newSyncTest is a service whose file reads come from the given true cues of the file.
+// newSyncTest is a service whose file reads come from the given true cues of the file: its own
+// track's windows, and the speech read with them (the same lines; not counted in reads).
 func newSyncTest(t *testing.T, file []span) (*Service, *int) {
 	saved := syncReadDelay
 	syncReadDelay = 0
@@ -77,13 +80,27 @@ func newSyncTest(t *testing.T, file []span) (*Service, *int) {
 	svc := NewService(nil, Config{CacheDir: t.TempDir(), TorrServerURL: "http://torrserver"})
 	reads := 0
 	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
-		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, TextSub: -1}, nil
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}, nil
 	}
-	svc.sync.read = func(_ context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
-		reads++
-		return truthWindows(file, []float64{start}, 0.1, 0, int64(start))[0], nil
-	}
+	svc.sync.read = readTruth(file, &reads)
 	return svc, &reads
+}
+
+// readTruth reads windows of a file whose own track has the given cues: own windows, or with
+// no own track asked for the speech of the same lines (reads counts the own ones).
+func readTruth(file []span, reads *int) syncWindowReader {
+	return func(_ context.Context, _ string, p mediaProbe, start, _ float64) (refWindow, error) {
+		w := truthWindows(file, []float64{start}, 0.1, 0, int64(start))[0]
+		if p.OwnSub < 0 {
+			w.Kind = "audio"
+			for i, v := range w.Speech {
+				w.Speech[i] = min(v, 1)
+			}
+			return w, nil
+		}
+		*reads++
+		return w, nil
+	}
 }
 
 func cacheProviderSub(t *testing.T, svc *Service, ref string, cues []span) string {
@@ -132,6 +149,74 @@ func TestServeTimesTheSubtitle(t *testing.T) {
 	// the list now counts it as synced
 	if svc.sync.fitOf(inner, syncHash, 1) != 1 {
 		t.Fatal("fit not recorded")
+	}
+}
+
+// A result of an older timing (final ones are never re-fitted otherwise) is served as it is while
+// it is timed again, then replaced.
+func TestServeRetimesAnOlderVersion(t *testing.T) {
+	file := dialogue(12, episode)
+	svc, _ := newSyncTest(t, file)
+	inner := cacheProviderSub(t, svc, "1|old|2|7|1", subtitleFor(file, 1, func(float64) float64 { return -3 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, err := svc.FileFor(context.Background(), id, 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("first answer: sync %q err %v", a.Sync, err)
+	}
+	// What an older version stored: 1 s off, no version
+	old := *svc.sync.meta(key)
+	old.Version, old.Fit.Segments = 0, []syncSegment{{Offset: old.Fit.Segments[0].Offset + 1}}
+	b, _ := json.Marshal(old)
+	raw, ok := svc.files.read(SourceTurkceAltyazi, SourceTurkceAltyazi+"|1|old|2|7|1", ".vtt", 0)
+	if !ok {
+		t.Fatal("raw subtitle")
+	}
+	cues := applyFit(vttCues(raw), old.Fit)
+	if svc.files.write("synced", key, ".json", b) != nil || svc.files.write("synced", key, ".vtt", renderVTT(cues, false)) != nil {
+		t.Fatal("write")
+	}
+	svc.sync.mu.Lock()
+	svc.sync.metas = map[string]*syncMeta{}
+	svc.sync.mu.Unlock()
+
+	a, err := svc.FileFor(context.Background(), id, 0)
+	if err != nil || !a.Partial || a.Sync != syncStateSynced || math.Abs(vttCues(a.VTT)[10].start-file[10].start-1) > 0.05 {
+		t.Fatalf("stale answer: partial=%v sync=%q err=%v", a.Partial, a.Sync, err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); svc.flights.running("sync|" + key); {
+		if time.Now().After(deadline) {
+			t.Fatal("timing again did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a, err = svc.FileFor(context.Background(), id, 0)
+	if err != nil || a.Partial || a.Sync != syncStateSynced || math.Abs(vttCues(a.VTT)[10].start-file[10].start) > 0.05 {
+		t.Fatalf("timed again: partial=%v sync=%q err=%v", a.Partial, a.Sync, err)
+	}
+	if m := svc.sync.meta(key); m.Version != syncVersion {
+		t.Fatalf("version %d", m.Version)
+	}
+}
+
+// A result of an older timing tells nothing about the file now: a subtitle it found poor is not
+// ranked down or skipped as a translation source (it would hardly be served, so never timed
+// again), and once served it is timed again.
+func TestStaleResultIsUnknown(t *testing.T) {
+	file := dialogue(14, episode)
+	svc, _ := newSyncTest(t, file)
+	inner := cacheProviderSub(t, svc, "1|v0|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 1.5 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	b, _ := json.Marshal(syncMeta{State: syncStatePoor, Ref: "audio", Windows: 6}) // version 0
+	if err := svc.files.write("synced", key, ".json", b); err != nil {
+		t.Fatal(err)
+	}
+	if svc.sync.fitOf(inner, syncHash, 1) != 0 || svc.sync.poorFor(inner, syncHash, 1) {
+		t.Fatalf("a version 0 result counts: fit %d, poor %v", svc.sync.fitOf(inner, syncHash, 1), svc.sync.poorFor(inner, syncHash, 1))
+	}
+	svc.FileFor(context.Background(), wrapSyncID(inner, syncHash, 1), 0)
+	waitFlight(t, svc, "sync|"+key)
+	if m := svc.sync.meta(key); m.Version != syncVersion || !m.fits() || svc.sync.fitOf(inner, syncHash, 1) != 1 {
+		t.Fatalf("timed again: %+v", m)
 	}
 }
 
@@ -194,14 +279,15 @@ func TestServeRetimesAFallbackWhoseCuesAreGone(t *testing.T) {
 
 func TestServePendingIsPartial(t *testing.T) {
 	file := dialogue(31, episode)
-	svc, _ := newSyncTest(t, file)
+	svc, reads := newSyncTest(t, file)
 	block := make(chan struct{})
-	svc.sync.read = func(ctx context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
+	read := readTruth(file, reads)
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
 		select {
 		case <-block:
 		case <-ctx.Done():
 		}
-		return truthWindows(file, []float64{start}, 0, 0, 1)[0], nil
+		return read(ctx, url, p, start, length)
 	}
 	saved := syncFirstWait
 	syncFirstWait = 0
@@ -284,6 +370,193 @@ func TestWeakReferenceIsNotKept(t *testing.T) {
 	}
 }
 
+// failingSpeech reads a file's own track (counted in reads) while every speech read fails, as
+// for audio the server cannot decode (counted in speech).
+func failingSpeech(file []span, reads, speech *int) syncWindowReader {
+	own := readTruth(file, reads)
+	return func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub < 0 {
+			*speech++
+			return refWindow{}, errors.New("audio: decoder failed")
+		}
+		return own(ctx, url, p, start, length)
+	}
+}
+
+// Speech reads that always fail: a text track is used as before the own-track check (the review
+// saw such a file never timed), and the reference is not read again by every request (it was:
+// own reads 6, 12, 18, 24 over 4 requests).
+func TestSpeechReadsThatFailAreTriedOnce(t *testing.T) {
+	file := dialogue(41, episode)
+	svc, reads := newSyncTest(t, file)
+	speech := 0
+	svc.sync.read = failingSpeech(file, reads, &speech)
+	inner := cacheProviderSub(t, svc, "1|sf|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	if a, err := svc.FileFor(context.Background(), id, 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("a file with an exact own text track: sync %q, %v", a.Sync, err)
+	}
+	n, s := *reads, speech
+	for range 3 {
+		svc.FileFor(context.Background(), id, 0)
+	}
+	if *reads != n || speech != s || n == 0 || s != n {
+		t.Fatalf("own reads %d -> %d, speech reads %d -> %d", n, *reads, s, speech)
+	}
+	// A PGS track whose speech cannot be read times nothing: the job fails (10 minutes) instead
+	// of being started again by every poll
+	svc, reads = newSyncTest(t, file)
+	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "hdmv_pgs_subtitle"}, nil
+	}
+	speech = 0
+	svc.sync.read = failingSpeech(file, reads, &speech)
+	inner = cacheProviderSub(t, svc, "1|pf|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	id = wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, _ := svc.FileFor(context.Background(), id, 0); a.Sync != syncStateFailed || !svc.sync.recentlyFailed(key) {
+		t.Fatalf("PGS without its speech: sync %q, failed %v", a.Sync, svc.sync.recentlyFailed(key))
+	}
+	n = *reads
+	for range 3 {
+		svc.FileFor(context.Background(), id, 0)
+	}
+	if *reads != n || svc.flights.running("sync|"+key) {
+		t.Fatalf("polls read again: %d -> %d", n, *reads)
+	}
+}
+
+// writeOldRef saves a reference as the version before the own-track check did: own-track
+// windows without their speech.
+func writeOldRef(t *testing.T, svc *Service, file []span) []float64 {
+	t.Helper()
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}
+	starts := windowStarts(episode, syncWindowLen, syncMaxWindows)
+	b, _ := json.Marshal(syncRef{Probe: probe, Windows: truthWindows(file, starts, 0, 0, 1), MaxWindows: syncMaxWindows})
+	if err := svc.files.write("syncref", syncFileKey(syncHash, 1), ".json", b); err != nil {
+		t.Fatal(err)
+	}
+	return starts
+}
+
+// A reference saved before the own-track check (34 of 50 stored ones) times at once; then only
+// the speech at its windows is read, once. When those reads fail the saved reference stays (the
+// job failed and threw it away: "only 0 of 6 reference windows could be read").
+func TestOldReferenceKeptWhenItsPairReadsFail(t *testing.T) {
+	file := dialogue(43, episode)
+	svc, _ := newSyncTest(t, file)
+	starts := writeOldRef(t, svc, file)
+	own, speech := 0, 0
+	svc.sync.read = func(_ context.Context, _ string, p mediaProbe, _, _ float64) (refWindow, error) {
+		if p.OwnSub >= 0 {
+			own++
+		} else {
+			speech++
+		}
+		return refWindow{}, errors.New("window read timed out")
+	}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|old|2|7|1", subtitleFor(file, 1, func(float64) float64 { return -3 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, err := svc.FileFor(ctx, wrapSyncID(inner, syncHash, 1), 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("the saved reference was not used: %q %v", a.Sync, err)
+	}
+	waitFlight(t, svc, "sync|"+key)
+	r, err := svc.sync.reference(ctx, syncHash, 1)
+	if own != 0 || speech != len(starts) || err != nil || len(r.Windows) != len(starts) || !r.Paired || r.unpaired() {
+		t.Fatalf("own reads %d, speech reads %d of %d; reference %d windows, paired %v, %v", own, speech, len(starts),
+			len(r.Windows), r.Paired, err)
+	}
+	// another subtitle of the file reads nothing
+	other := cacheProviderSub(t, svc, "2|old|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	if a, _ := svc.FileFor(ctx, wrapSyncID(other, syncHash, 1), 0); a.Sync != syncStateSynced || own+speech != len(starts) {
+		t.Fatalf("second subtitle: %q, %d more reads", a.Sync, own+speech-len(starts))
+	}
+}
+
+// While the speech of an old reference's windows is read, the reference is not locked: re-fits
+// get it (not the probe-only stand-in), and the subtitle is served timed from it meanwhile.
+func TestOldReferencePairReadsLeaveItUsable(t *testing.T) {
+	file := dialogue(44, episode)
+	svc, _ := newSyncTest(t, file)
+	starts := writeOldRef(t, svc, file)
+	block := make(chan struct{})
+	truth := readTruth(file, new(int))
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub >= 0 {
+			t.Errorf("own window at %.0f read again", start)
+		}
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+		return truth(ctx, url, p, start, length)
+	}
+	saved := syncFirstWait
+	syncFirstWait = 200 * time.Millisecond
+	t.Cleanup(func() { syncFirstWait = saved })
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|use|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, _ := svc.FileFor(ctx, wrapSyncID(inner, syncHash, 1), 0); a.Sync != syncStateSynced {
+		t.Fatalf("not timed from the saved reference at once: %q", a.Sync)
+	}
+	if r := svc.sync.liveRef(ctx, syncHash, 1); r.Busy || len(r.Windows) != len(starts) || r.kind() != "subs" {
+		t.Fatalf("while the speech is read: busy %v, %d windows (%s)", r.Busy, len(r.Windows), r.kind())
+	}
+	close(block)
+	waitFlight(t, svc, "sync|"+key)
+	if r, _ := svc.sync.reference(ctx, syncHash, 1); len(r.Speech) != len(starts) || !r.Paired {
+		t.Fatalf("%d speech windows of %d, paired %v", len(r.Speech), len(starts), r.Paired)
+	}
+	if m := svc.sync.meta(key); m == nil || !m.fits() {
+		t.Fatalf("after the pairs: %+v", m)
+	}
+}
+
+// A first read cut by the job's time keeps the windows it read when they are enough (it threw
+// all of them away).
+func TestCutReadKeepsItsWindows(t *testing.T) {
+	file := dialogue(45, episode)
+	svc, reads := newSyncTest(t, file)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	truth := readTruth(file, reads)
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub >= 0 && *reads == 3 {
+			cancel() // out of time after this window's reads
+		}
+		return truth(ctx, url, p, start, length)
+	}
+	r, err := svc.sync.reference(ctx, syncHash, 1)
+	// the cut window's own track is kept; its speech is not read once the job is out of time
+	if err != nil || len(r.Windows) != 4 || len(r.Speech) != 3 || !svc.files.has("syncref", syncFileKey(syncHash, 1), ".json") {
+		t.Fatalf("cut read: %d windows, %d speech, %v", len(r.Windows), len(r.Speech), err)
+	}
+}
+
+// The speech read with each own-track window counts against the file's byte budget: once a
+// window's reads would pass it, the own track is read alone.
+func TestPairedReadsKeepTheByteBudget(t *testing.T) {
+	file := dialogue(46, episode)
+	svc, reads := newSyncTest(t, file)
+	truth := readTruth(file, reads)
+	speech := 0
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub < 0 {
+			speech++
+		}
+		w, err := truth(ctx, url, p, start, length)
+		w.Read = 150 << 20
+		return w, err
+	}
+	r, err := svc.sync.reference(context.Background(), syncHash, 1)
+	// 6 windows of 150 MB: two with their speech (600 MB), then a pair would pass 800 MB
+	if err != nil || len(r.Windows) != 6 || speech != 2 || len(r.Speech) != 2 {
+		t.Fatalf("%d windows, %d speech reads, %v", len(r.Windows), speech, err)
+	}
+}
+
 func TestRefStateEvictionKeepsUsedStates(t *testing.T) {
 	y := NewService(nil, Config{CacheDir: t.TempDir()}).sync
 	held, release := y.refState("held")
@@ -317,10 +590,10 @@ func TestAddWindowsAfterEviction(t *testing.T) {
 	}
 }
 
-// TestSyncWindowFFmpeg reads windows of a generated MKV through the byte cap: cues come at the
-// file's times, and a subtitle read in a stretch without lines (which ffmpeg would continue to
-// the end of the file) stops at the cap. It needs ffmpeg (in the server image, not in plain
-// golang images) and writes a ~150 MB file to the temp dir.
+// TestSyncWindowFFmpeg reads windows of a generated MKV through the byte cap, with a text track
+// and with a PGS one: cues come at the file's times, and a subtitle read in a stretch without
+// lines (which ffmpeg would continue to the end of the file) stops at the cap. It needs ffmpeg
+// (in the server image, not in plain golang images) and writes ~300 MB to the temp dir.
 func TestSyncWindowFFmpeg(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not installed")
@@ -352,7 +625,7 @@ func TestSyncWindowFFmpeg(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 	p, err := probeMedia(ctx, srv.URL)
-	if err != nil || p.TextSub < 0 || p.Duration < 179 || p.Bitrate <= 0 {
+	if err != nil || p.OwnSub < 0 || p.Duration < 179 || p.Bitrate <= 0 {
 		t.Fatalf("probe %+v %v", p, err)
 	}
 	limit := windowByteCap(p, 20) + 64<<10
@@ -377,4 +650,87 @@ func TestSyncWindowFFmpeg(t *testing.T) {
 		t.Fatalf("silent stretch read %d (cap %d, file %d)", w.Read, limit, len(data))
 	}
 	t.Logf("file %d MB, cap per 20 s window %d MB", len(data)>>20, limit>>20)
+
+	// The same lines as a PGS track instead: cue times from its packets
+	var lines []span
+	for i := 0; i < 20; i++ {
+		lines = append(lines, span{float64(3*i + 1), float64(3*i) + 2.5})
+	}
+	sup, pgs := filepath.Join(dir, "s.sup"), filepath.Join(dir, "p.mkv")
+	writeSup(t, sup, lines)
+	cmd = exec.Command("ffmpeg", "-v", "error", "-i", mkv, "-i", sup, "-map", "0:v", "-map", "0:a", "-map", "1",
+		"-c", "copy", "-metadata:s:s:0", "language=eng", pgs)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg: %v %s", err, out)
+	}
+	pgsData, err := os.ReadFile(pgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "p.mkv", time.Time{}, bytes.NewReader(pgsData))
+	}))
+	defer srv2.Close()
+	if p, err = probeMedia(ctx, srv2.URL); err != nil || p.OwnSub != 2 || !p.picture() {
+		t.Fatalf("PGS probe %+v %v", p, err)
+	}
+	w, err = ffmpegSyncWindow(ctx, srv2.URL, p, 20.5, 20)
+	if err != nil || w.Kind != "subs" {
+		t.Fatalf("PGS window %v kind %q", err, w.Kind)
+	}
+	at = at[:0]
+	for i, v := range w.Speech {
+		if v == 2 {
+			at = append(at, i)
+		}
+	}
+	if len(at) != 7 || at[0] < 148 || at[0] > 154 || at[6]-at[0] != 1800 || w.Speech[at[0]+100] != 1 || w.Speech[at[0]+160] != 0 {
+		t.Fatalf("PGS line starts at frames %v", at)
+	}
+	if w, _ = ffmpegSyncWindow(ctx, srv2.URL, p, 100, 20); w.Read > limit {
+		t.Fatalf("PGS: silent stretch read %d (cap %d)", w.Read, limit)
+	}
+}
+
+// writeSup writes cues as a PGS .sup: per cue a display set with a picture (PCS with one object,
+// WDS, PDS, ODS of a 100x20 striped picture, END) and one that clears the screen; a clear at 0
+// first (the stream starts at 0).
+func writeSup(t *testing.T, file string, cues []span) {
+	t.Helper()
+	var b []byte
+	seg := func(at float64, typ byte, data []byte) {
+		b = append(b, 'P', 'G')
+		b = binary.BigEndian.AppendUint32(b, uint32(math.Round(at*90000)))
+		b = binary.BigEndian.AppendUint32(b, 0)
+		b = append(b, typ)
+		b = binary.BigEndian.AppendUint16(b, uint16(len(data)))
+		b = append(b, data...)
+	}
+	window := []byte{1, 0, 0, 0, 0, 10, 0, 100, 0, 20}
+	var rle []byte
+	for range 20 {
+		for x := range 100 {
+			rle = append(rle, byte(1+x%2))
+		}
+		rle = append(rle, 0, 0)
+	}
+	clear := func(at float64, n byte) {
+		seg(at, 0x16, []byte{0x01, 0x40, 0, 0xb4, 0x10, 0, n, 0, 0, 0, 0})
+		seg(at, 0x17, window)
+		seg(at, 0x80, nil)
+	}
+	clear(0, 0)
+	for i, c := range cues {
+		n := byte(2*i + 1)
+		seg(c.start, 0x16, []byte{0x01, 0x40, 0, 0xb4, 0x10, 0, n, 0x80, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10})
+		seg(c.start, 0x17, window)
+		seg(c.start, 0x14, []byte{0, 0, 1, 235, 128, 128, 255, 2, 16, 128, 128, 255})
+		ods := []byte{0, 0, 0, 0xc0, byte((len(rle) + 4) >> 16), byte((len(rle) + 4) >> 8), byte(len(rle) + 4), 0, 100, 0, 20}
+		seg(c.start, 0x15, append(ods, rle...))
+		seg(c.start, 0x80, nil)
+		clear(c.end, n+1)
+	}
+	if err := os.WriteFile(file, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

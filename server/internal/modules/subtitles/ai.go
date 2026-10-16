@@ -380,14 +380,15 @@ func (s *Service) pickAISource(subs []Sub, lang string) *Sub {
 // aiPoorWindows: a provisional "poor" timing heard over this many played windows counts as not fitting.
 const aiPoorWindows = 5
 
-// poorFor reports that the subtitle inner does not fit the file (its timing found nothing better).
+// poorFor reports that the subtitle inner does not fit the file (its timing found nothing better;
+// a result of an older timing does not tell).
 func (y *syncer) poorFor(inner, hash string, index int) bool {
 	key, err := syncKey(inner, hash, index)
 	if err != nil {
 		return false
 	}
 	m := y.meta(key)
-	return m != nil && m.State == syncStatePoor && (!m.Live || m.LiveWindows >= aiPoorWindows)
+	return m != nil && !m.stale() && m.State == syncStatePoor && (!m.Live || m.LiveWindows >= aiPoorWindows)
 }
 
 // aiAlternative is another source for a translation into lang than src (which does not fit the

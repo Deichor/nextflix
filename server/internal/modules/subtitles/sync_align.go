@@ -30,6 +30,7 @@ const (
 	syncChangeCost   = 0.5  // matched lines per second an offset change moves, on top of the penalty
 	syncLagStep      = 10   // frames: steps of the speech lag tried
 	syncMaxLag       = 40   // frames the own track's lines may lead the speech (0-0.35 s measured by file)
+	syncZoneLines    = 2.0  // matched lines a window next to an offset change has to prefer its side by to place it
 )
 
 // syncScales are subtitle time multipliers: same rate, then 25 <-> 23.976 / 24 conversions.
@@ -265,18 +266,30 @@ func alignWith(cues []span, ws []prepared, scales []float64, penalty float64, ma
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].start < sorted[j].start })
 	var best syncFit
 	found := false
+	lines := refLines(ws)
 	for _, k := range scales {
 		f := alignScale(sorted, ws, k, penalty, maxChanges)
-		// Another rate has to fit clearly better than the same one
+		// Another rate has to fit clearly better than the same one, net of its offset changes: a
+		// near rate turns the steps of ad breaks into drift and matches a few more lines with more,
+		// smaller changes (The Mentalist S03E02: 24/23.976 instead of the file's rate)
 		bonus := 0.0
 		if k != 1 {
 			bonus = 0.05
 		}
-		if !found || f.Score-bonus > best.Score {
+		if !found || netScore(f, lines)-bonus > netScore(best, lines) {
 			best, found = f, true
 		}
 	}
 	return best, found
+}
+
+// netScore is a fit's score less what its offset changes cost (matched lines per reference line).
+func netScore(f syncFit, lines float64) float64 {
+	n := f.Score
+	for i := 1; i < len(f.Segments); i++ {
+		n -= (syncSplitPenalty + syncChangeCost*math.Abs(f.Segments[i].Offset-f.Segments[i-1].Offset)) / lines
+	}
+	return n
 }
 
 func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChanges int) syncFit {
@@ -446,7 +459,18 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 			continue
 		}
 		prev, cur := fit.windowOffsets[m-1], fit.windowOffsets[m]
-		from := splitPoint(cues, k, ws[m-1], ws[m], prev, cur)
+		// Windows next to the change that hardly prefer either offset do not place it: the split
+		// is looked for over them too (The Mentalist S03E02: two windows before an ad break leaned
+		// either way by under a line, and the change went 110 s early into another pause)
+		s1, s2 := path[m-1], path[m]
+		a, b := m-1, m
+		for a > 0 && path[a-1] == s1 && curves[a][lo+s1]-curves[a][lo+s2] < syncZoneLines {
+			a--
+		}
+		for b+1 < len(path) && path[b+1] == s2 && curves[b][lo+s2]-curves[b][lo+s1] < syncZoneLines {
+			b++
+		}
+		from := splitPoint(cues, k, ws[a:b+1], prev, cur)
 		if from <= fit.Segments[len(fit.Segments)-1].From {
 			fit.Segments[len(fit.Segments)-1].Offset = cur
 			continue
@@ -541,10 +565,12 @@ func windowCurve(w prepared, starts []float64, d int) []float64 {
 	return out
 }
 
-// splitPoint picks where the offset changes from d1 to d2 between windows a and b: between two
-// lines of the subtitle (cues sorted), where the split fits both windows best, at the longest
-// pause among equals (an ad break or a title sequence is quiet).
-func splitPoint(cues []span, k float64, a, b prepared, d1, d2 float64) float64 {
+// splitPoint picks where the offset changes from d1 to d2 over windows ws (sorted; the first at
+// d1, the last at d2, any between hardly preferring either): between two lines of the subtitle
+// (cues sorted), where the split fits the windows best, at the longest pause among equals (an ad
+// break or a title sequence is quiet).
+func splitPoint(cues []span, k float64, ws []prepared, d1, d2 float64) float64 {
+	a, b := ws[0], ws[len(ws)-1]
 	lo, hi := a.Start-d1, b.end()-d2
 	type cand struct{ at, gap float64 }
 	var cands []cand
@@ -558,11 +584,10 @@ func splitPoint(cues []span, k float64, a, b prepared, d1, d2 float64) float64 {
 	if len(cands) == 0 {
 		return (a.end() - d1 + b.Start - d2) / 2
 	}
-	pair := []prepared{a, b}
 	scores := make([]float64, len(cands))
 	top := math.Inf(-1)
 	for i, c := range cands {
-		scores[i] = piecewiseScore(pair, cues, k, []syncSegment{{Offset: d1}, {From: c.at, Offset: d2}})
+		scores[i] = piecewiseScore(ws, cues, k, []syncSegment{{Offset: d1}, {From: c.at, Offset: d2}})
 		top = math.Max(top, scores[i])
 	}
 	best := -1

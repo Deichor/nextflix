@@ -59,6 +59,8 @@ type Config struct {
 	NextEpisode func(tvID, season, episode int) (int, int, bool)
 	// LineGate holds the timing's window reads while a stream starts (nil = no wait)
 	LineGate LineGate
+	// ReadRoom says how fast pre-timing may read beside the playing streams (nil = always, no limit)
+	ReadRoom ReadRoom
 }
 
 // Service lists subtitles from the torrent itself and online providers and serves them as WebVTT.
@@ -498,7 +500,7 @@ func (s *Service) fileFor(ctx context.Context, id string, t float64, holes bool)
 		return s.serveAI(ctx, lang, ref, t)
 	}
 	if inner, hash, index, ok := unwrapSyncID(id); ok {
-		a, err := s.sync.serve(ctx, inner, hash, index)
+		a, err := s.sync.serve(ctx, inner, hash, index, t)
 		if err != nil || !holes {
 			return a, err
 		}
@@ -506,6 +508,19 @@ func (s *Service) fileFor(ctx context.Context, id string, t float64, holes bool)
 	}
 	vtt, partial, err := s.fileAt(ctx, id, t)
 	return FileAnswer{VTT: vtt, Partial: partial}, err
+}
+
+// PreTime starts the timing of a subtitle listed for a file that does not play yet (the next
+// episode, see syncer.pretime) and returns its timing state; ids that are not timed answer
+// "original".
+func (s *Service) PreTime(ctx context.Context, id string) (string, error) {
+	if inner, hash, index, ok := unwrapSyncID(id); ok {
+		return s.sync.pretime(ctx, inner, hash, index)
+	}
+	if _, _, _, err := decodeID(id); err != nil {
+		return "", err
+	}
+	return syncStateOriginal, nil
 }
 
 func (s *Service) fileAt(ctx context.Context, id string, t float64) ([]byte, bool, error) {

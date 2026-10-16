@@ -159,6 +159,7 @@ func run() error {
 		AIDir:           envOr("AI_SUBTITLE_DIR", "/app/data/ai-subtitles"),
 		NextEpisode:     catalogSvc.NextEpisode,
 		LineGate:        streamingSvc, // timing reads wait while a stream starts
+		ReadRoom:        streamingSvc, // the next episode's timing reads only with room beside the playing streams
 	})
 	streamingSvc.SetSpeechTap(speechTap{subtitlesSvc})
 	streamingSvc.SetCueTap(cueTap{subtitlesSvc})
@@ -463,14 +464,14 @@ func (t speechTap) Open(hash string, index int, start float64) streaming.SpeechS
 	return nil // not a typed nil
 }
 
-// cueTap feeds the cues of the played file's own text track into the subtitle timing.
+// cueTap feeds the cues of the played file's own subtitle track into the subtitle timing.
 type cueTap struct{ s *subtitles.Service }
 
-func (t cueTap) OpenCues(hash string, index int, start float64, tracks []streaming.TextTrack) (int, streaming.CueSink, bool) {
+func (t cueTap) OpenCues(hash string, index int, start float64, tracks []streaming.CueTrack) (int, streaming.CueSink, bool) {
 	own := make([]subtitles.OwnTrack, 0, len(tracks))
 	for _, tr := range tracks {
 		own = append(own, subtitles.OwnTrack{Stream: tr.Stream, Lang: tr.Lang, Title: tr.Title, Codec: tr.Codec,
-			Default: tr.Default, Forced: tr.Forced})
+			Default: tr.Default, Forced: tr.Forced, Frames: tr.Frames})
 	}
 	stream, sink, ok := t.s.OpenOwnCues(hash, index, start, own)
 	if !ok || sink == nil {

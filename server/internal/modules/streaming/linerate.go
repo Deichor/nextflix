@@ -41,6 +41,7 @@ const (
 	tsLineSteady     = 30 * time.Second // busy polls of one torrent set this long confirm it too
 	tsLineHalfLife   = 4 * 24 * time.Hour
 	tsLineSaveEvery  = time.Minute
+	tsReadRoomShare  = 0.5 // share of the line (and of a playing swarm's rate) the playing streams may need while another file is read ahead
 )
 
 // tsLine is the line estimate of a Service (zero value ready).
@@ -237,6 +238,54 @@ func (s *Service) lineRate() (bytesPerSec float64, known bool) {
 	s.lineStart()
 	v := s.line.current(time.Now())
 	return v, v > 0
+}
+
+// RoomToRead is the bytes/s a read of a file of torrent hash that does not play yet may take now
+// (the subtitle timing of the next episode reads ~10 windows of it; a TorBox file through the same
+// home line): half of what the playing streams leave of the line, when the line is known and they,
+// all of known bitrate, need at most tsReadRoomShare of it; 0 = no room. A file of a playing swarm
+// torrent (a season pack's next episode) takes the same peers: that torrent's measured rate must
+// leave room the same way.
+func (s *Service) RoomToRead(hash string) float64 {
+	line, known := s.lineRate()
+	if !known {
+		return 0
+	}
+	_, playing := s.lineState()
+	needs := s.playNeeds(playing)
+	need := 0.0
+	for _, n := range needs {
+		if n <= 0 {
+			return 0 // a playing stream of unknown bitrate
+		}
+		need += n
+	}
+	if need > tsReadRoomShare*line {
+		return 0
+	}
+	room := (line - need) / 2
+	hash = strings.ToLower(hash)
+	if n, ok := needs[hash]; ok && !s.debridStreams(hash) {
+		rate := s.sourceRate(hash)
+		if n > tsReadRoomShare*rate {
+			return 0 // not measured, or no headroom on the swarm
+		}
+		room = min(room, (rate-n)/2)
+	}
+	return room
+}
+
+// sourceRate is the swarm rate measured for hash as a title's source (bytes/s, 0 = unknown).
+func (s *Service) sourceRate(hash string) float64 {
+	s.warmMu.Lock()
+	defer s.warmMu.Unlock()
+	rate := 0.0
+	for _, w := range s.warms {
+		if strings.EqualFold(w.source, hash) && w.health != nil && !w.health.partial {
+			rate = max(rate, float64(w.health.Rate))
+		}
+	}
+	return rate
 }
 
 // lineFor is the line q may count on: the one it was ranked with, or more once the line
