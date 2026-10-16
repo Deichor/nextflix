@@ -1422,7 +1422,8 @@ that change at splits), simplified:
   file opened mid-way (another source after a stall) is not served untimed for the whole read (The Mentalist S03E01,
   2026-10-14: about 45 s with cues 7 s early). While a subtitle served in the first 5 minutes of a viewing is still
   untimed (no fit yet, or a pre-timed one not backed yet, see Serving), every 10 s of audio re-fits the file, at most
-  every 5 s, and the viewing's first request re-fits at once when the file was heard before: the TV's split stream
+  every 5 s (its alternatives, up to 3 at every frame rate, are fitted at most every 15 s of those; what is served
+  stays meanwhile), and the viewing's first request re-fits at once when the file was heard before: the TV's split stream
   hears ~15× real time at first (server log: 153 s ahead after 11 s), so the 30 s / 15 s steps, not the audio, set
   when the first fit came (`sync_first_eval_test.go`, below). A decide costs 21 ms (median, p95 35 ms; with read
   windows 39 / 137 ms) on the snapshot's starts. The live windows of a file with a timed
@@ -1446,7 +1447,9 @@ that change at splits), simplified:
   (+0.66 s in the teaser, +3.00 s after the title sequence at ~214 s, a minute of audio at a time), the change is found
   at the 5th window. A later re-fit of a fitting subtitle keeps its frame rate (fewer FFTs) until the reference has
   grown by half since every rate was tried, and the final fit tries them all (S03E02: a rate chosen from 4 played
-  minutes was kept for good, the final fit too).
+  minutes was kept for good, the final fit too). A re-fit that keeps the served fit (hysteresis below) notes such a
+  search too, else the next re-fits tried every rate again (S03E02 replayed: 7 of 39 re-fits instead of 23, the same
+  final fit).
   Hysteresis: once a provisional fit was accepted, a re-fit that does not fit keeps it served (no alternatives tried;
   logged `kept the last accepted fit (new fit poor: …)`) until a new fit is accepted or the file is covered. On
   S02E10 the fit from 3 windows (one offset) turned poor at 6 windows as they passed the title sequence, so the
@@ -1510,7 +1513,9 @@ that change at splits), simplified:
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
   disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues. Every result
   carries the version of the timing that made it (`syncVersion`): an older one is served as it is (partial) while it
-  is timed again from the stored windows, else final results would keep a fixed bug for good. While live
+  is timed again from the stored windows, else final results would keep a fixed bug for good; for the ranking and
+  the AI translation's source it counts as unknown (one it found poor is not ranked down, so it gets served and timed
+  again). While live
   windows can still change it (live timing on, file not covered) a result is provisional: `X-Subtitle-Sync: live`
   (`pending` while nothing fits), partial while the file plays (a tap open or closed within 90 s, or the first 30 s
   of a viewing session, since the tap may open after the first subtitle request), `no-store` and unmarked otherwise.
@@ -1529,8 +1534,13 @@ that change at splits), simplified:
   has a source (`resolve?cached=1`, asked every 20 s for 3 minutes) they list its subtitles and ask the one their
   default pick would show with `pre=1`. The server starts its timing like a first request (reference read, decide),
   but notes nothing as served (no live re-fits, no first-answer grace); the reads wait in the LineGate like every
-  timing read, and a file that plays from a swarm is read only while the line is known and the playing streams need
-  at most half of it (`ReadRoom`, streaming's `RoomToRead`; TorBox files always). A fit made before any of the file's
+  timing read and, until the file plays, every window read (also the speech read with an own-track window, and
+  TorBox files: the same home line) asks streaming for room first (`ReadRoom.RoomToRead(hash)`): the line is known
+  and the playing streams, of known bitrate, need at most half of it; for another file of a playing swarm torrent
+  (a season pack's next episode, the same peers) its measured rate (the source's health) must also be twice their
+  need. The read then pulls at most half of what is left (the byte cap's proxy paces it); while that is less than the
+  file's bitrate it waits, and after 3 minutes of waiting the job gives up without marking the timing failed (the
+  episode's first request times it). A fit made before any of the file's
   audio was heard is marked pre-timed (`pre`): when the episode opens it is answered `pending` (the subtitle as it
   is) until the first re-fit with played audio keeps or replaces it, a few seconds into the episode. Read windows
   alone can miss a teaser's own offset: on the snapshot's starts the read-only fit put 20 of 31 subtitles' first 5
@@ -1544,7 +1554,9 @@ that change at splits), simplified:
 - Same cut (`sameCut`): a subtitle first asked for a file that it was served for on another file within the last
   minutes (a step down or sidegrade during playback) takes that file's fit at once (provisional, `same_cut` in the
   result, logged `the fit on <hash8>:<index> (same cut: …)`) when both probed lengths agree within 0.05 s and the
-  frame rates match; the new file's own windows take over through the re-fits (hysteresis as above). Gilmore Girls
+  frame rates match (only a viewing of the last 10 minutes lends its fit); the new file's own windows take over
+  through the re-fits (hysteresis as above, its frame rate searched again), and the copy is not held once its offsets
+  beat chance by less than the gain bar on those windows (another cut, or a wrong subtitle). Gilmore Girls
   S01E07 (2676.266 s both) was two minutes 2.7 s off after a step down. Equal lengths alone do not make one cut (The
   Mentalist S02E11 and S02E15 NF are both 2551.616 s, Gilmore Girls S01E06 / S01E08 0.043 s apart), but one subtitle
   names one episode, and such pairs in the snapshot match at lag 0-30 ms on every common live window (3 pairs, 14
@@ -1575,7 +1587,8 @@ that change at splits), simplified:
   above. When what is served changes and the player sent its position (`t`, within 2 minutes), `timing of … moved
   <n> of <m> cues within 300 s of the viewer at <t>s: max ±…s, median ±…s` says how the cues just ahead of the viewer
   moved (matched by text, nearest start; lines of another subtitle counted apart), so slips near the viewer show
-  without the players' logs. Pre-timing logs `pre-timing … (next episode)` or `… skipped: the line has no room …`.
+  without the players' logs. Pre-timing logs `pre-timing … (next episode)`, `pre-timing reads of <hash8>:<index> wait:
+  no room beside the playing streams` and `pre-timing of … given up after …`.
 - Ranking: later lists show a timed fitting subtitle as `synced` (after the ones made for the file) and move ones
   that do not fit down; the file's probed frame rate is the ranking's fps hint. A subtitle made for the playing
   release (same group, or same streaming service and source family; "WEBRip.Amazon" counts as AMZN) goes ahead of

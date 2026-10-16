@@ -159,7 +159,7 @@ func run() error {
 		AIDir:           envOr("AI_SUBTITLE_DIR", "/app/data/ai-subtitles"),
 		NextEpisode:     catalogSvc.NextEpisode,
 		LineGate:        streamingSvc, // timing reads wait while a stream starts
-		ReadRoom:        streamingSvc, // the next episode's timing reads a swarm only with room on the line
+		ReadRoom:        streamingSvc, // the next episode's timing reads only with room beside the playing streams
 	})
 	streamingSvc.SetSpeechTap(speechTap{subtitlesSvc})
 	streamingSvc.SetCueTap(cueTap{subtitlesSvc})

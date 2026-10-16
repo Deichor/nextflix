@@ -113,7 +113,7 @@ func TestCappedURL(t *testing.T) {
 		http.ServeContent(w, r, "f.mkv", time.Time{}, bytes.NewReader(data))
 	}))
 	defer up.Close()
-	url, used, stop, err := cappedURL(up.URL, 1<<20)
+	url, used, stop, err := cappedURL(up.URL, 1<<20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,5 +139,21 @@ func TestCappedURL(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("after the cap: %d", resp.StatusCode)
+	}
+
+	// A pre-timing read keeps to its rate: 4 MB at 8 MB/s
+	slow, used, stopSlow, err := cappedURL(up.URL, 4<<20, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopSlow()
+	start := time.Now()
+	if resp, err = http.Get(slow); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if took := time.Since(start); took < 400*time.Millisecond || len(got) < 3<<20 || used() > 4<<20+64<<10 {
+		t.Fatalf("%d bytes in %s (used %d)", len(got), took, used())
 	}
 }
