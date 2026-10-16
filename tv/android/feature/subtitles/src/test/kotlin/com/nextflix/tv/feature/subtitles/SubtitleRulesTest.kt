@@ -148,6 +148,19 @@ class SubtitleRulesTest {
     }
 
     @Test
+    fun untimedPartialAnswersArePolledEvery5sInTheFirst3Minutes() {
+        val fast = SubtitleRepository.PENDING_FAST_FOR_MS
+        assertEquals(SubtitleRepository.PENDING_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", shownMs = 0))
+        assertEquals(SubtitleRepository.PENDING_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", shownMs = fast - 1))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", shownMs = fast))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending"))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.pollMs(true, "live", shownMs = 0))
+        assertEquals(SubtitleRepository.AI_CUES_POLL_MS, SubtitleRules.pollMs(true, "pending", translating = true, shownMs = 0))
+        assertEquals(SubtitleRepository.PROVISIONAL_CUES_POLL_MS, SubtitleRules.pollMs(false, "pending", shownMs = 0))
+        assertEquals(listOf(5_000L, 180_000L), listOf(SubtitleRepository.PENDING_CUES_POLL_MS, fast))
+    }
+
+    @Test
     fun delayIsLimitedAndRounded() {
         assertEquals(1.5, SubtitleRules.clampDelay(1.5), 0.0)
         assertEquals(0.3, SubtitleRules.clampDelay(0.30000000004), 0.0)

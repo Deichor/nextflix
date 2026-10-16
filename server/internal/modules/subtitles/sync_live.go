@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"sort"
@@ -19,7 +20,9 @@ import (
 // streams (a seek starts a new one; ranges overlap, in any order) merge. Every 30 s of new
 // audio re-fits the subtitles served for the file with all windows, read and live. Until the
 // file is covered such results stay provisional: answers are partial while it plays, so the
-// players keep asking (every 15 s) and take the better timing.
+// players keep asking (every 15 s) and take the better timing. While a subtitle served in the
+// first minutes of a viewing is untimed, every 10 s of audio re-fits it (at most every 5 s), so
+// its first timing comes as soon as the windows allow.
 
 const (
 	liveWindowFrames  = int(syncWindowLen * syncRate) // frames per grid window
@@ -40,6 +43,11 @@ const (
 	liveSessionGap    = 5 * time.Minute               // a request after this long starts a new session
 	liveRefitDelay    = 3 * time.Second               // batches a burst of audio (syncer.refitDelay)
 	liveRefitGap      = 15 * time.Second              // between re-fits of one file (syncer.refitGap)
+	livePendingGrowth = 10.0                          // seconds of new audio that re-fit a file with an untimed served subtitle
+	livePendingGap    = 5 * time.Second               // between re-fits of such a file (syncer.pendingGap)
+	livePendingFor    = 5 * time.Minute               // of a viewing, in which an untimed subtitle is re-fitted that often
+	liveNearFor       = 2 * time.Minute               // a player position this recent counts for the move log
+	liveNearAhead     = 300.0                         // seconds ahead of the viewer whose cue moves are logged
 )
 
 // liveFile is the live reference of one file. Lock order: syncer.mu before liveFile.mu.
@@ -67,6 +75,9 @@ type liveFile struct {
 	refit    bool    // a re-fit loop runs
 	again    bool    // more audio arrived meanwhile
 	lastFit  time.Time
+	// pending: a subtitle served in a viewing's first minutes is untimed (re-fit sooner)
+	pending bool
+	wake    chan struct{} // the re-fit loop's wait is computed again
 }
 
 // liveWin is a finished window: its speech frames (own-track windows: frames a cue shows), one
@@ -86,7 +97,34 @@ type liveSaved struct {
 func newLiveFile(hash string, index int) *liveFile {
 	return &liveFile{fk: syncFileKey(hash, index), hash: strings.ToLower(hash), index: index,
 		chunks: map[int][]uint8{}, covered: map[int]int{}, done: map[int]liveWin{},
-		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}}
+		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}, wake: make(chan struct{}, 1)}
+}
+
+// growStep is the new audio (or own track) in seconds that re-fits the file (f.mu held).
+func (f *liveFile) growStep() float64 {
+	if f.pending {
+		return livePendingGrowth
+	}
+	return liveRefitGrowth
+}
+
+// setPending marks whether an untimed subtitle is served in a viewing's first minutes.
+func (f *liveFile) setPending(p bool) {
+	f.mu.Lock()
+	changed := f.pending != p
+	f.pending = p
+	f.mu.Unlock()
+	if changed {
+		f.nudge()
+	}
+}
+
+// nudge makes a waiting re-fit loop compute its wait again.
+func (f *liveFile) nudge() {
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
 }
 
 // windowFrames is the length of grid window w (the last one ends with the file).
@@ -189,7 +227,7 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 	}
 	f.checkComplete()
 	f.heard += float64(len(frames)) / syncRate
-	if f.grown >= liveRefitGrowth {
+	if f.grown >= f.growStep() {
 		f.grown = 0
 		return true
 	}
@@ -583,10 +621,7 @@ func (y *syncer) scheduleRefit(f *liveFile) {
 	f.mu.Unlock()
 	go func() {
 		for {
-			f.mu.Lock()
-			wait := max(y.refitDelay, y.refitGap-time.Since(f.lastFit))
-			f.mu.Unlock()
-			time.Sleep(wait)
+			y.waitRefit(f)
 			y.refitFile(f)
 			f.mu.Lock()
 			f.lastFit = time.Now()
@@ -601,16 +636,47 @@ func (y *syncer) scheduleRefit(f *liveFile) {
 	}()
 }
 
+// waitRefit waits refitDelay (a burst of audio is one re-fit) and refitGap since the file's last
+// re-fit (pendingGap while it has an untimed subtitle); a nudge computes the wait again.
+func (y *syncer) waitRefit(f *liveFile) {
+	start := time.Now()
+	for {
+		f.mu.Lock()
+		gap := y.refitGap
+		if f.pending {
+			gap = y.pendingGap
+		}
+		due := start.Add(y.refitDelay)
+		if d := f.lastFit.Add(gap); d.After(due) {
+			due = d
+		}
+		f.mu.Unlock()
+		wait := time.Until(due)
+		if wait <= 0 {
+			return
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-t.C:
+			return
+		case <-f.wake:
+			t.Stop()
+		}
+	}
+}
+
 type servedSub struct {
 	key, inner, fk string
 	hash           string
 	index          int
 	first, last    time.Time
+	// the player's position at its last request (seconds of the file, 0 unknown)
+	at float64
 }
 
-// noteServed records a file request of a subtitle served for a file; fresh is true during the
-// first liveGrace of a viewing session.
-func (y *syncer) noteServed(key, inner, hash string, index int) (fresh bool) {
+// noteServed records a file request of a subtitle served for a file at the player's position t;
+// first is true for the first request of a viewing session, fresh during its first liveGrace.
+func (y *syncer) noteServed(key, inner, hash string, index int, t float64) (first, fresh bool) {
 	now := time.Now()
 	y.mu.Lock()
 	defer y.mu.Unlock()
@@ -625,9 +691,127 @@ func (y *syncer) noteServed(key, inner, hash string, index int) (fresh bool) {
 		}
 		s = &servedSub{key: key, inner: inner, fk: syncFileKey(hash, index), hash: strings.ToLower(hash), index: index, first: now}
 		y.served[key] = s
+		first = true
 	}
 	s.last = now
-	return now.Sub(s.first) < liveGrace
+	if t > 0 {
+		s.at = t
+	}
+	return first, now.Sub(s.first) < liveGrace
+}
+
+// viewerAt is where the player of a served subtitle is now (seconds of the file), from its last
+// request with a position; false when unknown or not recent.
+func (y *syncer) viewerAt(key string) (float64, bool) {
+	y.mu.Lock()
+	s := y.served[key]
+	var at float64
+	var since time.Duration
+	if s != nil {
+		at, since = s.at, time.Since(s.last)
+	}
+	y.mu.Unlock()
+	if s == nil || at <= 0 || since > liveNearFor {
+		return 0, false
+	}
+	if y.livePlaying(s.fk) {
+		at += since.Seconds() // it played on since (a pause is not known here)
+	}
+	return at, true
+}
+
+// servedCues is what a player of key shows with result m (the subtitle as it is while untimed).
+func (y *syncer) servedCues(key string, base []byte, m *syncMeta) []liveCue {
+	if !untimedMeta(m) {
+		if a, ok := y.result(key, base); ok {
+			return vttCues(a.VTT)
+		}
+	}
+	return vttCues(base)
+}
+
+// logNear logs how a change of what is served moved the cues within liveNearAhead seconds ahead
+// of the viewer (the player's last position), so slips near the viewer show in the log.
+func (y *syncer) logNear(key, inner, hash string, index int, before, after []liveCue) {
+	at, ok := y.viewerAt(key)
+	if !ok {
+		return
+	}
+	mv := movesNear(before, after, at, at+liveNearAhead)
+	if mv.moved == 0 && mv.other == 0 {
+		return
+	}
+	other := ""
+	if mv.other > 0 {
+		other = fmt.Sprintf(", %d lines of another subtitle", mv.other)
+	}
+	log.Printf("subtitles: timing of %s on %s:%d moved %d of %d cues within %.0f s of the viewer at %.0fs: max %+.2fs, median %+.2fs%s",
+		shortSubID(inner), hash[:8], index, mv.moved, mv.cues, liveNearAhead, at, mv.max, mv.median, other)
+}
+
+type cueMoves struct {
+	cues, moved, other int     // cues in the range, moved by 0.1 s or more, without a partner (another subtitle)
+	max, median        float64 // signed: the largest move in size, the median move of the moved ones
+}
+
+// movesNear compares two served cue lists in [from, to) (old or new start): each cue is matched to
+// the old cue of the same text that started nearest to it.
+func movesNear(before, after []liveCue, from, to float64) cueMoves {
+	old := map[string][]float64{}
+	for _, c := range before {
+		old[c.text] = append(old[c.text], c.start)
+	}
+	var mv cueMoves
+	var moves []float64
+	for _, c := range after {
+		starts := old[c.text]
+		best, found := 0.0, false
+		for _, s := range starts {
+			if !found || math.Abs(s-c.start) < math.Abs(best-c.start) {
+				best, found = s, true
+			}
+		}
+		in := c.start >= from && c.start < to
+		if found {
+			in = in || best >= from && best < to
+		}
+		if !in {
+			continue
+		}
+		mv.cues++
+		if !found {
+			mv.other++
+			continue
+		}
+		if d := c.start - best; math.Abs(d) >= 0.1 {
+			mv.moved++
+			moves = append(moves, d)
+			if math.Abs(d) > math.Abs(mv.max) {
+				mv.max = d
+			}
+		}
+	}
+	if len(moves) > 0 {
+		sort.Float64s(moves)
+		mv.median = moves[len(moves)/2]
+	}
+	return mv
+}
+
+// untimedMeta reports a result served as the subtitle is: none yet, a provisional one that does
+// not fit (yet), or a pre-timed one its played audio did not back yet.
+func untimedMeta(m *syncMeta) bool {
+	return m == nil || m.Live && (m.Pre || !m.fits() && m.State != syncStateReplaced)
+}
+
+// markPending notes that the file serves an untimed subtitle in a viewing's first minutes, and
+// re-fits it soon when it has live windows.
+func (y *syncer) markPending(hash string, index int) {
+	f := y.liveFile(hash, index)
+	f.setPending(true)
+	if _, covered := f.windows(); covered > 0 {
+		y.onGrow(f)
+	}
 }
 
 func (y *syncer) servedFor(fk string) []servedSub {
@@ -647,8 +831,20 @@ func (y *syncer) servedFor(fk string) []servedSub {
 func (y *syncer) refitFile(f *liveFile) {
 	subs := y.servedFor(f.fk)
 	if len(subs) == 0 {
+		f.setPending(false)
 		return
 	}
+	y.refitSubs(f, subs)
+	pending := false
+	for _, s := range subs {
+		if time.Since(s.first) < livePendingFor && untimedMeta(y.meta(s.key)) {
+			pending = true
+		}
+	}
+	f.setPending(pending)
+}
+
+func (y *syncer) refitSubs(f *liveFile, subs []servedSub) {
 	y.liveSem <- struct{}{}
 	defer func() { <-y.liveSem }()
 	ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)

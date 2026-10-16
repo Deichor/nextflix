@@ -92,9 +92,27 @@ class SubtitleRepository(private val core: Core) {
         return file
     }
 
+    /**
+     * GET /api/subtitles/file?id=&pre=1: the server times a subtitle of a file that does not play yet (the next
+     * episode) before it opens; nothing is shown or kept. Best effort.
+     */
+    suspend fun pretime(id: String) {
+        try {
+            val res = core.api.raw("GET", "/api/subtitles/file", mapOf("id" to id, "pre" to 1))
+            withContext(NonCancellable + Dispatchers.IO) { res.close() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // the episode times its subtitle when it opens
+        }
+    }
+
     companion object {
         /** a live (partial) subtitle file is fetched again this often while it plays */
         const val LIVE_CUES_POLL_MS = 15_000L
+        /** an untimed (pending) partial answer is asked again this often in the first minutes after it was put on */
+        const val PENDING_CUES_POLL_MS = 5_000L
+        const val PENDING_FAST_FOR_MS = 3 * 60 * 1000L
         /** an AI translation still missing the lines at the position is asked again this often */
         const val AI_CUES_POLL_MS = 3_000L
         /** a complete file whose timing may still change (live, pending, failed) is asked again this often while playing */

@@ -77,6 +77,12 @@ internal class StreamApi(private val core: Core) {
             if (code == 200) ResolvedSource.parse(parse(body)) else null
         }
 
+    /** The source Play would use when the server already found it (resolve?cached=1: never searches or holds), else null. */
+    suspend fun cached(p: ResolveParams): ResolvedSource? = quiet {
+        val (code, body, _) = fetch("/api/torrent-stream/resolve", resolveQuery(p) + ("cached" to "1"))
+        if (code == 200) ResolvedSource.parse(parse(body)) else null
+    }
+
     /** A higher resolution the server warmed up that keeps up now. */
     suspend fun upgrade(p: ResolveParams, current: String, quality: Int) =
         optionalSource("/api/torrent-stream/upgrade", p, current, quality)

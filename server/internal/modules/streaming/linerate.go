@@ -41,6 +41,7 @@ const (
 	tsLineSteady     = 30 * time.Second // busy polls of one torrent set this long confirm it too
 	tsLineHalfLife   = 4 * 24 * time.Hour
 	tsLineSaveEvery  = time.Minute
+	tsReadRoomShare  = 0.5 // share of the line the playing streams may need while another file is read ahead
 )
 
 // tsLine is the line estimate of a Service (zero value ready).
@@ -237,6 +238,25 @@ func (s *Service) lineRate() (bytesPerSec float64, known bool) {
 	s.lineStart()
 	v := s.line.current(time.Now())
 	return v, v > 0
+}
+
+// RoomToRead reports whether a file that does not play yet may be read from its swarm now (the
+// subtitle timing of the next episode reads ~10 windows of it): the line is known and the playing
+// streams, all of known bitrate, need at most tsReadRoomShare of it.
+func (s *Service) RoomToRead() bool {
+	line, known := s.lineRate()
+	if !known {
+		return false
+	}
+	_, playing := s.lineState()
+	need := 0.0
+	for _, n := range s.playNeeds(playing) {
+		if n <= 0 {
+			return false // a playing stream of unknown bitrate
+		}
+		need += n
+	}
+	return need <= tsReadRoomShare*line
 }
 
 // lineFor is the line q may count on: the one it was ranked with, or more once the line

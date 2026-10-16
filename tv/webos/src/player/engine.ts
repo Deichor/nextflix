@@ -3,16 +3,17 @@ import type { Locale, MessageKey } from '../lib/i18n';
 import { getProfileId } from '../lib/profile';
 import { seasonEpisodes, tvSeasons, isPlaceholderEpisodeName, type SeasonInfo } from '../lib/catalog';
 import {
-  StreamError, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
+  StreamError, cachedSource, capsQuery, checkSidegrade, checkSubAlt, checkUpgrade, findProgress, isFinished, nextEpisodeOf, nextWarmDue, paramsOf,
   keepSourceAlive, playbackCaps, prefetchResolve, readPlayerPrefs, releaseTitle, releaseTorrents, resolveSource, reuseSource, runtimeCheckQuery,
   saveProgress, sourceOf, titleProgress, writePlayerPrefs,
   type Availability, type PlayRequest, type QualityCap, type ResolveParams, type ResolvedSource, type StreamMeta, type StreamSource, restrictToSafeAudio,
 } from '../lib/stream';
 import {
   LATE_SUBTITLE_POLL_MS, SUBALT_RETRY_MAX, bestSubtitleOf, fetchCueFile, fetchSubtitles,
-  hasSubtitleLang, lateSubtitles, mergeSubtitles, normLang, pickAudioTrack, pickSubtitle,
+  hasSubtitleLang, lateSubtitles, mergeSubtitles, normLang, pickAudioTrack, pickSubtitle, pretimeSubtitle,
   type AudioTrackInfo, type Cue, type SubtitleItem,
 } from '../lib/subtitles';
+import { pretimeNext } from './pretime';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from './bufferHealth';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuffer';
 import { lengthsMatch, timeScale } from './switchLength';
@@ -306,6 +307,8 @@ export class PlayerEngine {
   private played = new Set<string>();
   private current = '';
   private nextWarm: ResolveParams | null = null;
+  // The next episode's subtitle timed before it opens (pretime.ts); stopped when the player moves on
+  private nextPretime: { cancelled: boolean } | null = null;
   private saveTimer: ReturnType<typeof setInterval>;
   private countdownTimer?: ReturnType<typeof setInterval>;
   private toastTimer?: Timer;
@@ -1080,7 +1083,31 @@ export class PlayerEngine {
     if (m.media_type === 'tv' && next && !this.nextWarm && nextWarmDue(position, this.state.duration)) {
       this.nextWarm = { type: 'tv', title: m.title, tmdb_id: m.tmdb_id, season: next.season, episode: next.episode, maxq: this.cap };
       prefetchResolve(this.nextWarm, { position, duration: this.state.duration });
+      this.pretimeNextEpisode(this.nextWarm);
     }
+  }
+
+  /** Once the next episode's source is known, the subtitle the open would pick there is timed before it opens. */
+  private pretimeNextEpisode(params: ResolveParams) {
+    const m = this.meta;
+    if (!m.tmdb_id) return;
+    if (this.nextPretime) this.nextPretime.cancelled = true;
+    const run = { cancelled: false };
+    this.nextPretime = run;
+    const langs = this.locale === 'tr' ? ['tr', 'en'] : ['en', 'tr'];
+    // The episode's audio is taken to be in this one's language
+    const audioLang = this.state.audioTracks.find(a => a.index === this.state.audio)?.language;
+    void pretimeNext<ResolvedSource, SubtitleItem>({
+      cachedSource: () => cachedSource(params),
+      subtitles: src => fetchSubtitles({
+        tmdb_id: m.tmdb_id, media_type: 'tv', season: params.season, episode: params.episode, hash: src.hash.toLowerCase(),
+        index: src.index, langs, title: src.torrent_title || src.file_name || undefined, year: m.year, ui_lang: this.locale,
+      }),
+      pick: items => pickSubtitle(items, { profileLang: this.locale, pref: readPlayerPrefs(this.pid).sub, audioLang }),
+      pretime: pretimeSubtitle,
+      wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      cancelled: () => run.cancelled || this.destroyed,
+    });
   }
 
   private onEnded() {
@@ -1777,6 +1804,8 @@ export class PlayerEngine {
     this.set({ subId: id, cues: [], aiTranslating: false });
     if (!id) return;
     const session = this.session;
+    // Untimed answers are asked for sooner in the first minutes after it was put on (cuePollMs)
+    const shownAt = Date.now();
     let loads = 0;
     let errors = 0;
     // The answer of the last `subs` event
@@ -1825,7 +1854,7 @@ export class PlayerEngine {
       // The overlay looks the cue up again in the new list; the delay stays
       if (!!f.translating !== this.state.aiTranslating) this.set({ aiTranslating: !!f.translating });
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
-      const wait = cuePollMs(f);
+      const wait = cuePollMs(f, Date.now() - shownAt);
       if (wait !== null) this.cueTimer = setTimeout(f.partial ? load : whilePlaying, wait);
     });
     load();
@@ -2063,6 +2092,7 @@ export class PlayerEngine {
     // The finished episode is done; the next one was warmed for this moment
     releaseTitle(paramsOf(this.meta));
     this.nextWarm = null;
+    if (this.nextPretime) this.nextPretime.cancelled = true;
     this.meta = { ...this.meta, season: next.season, episode: next.episode, episode_title: undefined, runtime: undefined };
     this.startAt = undefined;
     this.given = undefined;
