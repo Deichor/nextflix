@@ -56,7 +56,9 @@ type liveFile struct {
 	ownRead  map[int]int     // frames read per unfinished own-track window
 	ownDone  map[int]liveWin // finished own-track windows
 	ownTaps  int
-	ownGrown float64 // seconds of own track read since the last re-fit was asked for
+	ownGrown float64  // seconds of own track read since the last re-fit was asked for
+	check    ownCheck // the own track against the speech (sync_owncheck.go)
+	checkN   int      // stretches that check compared (it is redone when there are more)
 	duration float64
 	complete bool
 	taps     int
@@ -199,10 +201,16 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 // windows returns the live reference windows (finished ones, and unfinished ones with at least
 // liveMinRun frames heard in one stretch) and the seconds they cover. Own-track windows come
 // first; a speech window of the same stretch is left out.
-func (f *liveFile) windows() ([]refWindow, float64) {
+func (f *liveFile) windows() ([]refWindow, float64) { return f.windowsOf(true) }
+
+// windowsOf is windows, without own-track windows unless withOwn.
+func (f *liveFile) windowsOf(withOwn bool) ([]refWindow, float64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := f.ownWindows()
+	var out []refWindow
+	if withOwn {
+		out = f.ownWindows()
+	}
 	own := len(out)
 	for w, d := range f.done {
 		lw := refWindow{Start: float64(w) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)}
@@ -390,15 +398,16 @@ func (y *syncer) openSpeech(hash string, index int, start float64) *SpeechSink {
 	return &SpeechSink{y: y, f: f, start: start, base: int(math.Round(start * syncRate)), frame: -1, lastW: -1}
 }
 
-// readEarly reads, once per file, the cues of its own text track in the first liveEarlyWindows
-// minutes from where playback starts, when the file reads no windows (above the byte budget):
-// the player fetches those bytes anyway (from TorrServer's cache), and exact lines fit sooner
-// and better than the speech heard so far (Avatar: Seven Havens S01E02 replayed: the first fit
-// after 120 s of audio instead of 180 s, the first 5 minutes within 0.3 s 81 % instead of 66 %).
+// readEarly reads, once per file, the cues of its own subtitle track in the first
+// liveEarlyWindows minutes from where playback starts, when the file reads no windows (above
+// the byte budget): the player fetches those bytes anyway (from TorrServer's cache), and exact
+// lines fit sooner and better than the speech heard so far (Avatar: Seven Havens S01E02
+// replayed: the first fit after 120 s of audio instead of 180 s, the first 5 minutes within
+// 0.3 s 81 % instead of 66 %).
 func (y *syncer) readEarly(hash string, index int, start float64) {
 	fk := syncFileKey(hash, index)
 	y.mu.Lock()
-	if p, known := y.probes[fk]; y.early[fk] || known && p.TextSub < 0 {
+	if p, known := y.probes[fk]; y.early[fk] || known && p.OwnSub < 0 {
 		y.mu.Unlock()
 		return
 	}
@@ -428,8 +437,19 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 			time.Sleep(5 * time.Second)
 		}
 	}
-	if !r.Skipped || r.Probe.TextSub < 0 || len(r.Windows) > 0 || y.liveFile(hash, index).ownTapping() {
-		return // (the play stream's cue tap brings those cues)
+	if f := y.liveFile(hash, index); !r.Skipped || len(r.Windows) > 0 || f.ownTapping() || f.ownState() == ownOther {
+		return // (the play stream's cue tap brings those cues; not timed to the file: no use)
+	}
+	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
+	if !r.Probe.subsKnown() {
+		p, err := y.probeFile(ctx, hash, index, url)
+		if err != nil {
+			return
+		}
+		r.Probe = y.updateRefSubs(fk, st, p)
+	}
+	if r.Probe.OwnSub < 0 {
+		return
 	}
 	select {
 	case y.sem <- struct{}{}:
@@ -437,7 +457,6 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 	case <-ctx.Done():
 		return
 	}
-	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
 	at := math.Floor(start)
 	if r.Probe.Duration > 0 {
 		at = math.Max(0, math.Min(at, r.Probe.Duration-liveEarlyWindows*syncWindowLen))
@@ -464,8 +483,8 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 		y.saveRef(fk, st, r)
 	}
 	st.mu.Unlock()
-	log.Printf("subtitles: timing reference of %s:%d: %d early windows of its own track from %.0fs, %d MB read", hash[:8], index,
-		len(got), at, readBytes(got)>>20)
+	log.Printf("subtitles: timing reference of %s:%d: %d early windows of its own %s track from %.0fs, %d MB read", hash[:8], index,
+		len(got), r.Probe.ownKind(), at, readBytes(got)>>20)
 	y.onGrow(y.liveFile(hash, index))
 }
 

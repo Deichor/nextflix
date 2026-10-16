@@ -1,18 +1,21 @@
 package subtitles
 
 import (
+	"fmt"
 	"log"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"time"
 )
 
 // Own-track cues of the play streams: streaming's cue tap (wired in main.go) passes the cue
-// times of one text subtitle track of the played file, which its play ffmpeg demuxes anyway.
-// They become live reference windows of kind "subs" on the 60 s grid (sync_live.go), so every
-// stretch played has the file's own line starts for the fit and the line refinement
-// (sync_refine.go), without reading the file again. Streams may overlap and come in any order:
-// a window is finished once its frames were read by any of them.
+// times of one subtitle track of the played file (text, else PGS pictures), which its play
+// ffmpeg demuxes anyway. They become live reference windows of kind "subs" on the 60 s grid
+// (sync_live.go), so every stretch played has the file's own line starts for the fit and the
+// line refinement (sync_refine.go), without reading the file again. Streams may overlap and
+// come in any order: a window is finished once its frames were read by any of them.
 
 const (
 	ownRead      = 1 // frame flags of an unfinished own-track window
@@ -28,6 +31,7 @@ type OwnTrack struct {
 	Stream             int
 	Lang, Title, Codec string
 	Default, Forced    bool
+	Frames             int // packets the container counts, 0 unknown
 }
 
 // OwnCueSink takes the cues of one own track of a play stream (seconds of the file). Heard(t):
@@ -43,6 +47,7 @@ type ownSink struct {
 	y      *syncer
 	f      *liveFile
 	start  float64
+	codec  string
 	pos    int // file frame read up to
 	cues   int
 	read   int // frames newly read
@@ -72,15 +77,21 @@ func (y *syncer) openOwnCues(hash string, index int, start float64, tracks []Own
 	if full || y.fullRefOnDisk(fk) {
 		return -1, nil
 	}
-	want := -1
+	f := y.liveFile(hash, index)
+	want, duration := -1, f.knownDuration()
 	if probed {
-		want = probe.TextSub
+		want, duration = probe.OwnSub, probe.Duration
 	}
-	stream := pickOwnTrack(tracks, want)
-	if stream < 0 {
+	stream := pickOwnTrack(tracks, want, duration)
+	if stream < 0 || f.ownState() == ownOther {
 		return -1, nil
 	}
-	f := y.liveFile(hash, index)
+	codec := ""
+	for _, t := range tracks {
+		if t.Stream == stream {
+			codec = t.Codec
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.complete || f.duration > 0 && float64(len(f.ownDone)) >= math.Ceil(f.duration/syncWindowLen) {
@@ -88,7 +99,170 @@ func (y *syncer) openOwnCues(hash string, index int, start float64, tracks []Own
 	}
 	f.ownTaps++
 	f.lastTap = time.Now()
-	return stream, &ownSink{y: y, f: f, start: start, pos: int(math.Round(start * syncRate))}
+	return stream, &ownSink{y: y, f: f, start: start, codec: codec, pos: int(math.Round(start * syncRate))}
+}
+
+// knownDuration is the file's length as far as the live reference knows it (0 unknown).
+func (f *liveFile) knownDuration() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.duration
+}
+
+// ownState is what the own-track check found for the file so far ("" not known).
+func (f *liveFile) ownState() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.check.State
+}
+
+// checkOwnTrack applies the own-track check (sync_owncheck.go) to the windows a fit uses (ref
+// read, live played): the own track's windows stay only when it is timed to the file, else
+// the speech of the same stretches stands in (read with each window, heard while playing).
+// ref.Own tells the line refinement whether the track is tight.
+func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWindow) (syncRef, []refWindow) {
+	if ref.Full {
+		return ref, live
+	}
+	var f *liveFile
+	if y.svc.cfg.LiveTiming {
+		f = y.liveFile(hash, index)
+	}
+	pairs := ownPairsOf(ref, f)
+	c := checkOwnCached(f, pairs, hash, index)
+	ref.Own = c
+	if c.State == ownTimed {
+		return ref, live
+	}
+	if hasOwnWindows(ref.Windows) {
+		ws := make([]refWindow, 0, len(ref.Windows))
+		for _, w := range ref.Windows {
+			if w.Kind == "subs" {
+				i := slices.IndexFunc(ref.Speech, func(s refWindow) bool { return s.Start == w.Start })
+				if i < 0 {
+					continue
+				}
+				w = ref.Speech[i]
+			}
+			ws = append(ws, w)
+		}
+		ref.Windows = ws
+	}
+	if f != nil && hasOwnWindows(live) {
+		live, _ = f.windowsOf(false)
+	}
+	return ref, live
+}
+
+// checkOwnCached is checkOwn, kept per file and done again when the pairs grew (by a third
+// once it found something).
+func checkOwnCached(f *liveFile, pairs []ownPair, hash string, index int) ownCheck {
+	if f == nil {
+		return checkOwn(pairs)
+	}
+	f.mu.Lock()
+	prev, n := f.check, f.checkN
+	f.mu.Unlock()
+	if len(pairs) == n || prev.State != "" && len(pairs) < n+max(1, n/3) {
+		return prev
+	}
+	c := checkOwn(pairs)
+	f.mu.Lock()
+	f.check, f.checkN = c, len(pairs)
+	f.mu.Unlock()
+	if c.State != prev.State || c.Tight != prev.Tight {
+		logOwnCheck(hash, index, c)
+	}
+	return c
+}
+
+func logOwnCheck(hash string, index int, c ownCheck) {
+	what := "not known yet"
+	switch {
+	case c.State == ownOther:
+		what = "not timed to the file (another cut): timed from the speech only"
+	case c.Tight:
+		what = fmt.Sprintf("timed to the file (%+.2f s) and tight (%.0f %% of %d line starts on a speech start)",
+			c.Fit.Segments[0].Offset, 100*c.Near, c.Matched)
+	case c.State == ownTimed:
+		what = fmt.Sprintf("timed to the file (%+.2f s) but loose (%.0f %% of %d line starts on a speech start): no line refinement",
+			c.Fit.Segments[0].Offset, 100*c.Near, c.Matched)
+	}
+	log.Printf("subtitles: own track of %s:%d against the speech of %d stretches: %s", hash[:min(8, len(hash))], index, c.Pairs, what)
+}
+
+func hasOwnWindows(ws []refWindow) bool {
+	return slices.ContainsFunc(ws, func(w refWindow) bool { return w.Kind == "subs" })
+}
+
+// ownPairsOf are the stretches with both the own track and speech: read own windows with the
+// speech read with them (else heard there), and the grid windows both taps finished.
+func ownPairsOf(ref syncRef, f *liveFile) []ownPair {
+	var speech, own map[int]liveWin
+	if f != nil {
+		f.mu.Lock()
+		speech, own = maps.Clone(f.done), maps.Clone(f.ownDone)
+		f.mu.Unlock()
+	}
+	var pairs []ownPair
+	for _, w := range ref.Windows {
+		if w.Kind != "subs" {
+			continue
+		}
+		var sp []byte
+		if i := slices.IndexFunc(ref.Speech, func(s refWindow) bool { return s.Start == w.Start }); i >= 0 {
+			sp = ref.Speech[i].Speech
+		} else {
+			sp = heardSpeech(speech, w.Start, len(w.Speech))
+		}
+		if n := min(len(sp), len(w.Speech)); n > 0 {
+			pairs = append(pairs, ownPair{w.Start, w.Speech[:n], sp[:n]})
+		}
+	}
+	for g, o := range own {
+		s, ok := speech[g]
+		if !ok {
+			continue
+		}
+		frames := unpackBits(o.Bits, o.Frames)
+		for _, i := range o.Starts {
+			if i >= 0 && i < len(frames) {
+				frames[i] = 2
+			}
+		}
+		n := min(o.Frames, s.Frames)
+		pairs = append(pairs, ownPair{float64(g) * syncWindowLen, frames[:n], unpackBits(s.Bits, s.Frames)[:n]})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].start < pairs[j].start })
+	return pairs
+}
+
+// heardSpeech is the played speech of [start, start+frames) from finished grid windows, nil
+// unless they cover all of it.
+func heardSpeech(done map[int]liveWin, start float64, frames int) []byte {
+	a := int(math.Round(start * syncRate))
+	if a < 0 || len(done) == 0 {
+		return nil
+	}
+	out := make([]byte, frames)
+	var bits []byte
+	cur := -1
+	for i := range out {
+		g := (a + i) / liveWindowFrames
+		if g != cur {
+			w, ok := done[g]
+			if !ok {
+				return nil
+			}
+			bits, cur = unpackBits(w.Bits, w.Frames), g
+		}
+		j := a + i - g*liveWindowFrames
+		if j >= len(bits) {
+			return nil
+		}
+		out[i] = bits[j]
+	}
+	return out
 }
 
 // fullRefOnDisk reports whether the file's reference is a whole subtitle (without waiting for a
@@ -104,11 +278,12 @@ func (y *syncer) fullRefOnDisk(fk string) bool {
 }
 
 // pickOwnTrack is the track the reference windows read (probed, when it is listed), else the
-// best rated one; -1 when none is usable.
-func pickOwnTrack(tracks []OwnTrack, probed int) int {
+// best rated one (a text track before a picture one); -1 when none is usable. duration is the
+// file's (0 unknown).
+func pickOwnTrack(tracks []OwnTrack, probed int, duration float64) int {
 	best, bestScore := -1, -1
 	for _, t := range tracks {
-		score := ownTrackScore(t.Codec, t.Lang, t.Title, t.Forced, false)
+		score := ownTrackScore(t.Codec, t.Lang, t.Title, t.Forced, false, t.Frames, duration)
 		if score < 0 {
 			continue
 		}
@@ -175,8 +350,8 @@ func (s *ownSink) Close() {
 	done := len(f.ownDone)
 	f.mu.Unlock()
 	if s.read > 0 {
-		log.Printf("subtitles: own track of %s:%d from %.0fs: %d cues, %.0f s read; %d own windows finished",
-			f.hash[:8], f.index, s.start, s.cues, float64(s.read)/syncRate, done)
+		log.Printf("subtitles: own track of %s:%d (%s) from %.0fs: %d cues, %.0f s read; %d own windows finished",
+			f.hash[:8], f.index, s.codec, s.start, s.cues, float64(s.read)/syncRate, done)
 	}
 	s.y.onGrow(f)
 }

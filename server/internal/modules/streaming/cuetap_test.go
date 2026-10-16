@@ -58,10 +58,10 @@ type testCueTap struct {
 	want   int
 	sinks  []*recordCues
 	start  []float64
-	tracks [][]TextTrack
+	tracks [][]CueTrack
 }
 
-func (c *testCueTap) OpenCues(hash string, index int, start float64, tracks []TextTrack) (int, CueSink, bool) {
+func (c *testCueTap) OpenCues(hash string, index int, start float64, tracks []CueTrack) (int, CueSink, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	stream := tracks[0].Stream
@@ -96,7 +96,7 @@ func TestPumpCuesTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := newRecordCues()
-	done := tsPumpCues(pr, sink, 13.37, 2, "test")
+	done := tsPumpCues(pr, sink, 13.37, tsCueRule{empty: 2}, "test")
 	if _, err := pw.WriteString(cueFrameCRC); err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +123,17 @@ func TestPumpCuesTimes(t *testing.T) {
 	}
 }
 
+// readSignal closes read once the pump closes its reader (it read everything).
+type readSignal struct {
+	*os.File
+	read chan struct{}
+}
+
+func (r readSignal) Close() error {
+	close(r.read)
+	return r.File.Close()
+}
+
 // A stalled sink never holds up ffmpeg; once a cue was dropped no more progress is reported.
 func TestPumpCuesNeverBlocks(t *testing.T) {
 	pr, pw, err := os.Pipe()
@@ -131,13 +142,15 @@ func TestPumpCuesNeverBlocks(t *testing.T) {
 	}
 	sink := newRecordCues()
 	sink.block = make(chan struct{})
-	done := tsPumpCues(pr, sink, 0, 0, "test")
+	r := readSignal{pr, make(chan struct{})}
+	done := tsPumpCues(r, sink, 0, tsCueRule{}, "test")
 	wrote := make(chan struct{})
 	go func() {
 		pw.WriteString("#tb 0: 1/1000\n#tb 1: 1/1000\n")
 		for i := range 5000 {
 			fmt.Fprintf(pw, "0, %d, %d, 500, 6, 0x0\n1, %d, %d, 20, 6, 0x0\n", i*1000, i*1000, i*1000+500, i*1000+500)
 		}
+		pw.Close()
 		close(wrote)
 	}()
 	select {
@@ -145,8 +158,8 @@ func TestPumpCuesNeverBlocks(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the writer was blocked by a stalled sink")
 	}
+	<-r.read // all of it passed while the sink stalled
 	close(sink.block)
-	pw.Close()
 	<-done
 	if len(sink.cues) == 0 || len(sink.cues) > tsCueQueue+1 {
 		t.Fatalf("%d cues delivered", len(sink.cues))
@@ -167,7 +180,7 @@ func TestPumpCuesSurvivesASinkPanic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tsPumpCues(pr, panicCues{}, 0, 0, "test")
+	tsPumpCues(pr, panicCues{}, 0, tsCueRule{}, "test")
 	wrote := make(chan struct{})
 	go func() {
 		pw.WriteString("#tb 0: 1/1000\n")
@@ -194,7 +207,7 @@ printf 'abcd' >&3; printf '#tb 0: 1/1000\n0, 1000, 1000, 500, 1, 0x0\n' >&4; pri
 		}
 		speech, cues := newRecordSink(), newRecordCues()
 		taps := append(speechTaps(speech), tsTap{args: []string{"-f", "framecrc"}, drop: cues.Close,
-			pump: func(r io.ReadCloser) { tsPumpCues(r, cues, 2, 0, "test") }})
+			pump: func(r io.ReadCloser) { tsPumpCues(r, cues, 2, tsCueRule{}, "test") }})
 		var out bytes.Buffer
 		var stderr strings.Builder
 		if err := tsRunPlay(context.Background(), []string{"-i", "x", "pipe:1"}, taps, &tsFirstWrite{w: &out}, &stderr, "test"); err != nil || out.String() != "ok" {
@@ -214,23 +227,111 @@ printf 'abcd' >&3; printf '#tb 0: 1/1000\n0, 1000, 1000, 500, 1, 0x0\n' >&4; pri
 	}
 }
 
-func TestTextTracks(t *testing.T) {
+func TestCueTracks(t *testing.T) {
 	p := &tsProbe{Streams: []tsProbeStream{
 		{CodecType: "video", CodecName: "h264"},
 		{CodecType: "audio", CodecName: "aac"},
-		{CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"language": "eng"}},
+		{CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"language": "eng",
+			"NUMBER_OF_FRAMES": "1940", "NUMBER_OF_FRAMES-eng": "1940"}},
 		{CodecType: "subtitle", CodecName: "subrip", Tags: map[string]string{"LANGUAGE": "eng", "title": "SDH"},
 			Disposition: map[string]int{"default": 1}},
 		{CodecType: "subtitle", CodecName: "dvd_subtitle"},
 		{CodecType: "subtitle", CodecName: "ass", Tags: map[string]string{"language": "tur"}, Disposition: map[string]int{"forced": 1}},
 	}}
-	got := p.textTracks()
-	want := []TextTrack{{Stream: 3, Lang: "eng", Title: "SDH", Codec: "subrip", Default: true},
+	got := p.cueTracks()
+	want := []CueTrack{{Stream: 2, Lang: "eng", Codec: "hdmv_pgs_subtitle", Frames: 1940},
+		{Stream: 3, Lang: "eng", Title: "SDH", Codec: "subrip", Default: true},
 		{Stream: 5, Lang: "tur", Codec: "ass", Forced: true}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("got %+v", got)
 	}
-	if (*tsProbe)(nil).textTracks() != nil {
+	if (*tsProbe)(nil).cueTracks() != nil {
 		t.Fatal("nil probe")
+	}
+}
+
+// pumpFile runs the cue pump over a recorded framecrc output.
+func pumpFile(t *testing.T, data string, offset float64, rule tsCueRule) *recordCues {
+	t.Helper()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := newRecordCues()
+	done := tsPumpCues(pr, sink, offset, rule, "test")
+	go func() {
+		pw.WriteString(data)
+		pw.Close()
+	}()
+	<-done
+	return sink
+}
+
+// The PGS track of The Mentalist S03E02 (d3g WEBRip) as the cue tap of a play stream from
+// 1205 s reads it (times and sizes as recorded, checksums zeroed). The seek landed on the
+// keyframe at 1204.203: the screen clear at 1204.246 ends a line that started before it, the
+// line at 1204.333 comes at -0.667. Every cue is the extracted track's (pgs_cues.json) to the ms.
+func TestPumpCuesPGS(t *testing.T) {
+	data, err := os.ReadFile("testdata/cuetap_pgs.framecrc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := pumpFile(t, string(data), 1205, tsPGSRule)
+	want := []cueRec{{1204.333, 1207.118}, {1207.206, 1208.685}, {1208.772, 1210.774}, {1210.861, 1212.123},
+		{1212.211, 1214.125}, {1214.213, 1216.258}, {1216.345, 1217.024}} // the last one shows past the read
+	if len(sink.cues) != len(want) {
+		t.Fatalf("cues %v", sink.cues)
+	}
+	for i, c := range sink.cues {
+		if math.Abs(c.start-want[i].start) > 1e-6 || math.Abs(c.end-want[i].end) > 1e-6 {
+			t.Fatalf("cue %d: %v, want %v", i, c, want[i])
+		}
+	}
+	// Progress waits at the start of a cue that shows: Heard never passes a line still to come
+	for _, h := range sink.heard {
+		for _, c := range sink.cues {
+			if h > c.start+1e-9 && h < c.end-1e-9 {
+				t.Fatalf("heard %.3f while the cue %v showed", h, c)
+			}
+		}
+	}
+	if last := sink.heard[len(sink.heard)-1]; math.Abs(last-1217.024) > 1e-6 {
+		t.Fatalf("heard %v", sink.heard)
+	}
+}
+
+// Palette updates (fades) and moves change the cue showing; a new picture replaces it; a
+// display set kept as a packet per segment counts as one; a cue whose end never comes is held
+// for tsCueOpenMax at most.
+func TestPumpCuesPGSUpdates(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("#tb 0: 1/1000\n#tb 1: 1/1000\n")
+	sub := func(ms int, sizes ...int) {
+		for _, size := range sizes {
+			fmt.Fprintf(&b, "0, %d, %d, 0, %d, 0x0\n", ms, ms, size)
+		}
+	}
+	sub(1000, 9000) // a line
+	sub(1042, 120)  // fade-in steps: palette only
+	sub(1083, 1300)
+	sub(3000, 12000) // the next line replaces it
+	sub(4000, 30)    // cleared
+	sub(4500, 39)    // a clear of two windows: nothing shows
+	sub(5000, 800)   // a short line (no cue showing)
+	sub(6000, 30)
+	sub(6500, 22, 13, 85, 4000, 3) // PCS, WDS, PDS, ODS, END as packets
+	fmt.Fprintf(&b, "1, %d, %d, 32, 1024, 0x0\n", 6600, 6600)
+	sub(6800, 14, 13, 3)
+	sub(7000, 5000) // a line whose clear is lost
+	for ms := 7000; ms <= 30000; ms += 32 {
+		fmt.Fprintf(&b, "1, %d, %d, 32, 1024, 0x0\n", ms, ms)
+	}
+	sink := pumpFile(t, b.String(), 100, tsPGSRule)
+	want := []cueRec{{101, 103}, {103, 104}, {105, 106}, {106.5, 106.8}, {107, 107 + tsCueOpenMax}}
+	if fmt.Sprint(sink.cues) != fmt.Sprint(want) {
+		t.Fatalf("cues %v, want %v", sink.cues, want)
+	}
+	if last := sink.heard[len(sink.heard)-1]; math.Abs(last-130.008) > 1e-6 { // the last audio packet's end
+		t.Fatalf("heard %v", sink.heard)
 	}
 }

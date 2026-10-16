@@ -73,7 +73,7 @@ func newLiveTest(t *testing.T, duration float64) *Service {
 	t.Cleanup(func() { syncReadDelay = saved })
 	svc := NewService(nil, Config{CacheDir: t.TempDir(), TorrServerURL: "http://torrserver", LiveTiming: true})
 	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
-		return mediaProbe{Duration: duration, FPS: 23.976, Audio: 1, TextSub: -1, Bitrate: 2 << 20}, nil
+		return mediaProbe{Duration: duration, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none", Bitrate: 2 << 20}, nil
 	}
 	svc.sync.read = func(context.Context, string, mediaProbe, float64, float64) (refWindow, error) {
 		t.Error("a window was read from a file above the byte budget")

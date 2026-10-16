@@ -264,7 +264,7 @@ func TestLiveReadsEarlyOwnTrack(t *testing.T) {
 	svc := newLiveTest(t, episode)
 	y := svc.sync
 	y.probe = func(context.Context, string) (mediaProbe, error) {
-		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, TextSub: 2, Bitrate: 2 << 20}, nil
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip", Bitrate: 2 << 20}, nil
 	}
 	file := dialogue(1100, episode)
 	var mu sync.Mutex
@@ -297,7 +297,7 @@ func TestLiveReadsEarlyOwnTrack(t *testing.T) {
 		t.Fatalf("read at %v", got)
 	}
 	f := y.liveFile(syncHash, 1)
-	injectLive(f, file, []int{7})
+	injectLive(f, file, []int{5, 6, 7}) // (heard where the early windows lie: that checks the track)
 	y.refitFile(f)
 	key, _ := syncKey(inner, syncHash, 1)
 	m := y.meta(key)
@@ -393,6 +393,7 @@ func TestLiveKeepsALinedUpSubtitle(t *testing.T) {
 	base, _ := svc.File(ctx, inner)
 	lf := y.liveFile(syncHash, 1)
 	lf.setDuration(ref.Probe.Duration)
+	trustOwnTrack(lf) // (2 own windows of 2 minutes heard are too few to check)
 	decided := 0
 	for i := range f.live {
 		lf.mu.Lock()

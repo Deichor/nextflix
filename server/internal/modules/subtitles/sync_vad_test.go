@@ -2,6 +2,7 @@ package subtitles
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"math"
 	"math/rand"
@@ -75,8 +76,33 @@ func TestParseMediaProbe(t *testing.T) {
 	 {"index":4,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng","title":"English [SDH]"}},
 	 {"index":5,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle"}]}`)
 	p, err := parseMediaProbe(out)
-	if err != nil || p.Duration != 2562.048 || math.Abs(p.FPS-23.976) > 0.001 || p.Audio != 1 || !p.Center || p.TextSub != 3 || p.Bitrate != 7063218.0/8 || p.maxWindows() != 10 {
+	if err != nil || p.Duration != 2562.048 || math.Abs(p.FPS-23.976) > 0.001 || p.Audio != 1 || !p.Center || p.OwnSub != 3 ||
+		p.SubCodec != "subrip" || p.picture() || p.Bitrate != 7063218.0/8 || p.maxWindows() != 10 {
 		t.Fatalf("probe %+v %v", p, err)
+	}
+	// Without a text track the PGS one (The Mentalist S03E02 d3g: 1940 display sets in 43 min);
+	// not a forced-only one (few packets) and none at all: "none", so the file is not probed again
+	pgs := func(frames string) []byte {
+		return []byte(`{"format":{"duration":"2595.456"},"streams":[
+		 {"index":0,"codec_type":"video","codec_name":"hevc"},
+		 {"index":1,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","title":"Forced"}},
+		 {"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","NUMBER_OF_FRAMES":"` + frames + `"}},
+		 {"index":3,"codec_type":"subtitle","codec_name":"dvd_subtitle","tags":{"language":"eng"}}]}`)
+	}
+	if p, _ := parseMediaProbe(pgs("1940")); p.OwnSub != 2 || !p.picture() || !p.subsKnown() {
+		t.Fatalf("PGS probe %+v", p)
+	}
+	if p, _ := parseMediaProbe(pgs("40")); p.OwnSub != -1 || p.SubCodec != "none" || !p.subsKnown() {
+		t.Fatalf("forced-only PGS probe %+v", p)
+	}
+	// A probe saved before picture tracks counted
+	var old mediaProbe
+	if json.Unmarshal([]byte(`{"duration":2595.456,"fps":23.976,"audio":1,"center":true,"text_sub":-1,"bitrate":360178}`), &old) != nil ||
+		old.OwnSub != -1 || old.subsKnown() || old.picture() {
+		t.Fatalf("old probe %+v", old)
+	}
+	if json.Unmarshal([]byte(`{"duration":2595.456,"text_sub":3}`), &old) != nil || old.OwnSub != 3 || !old.subsKnown() || old.picture() {
+		t.Fatalf("old probe with a text track %+v", old)
 	}
 }
 

@@ -725,7 +725,8 @@ own text track, an OpenSubtitles hash match), else one timed to fit the file, el
 timed in the background; with the AI translation on it may be downloaded, never from OpenSubtitles); English without
 HI first. A hole is a pause of the subtitle of 15 s or more holding 4 or more of the reference's dialogue lines (HI
 parts and songs left out, the middle of a line 1.5 s inside the pause); the pauses before the first and after the
-last cue count too (a subtitle starting late or ending early). Windows of the file's own text track that cover the
+last cue count too (a subtitle starting late or ending early). Windows of the file's own subtitle track (text, or
+a PGS track's packet times; only once it was found timed to the file, see ARCHITECTURE.md) that cover the
 pause and show almost no lines there (under a third of the reference's), or audio heard there that is silent (under
 3 % speech frames), veto a hole; speech never makes one (music and action reach 70-80 %). The result is kept per
 subtitle and file (`synced/`) for the ranking and the list's `holes`, and logged (`subtitles: <id> on <hash8>:<index>
