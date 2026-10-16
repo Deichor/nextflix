@@ -3,6 +3,7 @@ package subtitles
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -132,6 +133,52 @@ func TestServeTimesTheSubtitle(t *testing.T) {
 	// the list now counts it as synced
 	if svc.sync.fitOf(inner, syncHash, 1) != 1 {
 		t.Fatal("fit not recorded")
+	}
+}
+
+// A result of an older timing (final ones are never re-fitted otherwise) is served as it is while
+// it is timed again, then replaced.
+func TestServeRetimesAnOlderVersion(t *testing.T) {
+	file := dialogue(12, episode)
+	svc, _ := newSyncTest(t, file)
+	inner := cacheProviderSub(t, svc, "1|old|2|7|1", subtitleFor(file, 1, func(float64) float64 { return -3 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, err := svc.FileFor(context.Background(), id, 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("first answer: sync %q err %v", a.Sync, err)
+	}
+	// What an older version stored: 1 s off, no version
+	old := *svc.sync.meta(key)
+	old.Version, old.Fit.Segments = 0, []syncSegment{{Offset: old.Fit.Segments[0].Offset + 1}}
+	b, _ := json.Marshal(old)
+	raw, ok := svc.files.read(SourceTurkceAltyazi, SourceTurkceAltyazi+"|1|old|2|7|1", ".vtt", 0)
+	if !ok {
+		t.Fatal("raw subtitle")
+	}
+	cues := applyFit(vttCues(raw), old.Fit)
+	if svc.files.write("synced", key, ".json", b) != nil || svc.files.write("synced", key, ".vtt", renderVTT(cues, false)) != nil {
+		t.Fatal("write")
+	}
+	svc.sync.mu.Lock()
+	svc.sync.metas = map[string]*syncMeta{}
+	svc.sync.mu.Unlock()
+
+	a, err := svc.FileFor(context.Background(), id, 0)
+	if err != nil || !a.Partial || a.Sync != syncStateSynced || math.Abs(vttCues(a.VTT)[10].start-file[10].start-1) > 0.05 {
+		t.Fatalf("stale answer: partial=%v sync=%q err=%v", a.Partial, a.Sync, err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); svc.flights.running("sync|" + key); {
+		if time.Now().After(deadline) {
+			t.Fatal("timing again did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a, err = svc.FileFor(context.Background(), id, 0)
+	if err != nil || a.Partial || a.Sync != syncStateSynced || math.Abs(vttCues(a.VTT)[10].start-file[10].start) > 0.05 {
+		t.Fatalf("timed again: partial=%v sync=%q err=%v", a.Partial, a.Sync, err)
+	}
+	if m := svc.sync.meta(key); m.Version != syncVersion {
+		t.Fatalf("version %d", m.Version)
 	}
 }
 

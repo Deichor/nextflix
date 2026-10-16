@@ -114,9 +114,22 @@ type syncMeta struct {
 	Live        bool    `json:"live,omitempty"`
 	LiveWindows int     `json:"live_windows,omitempty"`
 	LiveSeconds float64 `json:"live_seconds,omitempty"`
+	// RateWindows: the windows of the last fit that tried every frame rate (0 unknown)
+	RateWindows int `json:"rate_windows,omitempty"`
+	// Version of the timing that made it (syncVersion; 0 before versions)
+	Version int `json:"version,omitempty"`
 }
 
+// syncVersion is the version of the timing. A result of an older one is timed again when it is
+// asked for (served as it is meanwhile): final results are never re-fitted otherwise, so fixes of
+// the timing would not reach them. 1: rates compared net of their offset changes and searched
+// again, changes placed over undecided windows (The Mentalist S03E02 kept 24/23.976 for good).
+const syncVersion = 1
+
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }
+
+// stale reports a result of an older timing.
+func (m *syncMeta) stale() bool { return m != nil && m.Version < syncVersion }
 
 // syncRef is the timing reference of one file.
 type syncRef struct {
@@ -263,6 +276,13 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 		return FileAnswer{VTT: renderVTT(vttCues(base), true), Partial: true, Sync: syncStatePending}
 	}
 	if a, ok := y.answer(key, base, listening); ok {
+		if y.meta(key).stale() && !y.recentlyFailed(key) {
+			// Timed by an older version: served as it is while it is timed again
+			y.startTiming(key, inner, hash, index, base)
+			if !a.Partial {
+				a.VTT, a.Partial = renderVTT(vttCues(a.VTT), true), true
+			}
+		}
 		return a, nil
 	}
 	if y.recentlyFailed(key) {
@@ -272,21 +292,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 		}
 		return FileAnswer{VTT: base, Sync: syncStateFailed}, nil
 	}
-	call := y.svc.flights.start("sync|"+key, func() (any, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
-		ctx = y.withLineBudget(ctx)
-		defer cancel()
-		start := time.Now()
-		err := y.run(ctx, inner, hash, index, base)
-		if err != nil {
-			log.Printf("subtitles: timing of %s on %s:%d failed after %s: %v", shortSubID(inner), hash[:8], index,
-				time.Since(start).Round(time.Second), err)
-			y.mu.Lock()
-			y.failed[key] = time.Now()
-			y.mu.Unlock()
-		}
-		return nil, err
-	})
+	call := y.startTiming(key, inner, hash, index, base)
 	timer := time.NewTimer(syncFirstWait)
 	defer timer.Stop()
 	finished := false
@@ -363,6 +369,7 @@ func (y *syncer) meta(key string) *syncMeta {
 }
 
 func (y *syncer) store(key string, m syncMeta, vtt []byte) {
+	m.Version = syncVersion
 	if vtt != nil {
 		if err := y.svc.files.write("synced", key, ".vtt", vtt); err != nil {
 			log.Printf("subtitles: cache write: %v", err)
@@ -387,6 +394,28 @@ func (y *syncer) recentlyFailed(key string) bool {
 		return false
 	}
 	return ok
+}
+
+// startTiming times one subtitle for the file in the background (one job per result). A failed
+// job, or one that left a result of an older version, is not started again for syncRetryAfter.
+func (y *syncer) startTiming(key, inner, hash string, index int, base []byte) *flightCall {
+	return y.svc.flights.start("sync|"+key, func() (any, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
+		ctx = y.withLineBudget(ctx)
+		defer cancel()
+		start := time.Now()
+		err := y.run(ctx, inner, hash, index, base)
+		if err != nil {
+			log.Printf("subtitles: timing of %s on %s:%d failed after %s: %v", shortSubID(inner), hash[:8], index,
+				time.Since(start).Round(time.Second), err)
+		}
+		if err != nil || y.meta(key).stale() {
+			y.mu.Lock()
+			y.failed[key] = time.Now()
+			y.mu.Unlock()
+		}
+		return nil, err
+	})
 }
 
 // run times one subtitle for the file and stores the result.
@@ -439,7 +468,10 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		return false // too little to tell yet
 	}
 	prev := y.meta(key)
-	m, vtt, ref := y.fitOne(ctx, hash, index, ref, live, base, read, prev)
+	if prev.stale() {
+		prev = nil // an older timing's result holds back nothing (rate, hysteresis)
+	}
+	m, vtt, ref := y.fitOne(ctx, hash, index, ref, live, base, read, prev, complete)
 	if y.keepAccepted(key, base, prev, m, complete) {
 		logKept(inner, hash, index, m, len(live), liveSecs)
 		return true
@@ -464,6 +496,9 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 				continue
 			}
 			am := y.meta(altKey)
+			if am.stale() {
+				am = nil
+			}
 			altPrev := am
 			var altVTT []byte
 			if am != nil && am.Live {
@@ -478,7 +513,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			}
 			if am == nil {
 				var a syncMeta
-				a, altVTT, ref = y.fitOne(ctx, hash, index, ref, live, altBase, read, altPrev)
+				a, altVTT, ref = y.fitOne(ctx, hash, index, ref, live, altBase, read, altPrev, complete)
 				if y.keepAccepted(altKey, altBase, altPrev, a, complete) {
 					logKept(alt, hash, index, a, len(live), liveSecs)
 					am = altPrev
@@ -597,16 +632,19 @@ func shortSubID(id string) string {
 
 // fitOne aligns one subtitle to the file's reference and live windows (with read, reading more
 // windows where the offset changes) and returns its result and the WebVTT to serve (nil: serve
-// it as it is). A provisional fit that fitted before keeps its scale (fewer FFTs per re-fit).
+// it as it is). A provisional fit that fitted before keeps its scale (fewer FFTs per re-fit)
+// until the reference has grown by half since every rate was tried, and the final fit (complete)
+// tries them all: a rate chosen from a few minutes is not kept for good (The Mentalist S03E02).
 // The timed cues inside own-track windows are refined onto the own lines (sync_refine.go).
-func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef, live []refWindow, vtt []byte, read bool, prev *syncMeta) (syncMeta, []byte, syncRef) {
+func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef, live []refWindow, vtt []byte, read bool, prev *syncMeta, final bool) (syncMeta, []byte, syncRef) {
 	cues := vttCues(vtt)
 	spans := make([]span, len(cues))
 	for i, c := range cues {
 		spans[i] = span{c.start, c.end}
 	}
 	scales := syncScales
-	if prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 {
+	if n := len(mergeWindows(ref.Windows, live)); prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 && !final &&
+		2*n < 3*prev.RateWindows {
 		scales = []float64{prev.Fit.Scale}
 	}
 	// lengthFits still sees every cue (a longer cut runs past the end)
@@ -633,6 +671,11 @@ func (y *syncer) fitOne(ctx context.Context, hash string, index int, ref syncRef
 		fit, ok = fitTo()
 	}
 	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: refKind(ref, windows), Windows: len(windows)}
+	if len(scales) > 1 {
+		m.RateWindows = len(windows)
+	} else if prev != nil {
+		m.RateWindows = prev.RateWindows
+	}
 	if !ok || !fit.good() || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, ref
 	}

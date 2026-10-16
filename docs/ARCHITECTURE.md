@@ -1364,7 +1364,14 @@ that change at splits), simplified:
   (validated leaving each file out: 0.16 s), so neither is used. The own track's style comes in through the fitted
   lag wherever own-track windows exist: read windows, or the 2 early windows of a file above the byte budget (see
   `readEarly`; Gilmore MONOLITH replayed: 0.53 s late from the audio only, 0.12 s with 2 own windows). A change is
-  placed in the subtitle pause that fits both neighbouring windows best (the longest among equals). Up to 2 rounds
+  placed in the subtitle pause that fits the windows around it best (the longest among equals); windows next to it
+  that prefer their side by fewer than 2 matched lines are searched too (The Mentalist S03E02: two minutes before an ad
+  break leaned either way by under a line, and the change went 110 s early into another long pause, cues 1.8 s late
+  until the final fit). Another frame rate has to beat the file's by 0.05 (matched lines per reference line) net of
+  what its offset changes cost: a near rate (24 ↔ 23.976 fps, 2.6 s over an episode) turns the steps of ad breaks into
+  drift and matches a few more lines with more, smaller changes (S03E02's Turkish subtitle, made for the file's rate,
+  was served at 24/23.976 from 6 read and 4 played windows, where the file's rate had peaked at a chance offset: a
+  sawtooth of −0.2 to +0.5 s and two stretches 2 s late). Up to 2 rounds
   add windows between neighbours with different offsets more than 150 s apart (12 windows at most). A result fits
   when its score beats chance (the mean over all offsets) by 0.15 and the best offset away from the chosen ones by
   0.08 (matched lines per reference line), and the timed subtitle ends before the video does (+60 s) and covers 40 %
@@ -1418,7 +1425,9 @@ that change at splits), simplified:
   with the windows (4 × windows / 12 lines), which dropped a real teaser offset once most of an episode was heard
   (Mentalist S02E10 KONTRAST and a Gilmore Girls file, 2 s off before the title sequence). Shaped like S02E10
   (+0.66 s in the teaser, +3.00 s after the title sequence at ~214 s, a minute of audio at a time), the change is found
-  at the 5th window. A later re-fit of a fitting subtitle keeps its frame rate (fewer FFTs).
+  at the 5th window. A later re-fit of a fitting subtitle keeps its frame rate (fewer FFTs) until the reference has
+  grown by half since every rate was tried, and the final fit tries them all (S03E02: a rate chosen from 4 played
+  minutes was kept for good, the final fit too).
   Hysteresis: once a provisional fit was accepted, a re-fit that does not fit keeps it served (no alternatives tried;
   logged `kept the last accepted fit (new fit poor: …)`) until a new fit is accepted or the file is covered. On
   S02E10 the fit from 3 windows (one offset) turned poor at 6 windows as they passed the title sequence, so the
@@ -1454,7 +1463,9 @@ that change at splits), simplified:
 - Serving (`sync.go`): the file request answers the subtitle as it is at once (marked partial, `NOTE
   nextflix-partial`, so both players ask again every 15 s; a timing ready within 2.5 s is answered directly) and
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
-  disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues. While live
+  disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues. Every result
+  carries the version of the timing that made it (`syncVersion`): an older one is served as it is (partial) while it
+  is timed again from the stored windows, else final results would keep a fixed bug for good. While live
   windows can still change it (live timing on, file not covered) a result is provisional: `X-Subtitle-Sync: live`
   (`pending` while nothing fits), partial while the file plays (a tap open or closed within 90 s, or the first 30 s
   of a viewing session, since the tap may open after the first subtitle request), `no-store` and unmarked otherwise.
