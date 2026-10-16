@@ -97,6 +97,7 @@ func (y *syncer) openOwnCues(hash string, index int, start float64, tracks []Own
 	if f.complete || f.duration > 0 && float64(len(f.ownDone)) >= math.Ceil(f.duration/syncWindowLen) {
 		return -1, nil
 	}
+	f.ownPic = pictureSubCodecs[codec]
 	f.ownTaps++
 	f.lastTap = time.Now()
 	return stream, &ownSink{y: y, f: f, start: start, codec: codec, pos: int(math.Round(start * syncRate))}
@@ -117,21 +118,26 @@ func (f *liveFile) ownState() string {
 }
 
 // checkOwnTrack applies the own-track check (sync_owncheck.go) to the windows a fit uses (ref
-// read, live played): the own track's windows stay only when it is timed to the file, else
-// the speech of the same stretches stands in (read with each window, heard while playing).
+// read, live played): the own track's windows stay when it is timed to the file, a text track's
+// also while that is not known (as before the check: its speech may not tell, music or noise),
+// else the speech of the same stretches stands in (read with each window, heard while playing).
 // ref.Own tells the line refinement whether the track is tight.
 func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWindow) (syncRef, []refWindow) {
 	if ref.Full {
 		return ref, live
 	}
 	var f *liveFile
+	picture := ref.Probe.picture()
 	if y.svc.cfg.LiveTiming {
 		f = y.liveFile(hash, index)
+		f.mu.Lock()
+		picture = picture || f.ownPic
+		f.mu.Unlock()
 	}
 	pairs := ownPairsOf(ref, f)
-	c := checkOwnCached(f, pairs, hash, index)
+	c := checkOwnCached(f, pairs, !ref.Busy, hash, index)
 	ref.Own = c
-	if c.State == ownTimed {
+	if c.State == ownTimed || c.State == "" && !picture {
 		return ref, live
 	}
 	if hasOwnWindows(ref.Windows) {
@@ -154,20 +160,26 @@ func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWi
 	return ref, live
 }
 
-// checkOwnCached is checkOwn, kept per file and done again when the pairs grew (by a third
-// once it found something).
-func checkOwnCached(f *liveFile, pairs []ownPair, hash string, index int) ownCheck {
+// checkOwnCached is checkOwn, kept per file (and on disk with its live windows): done again
+// when the stretches grew (by a third once it found something), only from all of them (full:
+// ref is the file's reference, not a stand-in while it is read). Each change of the result
+// re-fits the subtitles with other windows, so a decision stands (settleOwn).
+func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index int) ownCheck {
 	if f == nil {
 		return checkOwn(pairs)
 	}
+	pairs = distinctPairs(pairs)
 	f.mu.Lock()
 	prev, n := f.check, f.checkN
 	f.mu.Unlock()
-	if len(pairs) == n || prev.State != "" && len(pairs) < n+max(1, n/3) {
+	if !full || len(pairs) == n || prev.State != "" && len(pairs) < n+max(1, n/3) {
 		return prev
 	}
-	c := checkOwn(pairs)
+	c := settleOwn(prev, checkOwn(pairs))
 	f.mu.Lock()
+	if c.State != f.check.State || c.Tight != f.check.Tight || c.Pairs != f.check.Pairs {
+		f.dirty = true
+	}
 	f.check, f.checkN = c, len(pairs)
 	f.mu.Unlock()
 	if c.State != prev.State || c.Tight != prev.Tight {
@@ -176,17 +188,38 @@ func checkOwnCached(f *liveFile, pairs []ownPair, hash string, index int) ownChe
 	return c
 }
 
+// settleOwn is the check that stands after a new one: a decision is kept against one that does
+// not decide, or decides otherwise from fewer than a third more stretches (The Mentalist S02E22's
+// captions went timed, not known, timed at 15, 26 and 34 stretches); a tight track stays tight
+// down to ownLooseShare of its line starts on an onset.
+func settleOwn(prev, c ownCheck) ownCheck {
+	if prev.State == "" {
+		return c
+	}
+	if c.State == "" || c.State != prev.State && c.Pairs < prev.Pairs+max(1, prev.Pairs/3) {
+		return prev
+	}
+	if c.State == ownTimed && prev.State == ownTimed && prev.Tight && !c.Tight && c.Near >= ownLooseShare {
+		c.Tight = true
+	}
+	return c
+}
+
 func logOwnCheck(hash string, index int, c ownCheck) {
 	what := "not known yet"
+	offset := 0.0
+	if len(c.Fit.Segments) > 0 {
+		offset = c.Fit.Segments[0].Offset
+	}
 	switch {
 	case c.State == ownOther:
 		what = "not timed to the file (another cut): timed from the speech only"
 	case c.Tight:
 		what = fmt.Sprintf("timed to the file (%+.2f s) and tight (%.0f %% of %d line starts on a speech start)",
-			c.Fit.Segments[0].Offset, 100*c.Near, c.Matched)
+			offset, 100*c.Near, c.Matched)
 	case c.State == ownTimed:
 		what = fmt.Sprintf("timed to the file (%+.2f s) but loose (%.0f %% of %d line starts on a speech start): no line refinement",
-			c.Fit.Segments[0].Offset, 100*c.Near, c.Matched)
+			offset, 100*c.Near, c.Matched)
 	}
 	log.Printf("subtitles: own track of %s:%d against the speech of %d stretches: %s", hash[:min(8, len(hash))], index, c.Pairs, what)
 }

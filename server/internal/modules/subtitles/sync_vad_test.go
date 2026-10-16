@@ -82,18 +82,31 @@ func TestParseMediaProbe(t *testing.T) {
 	}
 	// Without a text track the PGS one (The Mentalist S03E02 d3g: 1940 display sets in 43 min);
 	// not a forced-only one (few packets) and none at all: "none", so the file is not probed again
-	pgs := func(frames string) []byte {
+	pgsTagged := func(key, frames string) []byte {
 		return []byte(`{"format":{"duration":"2595.456"},"streams":[
 		 {"index":0,"codec_type":"video","codec_name":"hevc"},
 		 {"index":1,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","title":"Forced"}},
-		 {"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","NUMBER_OF_FRAMES":"` + frames + `"}},
+		 {"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","` + key + `":"` + frames + `"}},
 		 {"index":3,"codec_type":"subtitle","codec_name":"dvd_subtitle","tags":{"language":"eng"}}]}`)
 	}
+	pgs := func(frames string) []byte { return pgsTagged("NUMBER_OF_FRAMES", frames) }
 	if p, _ := parseMediaProbe(pgs("1940")); p.OwnSub != 2 || !p.picture() || !p.subsKnown() {
 		t.Fatalf("PGS probe %+v", p)
 	}
 	if p, _ := parseMediaProbe(pgs("40")); p.OwnSub != -1 || p.SubCodec != "none" || !p.subsKnown() {
 		t.Fatalf("forced-only PGS probe %+v", p)
+	}
+	// Older mkvmerge versions name the tag with its language; any case
+	for _, key := range []string{"NUMBER_OF_FRAMES-eng", "number_of_frames"} {
+		if p, _ := parseMediaProbe(pgsTagged(key, "40")); p.OwnSub != -1 {
+			t.Fatalf("forced-only PGS probe (%s) %+v", key, p)
+		}
+		if p, _ := parseMediaProbe(pgsTagged(key, "1940")); p.OwnSub != 2 {
+			t.Fatalf("PGS probe (%s) %+v", key, p)
+		}
+	}
+	if n := frameCount(map[string]string{"NUMBER_OF_FRAMES-eng": "1744", "NUMBER_OF_FRAMES": "1940", "DURATION-eng": "x"}); n != 1940 {
+		t.Fatalf("frame count %d, the plain tag says 1940", n)
 	}
 	// A probe saved before picture tracks counted
 	var old mediaProbe

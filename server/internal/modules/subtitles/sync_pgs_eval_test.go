@@ -254,6 +254,9 @@ func TestSnapshotPGSReplay(t *testing.T) {
 			continue
 		}
 		dur := f.ref.Probe.Duration
+		// the snapshot's probe is from before picture tracks counted; a timing probes it again
+		speechRef := f.ref
+		speechRef.Probe.OwnSub, speechRef.Probe.SubCodec = 2, "hdmv_pgs_subtitle"
 		resume := 0
 		for i, w := range f.live {
 			if w.end() <= c.watched[0] {
@@ -275,7 +278,7 @@ func TestSnapshotPGSReplay(t *testing.T) {
 			if !ok {
 				continue
 			}
-			pgsRef := syncRef{Probe: f.ref.Probe, Windows: pgsRead, MaxWindows: f.ref.MaxWindows}
+			pgsRef := syncRef{Probe: speechRef.Probe, Windows: pgsRead, MaxWindows: f.ref.MaxWindows}
 			for _, w := range pgsRead { // the speech read with each window (as played there)
 				if sp, ok := speechAt(f.live, w.Start, len(w.Speech)); ok {
 					pgsRef.Speech = append(pgsRef.Speech, refWindow{Start: w.Start, Kind: "audio", Speech: sp})
@@ -291,7 +294,7 @@ func TestSnapshotPGSReplay(t *testing.T) {
 					track []span
 				}{
 					{"speech read + speech", f.ref, nil},
-					{"speech read + PGS tap", f.ref, track},
+					{"speech read + PGS tap", speechRef, track},
 					{"PGS read + PGS tap", pgsRef, track},
 				} {
 					heard, served, changes := replayServed(t, f, sc.ref, sc.track, s.spans, o.order)

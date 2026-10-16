@@ -1336,12 +1336,18 @@ that change at splits), simplified:
   (only those stretches, through TorrServer or the TorBox proxy): the cues of the file's own subtitle track (any
   language, English first; `-copyts`, since after `-ss` subtitle times count from the keyframe before it): a text
   track, else a PGS picture track that is not forced and holds 2 lines a minute by its Matroska `NUMBER_OF_FRAMES`
-  (SDH only when it is the only kind), whose packets are copied into `framecrc` (times and sizes, read like the cue
-  tap below), together with the speech of the same stretch (a second read right after, from the proxy's or
-  TorrServer's cache; kept as `speech` in the reference) for the own-track check below; else speech from the
-  dialogue channel (`pan=mono|c0=FC` for 5.1, else a downmix) at 8 kHz by a simple energy detector on 10 ms frames
-  (`sync_vad.go`). A reference saved before (no `sub_codec` in its probe, or own windows without their speech) is
-  probed or read again once. Every window read goes through a local byte cap (1.25 × its share of the file + 16 MB):
+  (any case; older mkvmerge versions write `NUMBER_OF_FRAMES-eng`) (SDH only when it is the only kind), whose packets
+  are copied into `framecrc` (times and sizes, read like the cue tap below), together with the speech of the same
+  stretch (a second read right after, from the proxy's or TorrServer's cache; kept as `speech` in the reference, and
+  counted against the byte budget below: past it the own track is read alone) for the own-track check below; else
+  speech from the dialogue channel (`pan=mono|c0=FC` for 5.1, else a downmix) at 8 kHz by a simple energy detector
+  on 10 ms frames (`sync_vad.go`). A reference saved before the check (no `sub_codec` in its probe: probed again; own
+  windows without their speech, 34 of 50 stored ones) times at once as it is; then only what pairs its windows is
+  read, once per file (`paired`): the speech at its own windows, or a PGS track the new probe found at its speech
+  windows (that speech is the pair). Those reads run after the first fit, without locking the reference (re-fits
+  and holes keep using it), and the fit is done again with them; a failed or cut read never drops the saved
+  reference (a cut pass goes on with the next job). A first read cut by the job's time keeps the windows it has when
+  they are enough. Every window read goes through a local byte cap (1.25 × its share of the file + 16 MB):
   a subtitle read in a stretch without lines would otherwise continue to the end of the file. The reads start 20 s
   after the first request and one window at a time, and every window (also the early own-track windows) first waits
   while any stream starts, the file's own included (the quiet gate's start rule; subtitles owns the small
@@ -1404,9 +1410,12 @@ that change at splits), simplified:
   is a display set (Matroska; packets of one time are merged, some remuxes keep one per segment) without a
   duration: one of more than 64 bytes starts a line that shows until the next one, which clears the screen (64 bytes
   or less: PCS + WDS + END) or brings a new picture (1500 bytes or more); smaller ones while a line shows only
-  change its palette or position (fades, up to ~1350 bytes). Progress waits at the start of a line still showing
-  (15 s at most). Measured on The Mentalist S03E02 (d3g WEBRip, English PGS made by DVDFab: 970 lines) and Night
-  of the Living Dead 1968 (YTS 2160p, Blu-ray English SDH): every line one picture set (1724-65013 bytes) and one
+  change its palette or position (fades, up to ~1350 bytes). A line the next set ends within 0.25 s is none (fade
+  steps, a small one read as a clear and the next as a picture; real lines show 0.9 s and more on S03E01 / S03E02).
+  A short line drawn with a small palette that replaces a shown one directly still reads as a change of it: sizes
+  cannot tell it from a palette update, and a timing rule would read palette animations as lines. Progress waits at
+  the start of a line still showing (15 s at most). Measured on The Mentalist S03E02 (d3g WEBRip, English PGS made
+  by DVDFab: 970 lines) and Night of the Living Dead 1968 (YTS 2160p, Blu-ray English SDH): every line one picture set (1724-65013 bytes) and one
   clear (30 bytes), nothing between; the tap from 1200, 1202.5 and 1205 s and window reads from 1500 s gave every
   display set of the extracted track to the ms (the seek's keyframe 0.3-0.8 s before `t`: a line starting before it
   comes as a lone clear, which is skipped). Same safeguards as the speech
@@ -1469,17 +1478,26 @@ that change at splits), simplified:
   Mentalist S03E01 (d3g, the season's sibling of S03E02) carries a PGS track made for another cut (+1.8 s in the
   teaser, +4 to +10 s after the act breaks, loose inside acts), S02E16 "Code Red" an ASS track the same, and the NF
   WEB-DLs of season 2 roll-up captions on the file's timeline whose lines start ±0.85 s (p10 / p90) from their
-  speech. So own-track windows time nothing until the track's lines were timed to the speech of the same stretches
+  speech. So the track's lines are timed to the speech of the same stretches
   (the speech read with each window, the played audio heard with the cue tap; finished grid windows of both, and
   read own windows that played audio covers) by the aligner's live rules at the file's rate: every offset within
   -0.5..+0.6 s (the lines lead the speech by 0 to 0.4 s) makes it timed to the file, offsets elsewhere another
   cut's, and so does, from 8 stretches on, a track that does not fit and whose line starts lie no nearer to speech
   onsets (speech after a pause) than by chance (within 0.2 s of one for under 30 % of those with one within 1 s; a
-  fifth by chance). A timed track is tight with one offset and 55 % of its line starts on an onset. Until it is
-  timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and the cue
-  tap and early reads stop for the file. Checked with every re-fit (one decide hook, kept per file in memory, done
-  again when the stretches grew by a third), logged `subtitles: own track of <hash8>:<index> against the speech of
-  <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech start)` / `… but loose
+  fifth by chance). A timed track is tight with one offset and 55 % of its line starts on an onset. Until a PGS
+  track is timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and
+  the cue tap and early reads stop for the file (another cut only). A text track is used while the check cannot
+  tell (as before the check: music, noise or speech the server cannot read; such a file was never timed and read
+  again by every request), with no line refinement. Checked with every re-fit (one decide hook, done again from all
+  stretches when they grew by a third; not from a stand-in while the reference is read) and kept per file with its
+  live windows (`synclive` `check`: state, tight, stretches), so a restart goes on from it. Each change re-fits the
+  subtitles with other windows, so a decision stands against a check that does not decide and against another
+  decision from fewer than a third more stretches, and a tight track stays tight down to 45 % (on at 55 %). Replayed
+  as the stretches came (`TestSnapshotOwnCheckSequence`, 34 files): 6 changed a decided state or tightness before
+  (S02E22's captions timed, not known, timed at 15 / 26 / 34 stretches; 2bafee48 timed, then another cut at 32,
+  while all stretches at once say timed), 1 now (loose to tight at 56 %); every file ends as all its stretches at
+  once say, except one never decided by them (kept timed from 4). Logged `subtitles: own track of <hash8>:<index>
+  against the speech of <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech start)` / `… but loose
   …: no line refinement` / `not timed to the file (another cut): timed from the speech only`. On the snapshot
   (`TestSnapshotOwnCheck`): S03E02's PGS track timed and tight (+0.05 s, 76 %; from 2-3 stretches on), S03E01's
   another cut (26 %, from 8 stretches), S02E22's two caption tracks timed but loose (+0.17 s, 39 %), 8 own tracks
@@ -1522,7 +1540,8 @@ that change at splits), simplified:
   is: a few minutes cannot tell whether another release's offset holds for the whole file. Seen on The Mentalist
   S02E16 (a stall moved playback to a ViSUM AMZN WEB-DL 37 minutes in): the Amazon subtitle (within 0.3 s by the
   file's own English track) was replaced after 3 live windows by an HDTV pack subtitle timed -5.3 s from them,
-  which was 2-5 s off before minute 25 and swapped the lines mid-scene. A failed read is not tried again for 10 minutes (`failed`), but live
+  which was 2-5 s off before minute 25 and swapped the lines mid-scene. A failed read is not tried again for 10
+  minutes (`failed`), nor a read reference that times nothing (a PGS track whose speech cannot be read), but live
   windows still time it (the answer is `pending` while the file plays). Every answer carries `X-Subtitle-Sync`
   (`original` for subtitles that are never timed); see [API.md](API.md#subtitles-modulessubtitles).
 - Next episode (`pretime`, `?pre=1`): the players warm the next episode 10 minutes before the end; once that resolve
@@ -1571,8 +1590,8 @@ that change at splits), simplified:
   reference, <n> windows (<n> live, <s> played) …)` whenever a re-fit changes what is served (state, offsets by
   0.05 s, splits by 1 s); `timing reference of …: … no read, timed from the played audio` for files above the budget,
   `timing reference of …: subs (PGS), …` / `… early windows of its own PGS track …` naming the own track's kind,
-  `reading it again with its own PGS track and its speech` for a reference saved before; the own-track check's line
-  above. When what is served changes and the player sent its position (`t`, within 2 minutes), `timing of … moved
+  `read the speech of its own-track windows, <n> of <m> windows` / `read its own PGS track where its speech was
+  read, …` for a reference saved before (`(cut: the rest next time)`); the own-track check's line above. When what is served changes and the player sent its position (`t`, within 2 minutes), `timing of … moved
   <n> of <m> cues within 300 s of the viewer at <t>s: max ±…s, median ±…s` says how the cues just ahead of the viewer
   moved (matched by text, nearest start; lines of another subtitle counted apart), so slips near the viewer show
   without the players' logs. Pre-timing logs `pre-timing … (next episode)` or `… skipped: the line has no room …`.

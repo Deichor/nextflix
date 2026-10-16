@@ -65,7 +65,7 @@ func TestWindowReadsWaitForTheLine(t *testing.T) {
 	cancel()
 	g2 := &gateFake{open: make(chan struct{})}
 	svc.cfg.LineGate = g2
-	if _, _, err := svc.sync.readWindow(ctx, syncHash, "http://torrserver", o.r.Probe, 20); err == nil {
+	if _, _, err := svc.sync.readWindow(ctx, syncHash, "http://torrserver", o.r.Probe, 20, 0); err == nil {
 		t.Fatal("a cancelled wait read the window")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -155,7 +156,12 @@ type syncRef struct {
 	Skipped bool `json:"skipped,omitempty"`
 	// Speech read with the own-track windows (same starts): checks the track, stands in for it
 	Speech []refWindow `json:"speech,omitempty"`
-	Own    ownCheck    `json:"-"` // the own-track check of a fit (checkOwnTrack)
+	// Paired: the reads that pair the windows (own track and speech) were tried; a pair that
+	// could not be read is not tried again
+	Paired bool     `json:"paired,omitempty"`
+	Own    ownCheck `json:"-"` // the own-track check of a fit (checkOwnTrack)
+	// Busy: a stand-in (only the probe) while the file's reference is being read
+	Busy bool `json:"-"`
 }
 
 func (r syncRef) kind() string {
@@ -480,7 +486,11 @@ func (y *syncer) startTiming(inner, hash string, index int, base []byte) *flight
 	})
 }
 
-// run times one subtitle for the file and stores the result.
+// run times one subtitle for the file and stores the result. A reference saved before the
+// own-track check times it at once; the reads that pair its windows come after that fit, which
+// is then done again with them. A read reference that times nothing (an own track still to be
+// checked, whose speech could not be read) is an error: the job is not started again for
+// syncRetryAfter.
 func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []byte) error {
 	if y.svc.cfg.LiveTiming {
 		y.sameCut(ctx, inner, hash, index, base)
@@ -489,12 +499,25 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 	if err != nil {
 		return err
 	}
-	if key, err := syncKey(inner, hash, index); err == nil {
-		mu := y.decideLock(key)
+	key, err := syncKey(inner, hash, index)
+	if err != nil {
+		return err
+	}
+	mu := y.decideLock(key)
+	decideNow := func(ref syncRef) bool {
 		mu.Lock()
 		defer mu.Unlock()
+		return y.decide(ctx, inner, hash, index, base, ref, true)
 	}
-	y.decide(ctx, inner, hash, index, base, ref, true)
+	decided := decideNow(ref)
+	if ref.unpaired() || y.svc.flights.running("syncpair|"+syncFileKey(hash, index)) {
+		if paired, ok := y.pairRef(ctx, hash, index); ok {
+			decided = decideNow(paired) || decided
+		}
+	}
+	if !decided && !ref.Skipped && !ref.Full {
+		return errors.New("too little reference to time it (own-track windows wait for their check against the speech)")
+	}
 	return nil
 }
 
@@ -595,21 +618,24 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	}
 	var live []refWindow
 	var liveSecs float64
+	var f *liveFile
 	complete := false
 	if ref.Full {
 		y.mu.Lock()
 		y.noLive[syncFileKey(hash, index)] = true
 		y.mu.Unlock()
 	} else if y.svc.cfg.LiveTiming {
-		f := y.liveFile(hash, index)
+		f = y.liveFile(hash, index)
 		f.setDuration(ref.Probe.Duration)
-		y.saveLive(f) // the file has a timed subtitle: keep its live windows
 		live, liveSecs = f.windows()
 		f.mu.Lock()
 		complete = f.complete
 		f.mu.Unlock()
 	}
 	ref, live = y.checkOwnTrack(hash, index, ref, live) // own-track windows only when timed to the file
+	if f != nil {
+		y.saveLive(f) // the file has a timed subtitle: keep its live windows (and the own-track check)
+	}
 	if merged := mergeWindows(ref.Windows, live); !ref.Full &&
 		(windowSeconds(merged) < liveMinCover || (len(live) > 0 || ref.Skipped) && refLines(prepare(merged)) < liveMinLines) {
 		return false // too little to tell yet
@@ -969,7 +995,8 @@ func (y *syncer) loadRef(fk string, st *syncRefState) bool {
 	return true
 }
 
-// reference returns the file's timing reference, read once (cached on disk).
+// reference returns the file's timing reference, read once (cached on disk). One saved before
+// picture tracks counted is probed again (pairRef then reads a PGS track found now).
 func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef, error) {
 	fk := syncFileKey(hash, index)
 	st, release := y.refState(fk)
@@ -979,27 +1006,13 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
 	if y.loadRef(fk, st) {
 		r := *st.ref
-		if r.Full || r.Skipped && r.Probe.subsKnown() {
-			return r, nil
-		}
-		// Saved before picture tracks counted (a PGS track's lines may replace the speech), or
-		// own-track windows read without the speech that checks them: read again once
-		again := hasOwnWindows(r.Windows) && len(r.Speech) == 0 && r.Probe.Audio >= 0
-		if !r.Probe.subsKnown() {
-			p, err := y.probeFile(ctx, hash, index, url)
-			if err != nil {
-				return r, nil
-			}
-			r.Probe.OwnSub, r.Probe.SubCodec = p.OwnSub, p.SubCodec
-			if again = p.OwnSub >= 0 && !r.Skipped; !again {
+		if !r.Full && !r.Probe.subsKnown() {
+			if p, err := y.probeFile(ctx, hash, index, url); err == nil {
+				r.Probe.OwnSub, r.Probe.SubCodec = p.OwnSub, p.SubCodec
 				y.saveRef(fk, st, r)
 			}
 		}
-		if !again {
-			return r, nil
-		}
-		log.Printf("subtitles: timing reference of %s:%d: reading it again with its own %s track and its speech", hash[:8], index,
-			r.Probe.ownKind())
+		return r, nil
 	}
 	select {
 	case y.sem <- struct{}{}:
@@ -1032,17 +1045,21 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 		}
 		starts := windowStarts(probe.Duration, syncWindowLen, r.MaxWindows)
 		for _, at := range starts {
-			if w, speech, err := y.readWindow(ctx, hash, url, probe, at); err == nil {
+			if w, speech, err := y.readWindow(ctx, hash, url, probe, at, r.bytesRead()); err == nil {
 				r.Windows = append(r.Windows, w)
 				r.Speech = append(r.Speech, speech...)
 			} else if ctx.Err() != nil {
-				return syncRef{}, ctx.Err()
+				break // out of time: what was read counts (below)
 			} else {
 				log.Printf("subtitles: timing reference of %s:%d: %v", hash[:8], index, err)
 			}
 		}
+		r.Paired = true
 		// The reference is kept for good: a weak one is not saved, a later timing reads it again
 		if len(r.Windows) < max(3, (len(starts)+1)/2) {
+			if ctx.Err() != nil {
+				return syncRef{}, ctx.Err()
+			}
 			return syncRef{}, fmt.Errorf("only %d of %d reference windows could be read", len(r.Windows), len(starts))
 		}
 	}
@@ -1051,9 +1068,153 @@ func (y *syncer) reference(ctx context.Context, hash string, index int) (syncRef
 		kind += " (" + r.Probe.ownKind() + ")"
 	}
 	log.Printf("subtitles: timing reference of %s:%d: %s, %d windows, %d MB read in %s", hash[:8], index, kind,
-		len(r.Windows), readBytes(r.Windows)>>20, time.Since(start).Round(100*time.Millisecond))
+		len(r.Windows), r.bytesRead()>>20, time.Since(start).Round(100*time.Millisecond))
 	y.saveRef(fk, st, r)
 	return r, nil
+}
+
+// unpaired reports whether the reference was saved before the own-track check and reads would
+// pair its windows: own-track windows without their speech, or speech windows of a file whose
+// probe found an own track only now (a PGS track; the speech is their pair).
+func (r syncRef) unpaired() bool {
+	if r.Paired || r.Full || r.Skipped || r.Probe.Audio < 0 {
+		return false
+	}
+	if !hasOwnWindows(r.Windows) {
+		return r.Probe.OwnSub >= 0 && len(r.Windows) > 0
+	}
+	for _, w := range r.Windows {
+		if w.Kind == "subs" && !hasWindowAt(r.Speech, w.Start) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWindowAt(ws []refWindow, start float64) bool {
+	return slices.ContainsFunc(ws, func(w refWindow) bool { return w.Start == start })
+}
+
+// bytesRead is what the reference's reads pulled (windows and the speech read with them).
+func (r syncRef) bytesRead() int64 { return readBytes(r.Windows) + readBytes(r.Speech) }
+
+// pairRef completes a reference saved before the own-track check (unpaired): one pass of reads
+// per file at a time (callers join it), without holding the reference's lock, so re-fits and
+// holes use the saved reference meanwhile. What was read is merged into the reference as it is
+// then, also when the pass is cut; a failed read is not tried again. It returns the reference
+// after the pass; false when ctx ended first.
+func (y *syncer) pairRef(ctx context.Context, hash string, index int) (syncRef, bool) {
+	fk := syncFileKey(hash, index)
+	call := y.svc.flights.start("syncpair|"+fk, func() (any, error) {
+		pctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
+		defer cancel()
+		y.readPairs(y.withLineBudget(pctx), hash, index)
+		return nil, nil
+	})
+	select {
+	case <-call.done:
+	case <-ctx.Done():
+		return syncRef{}, false
+	}
+	st, release := y.refState(fk)
+	defer release()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !y.loadRef(fk, st) {
+		return syncRef{}, false
+	}
+	return *st.ref, true
+}
+
+// readPairs reads what pairs the windows of the saved reference (unpaired): the speech of
+// own-track windows read without it, or the own track where only speech was read.
+func (y *syncer) readPairs(ctx context.Context, hash string, index int) {
+	fk := syncFileKey(hash, index)
+	st, release := y.refState(fk)
+	defer release()
+	st.mu.Lock()
+	ok := y.loadRef(fk, st)
+	var r syncRef
+	if ok {
+		r = *st.ref
+	}
+	st.mu.Unlock()
+	if !ok || !r.unpaired() {
+		return
+	}
+	select {
+	case y.sem <- struct{}{}:
+		defer func() { <-y.sem }()
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-time.After(syncReadDelay):
+	case <-ctx.Done():
+		return
+	}
+	start := time.Now()
+	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
+	upgrade := !hasOwnWindows(r.Windows)
+	var todo []float64
+	for _, w := range r.Windows {
+		if upgrade && w.Kind != "subs" || !upgrade && w.Kind == "subs" && !hasWindowAt(r.Speech, w.Start) {
+			todo = append(todo, w.Start)
+		}
+	}
+	speechOnly := r.Probe
+	speechOnly.OwnSub = -1
+	var own, speech []refWindow
+	for _, at := range todo {
+		if !y.waitLine(ctx, hash) {
+			break
+		}
+		wctx, cancel := context.WithTimeout(ctx, syncWindowTimeout)
+		if upgrade { // the own track there (the speech read before is its pair)
+			if o, err := y.readSubs(wctx, url, r.Probe, at, syncWindowLen); err == nil && o.Kind == "subs" {
+				own = append(own, o)
+			}
+		} else if s, err := y.read(wctx, url, speechOnly, at, syncWindowLen); err == nil && s.Kind != "subs" {
+			speech = append(speech, s)
+		}
+		cancel()
+	}
+	cut := ctx.Err() != nil
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !y.loadRef(fk, st) {
+		return
+	}
+	c := *st.ref
+	c.Windows = append([]refWindow(nil), c.Windows...)
+	c.Speech = append([]refWindow(nil), c.Speech...)
+	for _, s := range speech {
+		if !hasWindowAt(c.Speech, s.Start) {
+			c.Speech = append(c.Speech, s)
+		}
+	}
+	for _, o := range own {
+		i := slices.IndexFunc(c.Windows, func(w refWindow) bool { return w.Start == o.Start && w.Kind != "subs" })
+		if i < 0 {
+			continue
+		}
+		if !hasWindowAt(c.Speech, o.Start) {
+			c.Speech = append(c.Speech, c.Windows[i])
+		}
+		c.Windows[i] = o
+	}
+	c.Paired = c.Paired || !cut
+	what := "the speech of its own-track windows"
+	if upgrade {
+		what = "its own " + c.Probe.ownKind() + " track where its speech was read"
+	}
+	extra := ""
+	if cut {
+		extra = " (cut: the rest next time)"
+	}
+	log.Printf("subtitles: timing reference of %s:%d: read %s, %d of %d windows, %d MB in %s%s", hash[:8], index, what,
+		len(own)+len(speech), len(todo), (readBytes(own)+readBytes(speech))>>20, time.Since(start).Round(100*time.Millisecond), extra)
+	y.saveRef(fk, st, c)
 }
 
 // updateRefSubs puts the own-track choice of a fresh probe p into the file's saved reference
@@ -1088,7 +1249,7 @@ func (y *syncer) addWindows(ctx context.Context, hash string, index int, starts 
 		if len(r.Windows) >= r.windowCap() {
 			break
 		}
-		w, speech, err := y.readWindow(ctx, hash, url, r.Probe, at)
+		w, speech, err := y.readWindow(ctx, hash, url, r.Probe, at, r.bytesRead())
 		if err != nil {
 			if ctx.Err() != nil {
 				break
@@ -1100,7 +1261,7 @@ func (y *syncer) addWindows(ctx context.Context, hash string, index int, starts 
 	}
 	if added := r.Windows[len(st.ref.Windows):]; len(added) > 0 {
 		log.Printf("subtitles: timing reference of %s:%d: %d more windows, %d MB read", hash[:8], index, len(added),
-			readBytes(added)>>20)
+			(r.bytesRead()-st.ref.bytesRead())>>20)
 	}
 	y.saveRef(fk, st, r)
 	r, _ = y.checkOwnTrack(hash, index, r, nil) // as decide uses it
@@ -1126,15 +1287,16 @@ func (y *syncer) saveRef(fk string, st *syncRefState, r syncRef) {
 
 // readWindow reads one reference window of the file of hash, after a stream's start; a window
 // of the own track comes with the speech of the same stretch (sync_owncheck.go; read again
-// right away, so mostly from the TorBox proxy's or TorrServer's cache).
-func (y *syncer) readWindow(ctx context.Context, hash, url string, p mediaProbe, at float64) (refWindow, []refWindow, error) {
+// right away, so mostly from the TorBox proxy's or TorrServer's cache) while the file's reads
+// (used bytes before this one) stay within syncByteBudget.
+func (y *syncer) readWindow(ctx context.Context, hash, url string, p mediaProbe, at float64, used int64) (refWindow, []refWindow, error) {
 	if !y.waitLine(ctx, hash) {
 		return refWindow{}, nil, ctx.Err()
 	}
 	wctx, cancel := context.WithTimeout(ctx, syncWindowTimeout)
 	defer cancel()
 	w, err := y.read(wctx, url, p, at, syncWindowLen)
-	if err != nil || w.Kind != "subs" || p.Audio < 0 {
+	if err != nil || w.Kind != "subs" || p.Audio < 0 || used+2*w.Read > syncByteBudget {
 		return w, nil, err
 	}
 	speechOnly := p

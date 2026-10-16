@@ -66,17 +66,20 @@ var tsSubPictureCodecs = map[string]bool{"hdmv_pgs_subtitle": true}
 type tsCueRule struct {
 	empty int // packets up to this size are no cue (mov_text gap samples, PGS clearing sets)
 	// Picture tracks: packets carry no duration, a cue shows until the next packet; while one
-	// shows, packets below update bytes only change it (palette or position).
+	// shows, packets below update bytes only change it (palette or position). A cue the next
+	// packet ends within min seconds is none.
 	picture bool
 	update  int
+	min     float64
 }
 
 // tsPGSRule: in Matroska a PGS display set is one packet (tsPictureCues). One that clears the
 // screen holds no palette or picture (PCS + WDS + END: 30 bytes, 39 with two windows); a
 // palette-only update (fades) stays below ~1350 bytes (256 colours); a picture of a line is
 // larger (The Mentalist S03E02 d3g and Night of the Living Dead 1968 BluRay: clears 30 bytes,
-// pictures 1724-65013).
-var tsPGSRule = tsCueRule{empty: 64, picture: true, update: 1500}
+// pictures 1724-65013). A "line" shown under 0.25 s is steps of a fade, one read as a clear and
+// the next as a picture (real lines show 0.9 s and more: The Mentalist S03E01 / S03E02).
+var tsPGSRule = tsCueRule{empty: 64, picture: true, update: 1500, min: 0.25}
 
 // cueTracks lists the subtitle tracks of a probed file whose packets give cue times (text and
 // PGS; never VobSub or DVB).
@@ -90,12 +93,27 @@ func (p *tsProbe) cueTracks() []CueTrack {
 		if st.CodecType != "subtitle" || !tsSubTextCodecs[st.CodecName] && !tsSubPictureCodecs[st.CodecName] {
 			continue
 		}
-		frames, _ := strconv.Atoi(tsTag(st, "NUMBER_OF_FRAMES"))
 		out = append(out, CueTrack{Stream: i, Lang: tsTag(st, "language"), Title: tsTag(st, "title"),
 			Codec: st.CodecName, Default: st.Disposition["default"] == 1, Forced: st.Disposition["forced"] == 1,
-			Frames: frames})
+			Frames: tsFrames(st)})
 	}
 	return out
+}
+
+// tsFrames is a stream's packet count from its Matroska statistics tag NUMBER_OF_FRAMES, in any
+// case and also as older mkvmerge versions name it ("NUMBER_OF_FRAMES-eng"); 0 unknown.
+func tsFrames(st *tsProbeStream) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(tsTag(st, "NUMBER_OF_FRAMES"))); err == nil && n > 0 {
+		return n
+	}
+	for k, v := range st.Tags {
+		if name, lang, ok := strings.Cut(k, "-"); ok && lang != "" && strings.EqualFold(name, "NUMBER_OF_FRAMES") {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // cueTap opens the cue tap of a play stream reading audio track n from start, if the file has
@@ -269,7 +287,9 @@ func (c *tsPictureCues) endSet(cue func(start, end float64)) {
 		return
 	}
 	if !math.IsInf(c.open, 1) && (c.size <= c.rule.empty || c.size >= c.rule.update) {
-		cue(c.open, c.set)
+		if c.set-c.open >= c.rule.min {
+			cue(c.open, c.set)
+		}
 		c.open = math.Inf(1)
 	}
 	if c.size > c.rule.empty && math.IsInf(c.open, 1) {

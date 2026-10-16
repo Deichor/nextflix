@@ -65,6 +65,7 @@ type liveFile struct {
 	ownDone  map[int]liveWin // finished own-track windows
 	ownTaps  int
 	ownGrown float64  // seconds of own track read since the last re-fit was asked for
+	ownPic   bool     // the cue tap reads a picture (PGS) track
 	check    ownCheck // the own track against the speech (sync_owncheck.go)
 	checkN   int      // stretches that check compared (it is redone when there are more)
 	duration float64
@@ -94,6 +95,7 @@ type liveSaved struct {
 	Windows  map[int]liveWin `json:"windows"`
 	Own      map[int]liveWin `json:"own,omitempty"`
 	Complete bool            `json:"complete,omitempty"`
+	Check    *ownSaved       `json:"check,omitempty"` // the own-track check, once decided
 }
 
 func newLiveFile(hash string, index int) *liveFile {
@@ -552,6 +554,10 @@ func (y *syncer) liveFile(hash string, index int) *liveFile {
 				}
 			}
 			f.complete = saved.Complete
+			if c := saved.Check; c != nil && (c.State == ownTimed || c.State == ownOther) {
+				f.check = ownCheck{State: c.State, Tight: c.Tight && c.State == ownTimed, Pairs: c.Pairs}
+				f.checkN = c.Pairs
+			}
 		}
 	}
 	y.mu.Lock()
@@ -605,6 +611,9 @@ func (y *syncer) saveLive(f *liveFile) {
 		for w, d := range f.ownDone {
 			saved.Own[w] = d
 		}
+	}
+	if f.check.State != "" {
+		saved.Check = &ownSaved{State: f.check.State, Tight: f.check.Tight, Pairs: f.check.Pairs}
 	}
 	f.dirty = false
 	f.mu.Unlock()
@@ -892,11 +901,13 @@ func (y *syncer) refitSubs(f *liveFile, subs []servedSub) {
 }
 
 // liveRef is the file's read reference when there is one, without waiting for a read that
-// runs (then, like for files above the byte budget, only the probe).
+// runs (then, like for files above the byte budget, only the probe; Busy).
 func (y *syncer) liveRef(ctx context.Context, hash string, index int) syncRef {
 	fk := syncFileKey(hash, index)
 	st, release := y.refState(fk)
+	busy := true
 	if st.mu.TryLock() {
+		busy = false
 		ok := y.loadRef(fk, st)
 		var r syncRef
 		if ok {
@@ -910,7 +921,7 @@ func (y *syncer) liveRef(ctx context.Context, hash string, index int) syncRef {
 	}
 	release()
 	p, _ := y.probeFile(ctx, hash, index, torrFileURL(y.svc.cfg.TorrServerURL, hash, index))
-	return syncRef{Probe: p, Skipped: true}
+	return syncRef{Probe: p, Skipped: true, Busy: busy}
 }
 
 // kickLive re-fits the file soon when it has live windows (a timing whose read failed).

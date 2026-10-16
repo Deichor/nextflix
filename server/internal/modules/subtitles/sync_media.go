@@ -113,9 +113,8 @@ func parseMediaProbe(out []byte) (mediaProbe, error) {
 				m.Center = hasCenter(s.ChannelLayout, s.Channels)
 			}
 		case "subtitle":
-			frames, _ := strconv.Atoi(s.Tags["NUMBER_OF_FRAMES"])
 			score := ownTrackScore(s.CodecName, s.Tags["language"], s.Tags["title"], s.Disposition["forced"] == 1,
-				s.Disposition["hearing_impaired"] == 1, frames, m.Duration)
+				s.Disposition["hearing_impaired"] == 1, frameCount(s.Tags), m.Duration)
 			if score > subScore {
 				subScore, m.OwnSub, m.SubCodec = score, s.Index, s.CodecName
 			}
@@ -153,6 +152,29 @@ func ownTrackScore(codec, lang, title string, forced, hi bool, frames int, durat
 		return kind + 3 // a line per cue (some languages merge lines)
 	}
 	return kind + 2
+}
+
+// frameCount is a track's packet count from its Matroska statistics tag NUMBER_OF_FRAMES, in
+// any case and also as older mkvmerge versions name it ("NUMBER_OF_FRAMES-eng"); 0 unknown.
+func frameCount(tags map[string]string) int {
+	n, suffixed := 0, 0
+	for k, v := range tags {
+		name, lang, found := strings.Cut(k, "-")
+		if !strings.EqualFold(name, "NUMBER_OF_FRAMES") {
+			continue
+		}
+		if c, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && c > 0 {
+			if !found {
+				n = c
+			} else if lang != "" {
+				suffixed = c
+			}
+		}
+	}
+	if n > 0 {
+		return n
+	}
+	return suffixed
 }
 
 // pictureFull reports whether a picture track's packet count looks like dialogue all through:
@@ -272,11 +294,14 @@ func readSubsWindow(ctx context.Context, url string, p mediaProbe, start, length
 }
 
 // PGS display sets (one packet each in Matroska): up to pgsClear bytes one clears the screen;
-// while a cue shows, one below pgsUpdate bytes only changes it (palette or position). The play
-// streams' cue tap (streaming/cuetap.go) reads them by the same rule.
+// while a cue shows, one below pgsUpdate bytes only changes it (palette or position). A cue the
+// next set ends within pgsMinLine is no line: steps of a fade, one read as a clear and the next
+// as a picture (real lines show 0.9 s and more: The Mentalist S03E01 / S03E02, 1842 lines). The
+// play streams' cue tap (streaming/cuetap.go) reads them by the same rule.
 const (
-	pgsClear  = 64
-	pgsUpdate = 1500
+	pgsClear   = 64
+	pgsUpdate  = 1500
+	pgsMinLine = 0.25
 )
 
 // framePacket is a packet of stream 0 of a framecrc output (seconds, bytes).
@@ -328,7 +353,9 @@ func pictureCues(ps []framePacket, end float64) []span {
 			size += ps[i].size
 		}
 		if !math.IsNaN(open) && (size <= pgsClear || size >= pgsUpdate) {
-			out = append(out, span{open, at})
+			if at-open >= pgsMinLine {
+				out = append(out, span{open, at})
+			}
 			open = math.NaN()
 		}
 		if size > pgsClear && math.IsNaN(open) {
