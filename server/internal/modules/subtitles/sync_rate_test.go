@@ -54,6 +54,35 @@ func TestMentalistS03E02StaysAtTheFilesRate(t *testing.T) {
 	}
 }
 
+// A re-fit that kept the served fit (keepStable, keepAccepted) did not note that it tried every
+// frame rate, so the next re-fits tried them all again: replayed minute by minute, 23 of S03E02's
+// 39 re-fits searched every rate (7 when noted, review), each ~7x the CPU of one rate. Counted
+// from the stored results as fitOne decides it; the final fit stays the same.
+func TestMentalistS03E02RateSearchWhileKept(t *testing.T) {
+	f, sub := loadFixture(t, "mentalist_s03e02.json")
+	steps := replayLive(t, f, sub, true, nil)
+	full := 0
+	var prev *syncMeta
+	for i, st := range steps {
+		n := len(mergeWindows(f.ref.Windows, f.live[:i+1]))
+		final := st.meta != nil && !st.meta.Live
+		if !(prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 && !final && 2*n < 3*prev.RateWindows) {
+			full++
+		}
+		prev = st.meta
+	}
+	last := steps[len(steps)-1].served
+	t.Logf("%d of %d re-fits tried every rate; last %s", full, len(steps), describeFit(last))
+	if full > 10 {
+		t.Fatalf("%d of %d re-fits tried every rate", full, len(steps))
+	}
+	for _, p := range mentalistS03E02Truth {
+		if u := (p.from + p.to) / 2; math.Abs(last.mapTime(u)-(u+p.offset)) > 0.15 {
+			t.Fatalf("at %.0f s: %s", u, describeFit(last))
+		}
+	}
+}
+
 // At 24/23.976 (as served) the last change moved 1861 -> 1929 -> 2038 s as the minutes after it
 // came in: the two minutes before the break (1920-2040 s) hardly prefer either offset (by 0.2-0.7
 // matched lines), so the change went to whichever side they tipped, into the longest subtitle

@@ -216,7 +216,7 @@ type syncWindowReader func(ctx context.Context, url string, p mediaProbe, start,
 // go through a byte cap (a subtitle read in a stretch without lines would read on to the next
 // cue, possibly the end of the file).
 func ffmpegSyncWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
-	capped, used, stop, err := cappedURL(url, windowByteCap(p, length))
+	capped, used, stop, err := cappedURL(url, windowByteCap(p, length), readRate(ctx))
 	if err != nil {
 		return refWindow{}, err
 	}
@@ -229,7 +229,7 @@ func ffmpegSyncWindow(ctx context.Context, url string, p mediaProbe, start, leng
 // ffmpegSubsWindow reads only the cues of the file's own subtitle track in [start, start+length)
 // (the early windows of a file above the byte budget; no audio fallback).
 func ffmpegSubsWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
-	capped, used, stop, err := cappedURL(url, windowByteCap(p, length))
+	capped, used, stop, err := cappedURL(url, windowByteCap(p, length), readRate(ctx))
 	if err != nil {
 		return refWindow{}, err
 	}
@@ -459,14 +459,16 @@ func windowByteCap(p mediaProbe, length float64) int64 {
 	return int64(p.Bitrate*length*1.25) + 16<<20
 }
 
-// cappedURL serves url to ffmpeg through a local proxy that stops after max bytes in total
-// (Range requests are passed on); used reports the bytes passed, stop ends the proxy.
-func cappedURL(url string, max int64) (capped string, used func() int64, stop func(), err error) {
+// cappedURL serves url to ffmpeg through a local proxy that stops after max bytes in total and
+// passes at most rate bytes/s (0: no limit; a pre-timing read beside playing streams). Range
+// requests are passed on; used reports the bytes passed, stop ends the proxy.
+func cappedURL(url string, max int64, rate float64) (capped string, used func() int64, stop func(), err error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, nil, err
 	}
 	var n atomic.Int64
+	began := time.Now()
 	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if n.Load() >= max {
 			http.Error(w, "byte cap reached", http.StatusServiceUnavailable)
@@ -496,10 +498,14 @@ func cappedURL(url string, max int64) (capped string, used func() int64, stop fu
 		for {
 			k, rerr := resp.Body.Read(buf)
 			if k > 0 {
-				if n.Add(int64(k)) > max {
+				total := n.Add(int64(k))
+				if total > max {
 					return // cut off: ffmpeg ends with what it has
 				}
 				if _, werr := w.Write(buf[:k]); werr != nil {
+					return
+				}
+				if rate > 0 && !pace(r.Context(), began, total, rate) {
 					return
 				}
 			}
@@ -510,4 +516,20 @@ func cappedURL(url string, max int64) (capped string, used func() int64, stop fu
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	return "http://" + ln.Addr().String() + "/file", n.Load, func() { _ = srv.Close() }, nil
+}
+
+// pace waits until n bytes since began are at most rate bytes/s; false when ctx ended.
+func pace(ctx context.Context, began time.Time, n int64, rate float64) bool {
+	ahead := time.Duration(float64(n)/rate*float64(time.Second)) - time.Since(began)
+	if ahead <= 0 {
+		return true
+	}
+	t := time.NewTimer(ahead)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

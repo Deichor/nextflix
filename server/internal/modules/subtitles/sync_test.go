@@ -198,6 +198,28 @@ func TestServeRetimesAnOlderVersion(t *testing.T) {
 	}
 }
 
+// A result of an older timing tells nothing about the file now: a subtitle it found poor is not
+// ranked down or skipped as a translation source (it would hardly be served, so never timed
+// again), and once served it is timed again.
+func TestStaleResultIsUnknown(t *testing.T) {
+	file := dialogue(14, episode)
+	svc, _ := newSyncTest(t, file)
+	inner := cacheProviderSub(t, svc, "1|v0|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 1.5 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	b, _ := json.Marshal(syncMeta{State: syncStatePoor, Ref: "audio", Windows: 6}) // version 0
+	if err := svc.files.write("synced", key, ".json", b); err != nil {
+		t.Fatal(err)
+	}
+	if svc.sync.fitOf(inner, syncHash, 1) != 0 || svc.sync.poorFor(inner, syncHash, 1) {
+		t.Fatalf("a version 0 result counts: fit %d, poor %v", svc.sync.fitOf(inner, syncHash, 1), svc.sync.poorFor(inner, syncHash, 1))
+	}
+	svc.FileFor(context.Background(), wrapSyncID(inner, syncHash, 1), 0)
+	waitFlight(t, svc, "sync|"+key)
+	if m := svc.sync.meta(key); m.Version != syncVersion || !m.fits() || svc.sync.fitOf(inner, syncHash, 1) != 1 {
+		t.Fatalf("timed again: %+v", m)
+	}
+}
+
 func TestServeReplacesASubtitleThatDoesNotFit(t *testing.T) {
 	file := dialogue(21, episode)
 	svc, _ := newSyncTest(t, file)

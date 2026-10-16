@@ -59,7 +59,7 @@ type Config struct {
 	NextEpisode func(tvID, season, episode int) (int, int, bool)
 	// LineGate holds the timing's window reads while a stream starts (nil = no wait)
 	LineGate LineGate
-	// ReadRoom lets pre-timing read a file that plays from a swarm (nil = always)
+	// ReadRoom says how fast pre-timing may read beside the playing streams (nil = always, no limit)
 	ReadRoom ReadRoom
 }
 

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -119,9 +120,28 @@ func TestRefitWaitFollowsPending(t *testing.T) {
 	}
 }
 
-type roomFake bool
+// roomFake is a ReadRoom with a fixed answer (bytes/s).
+type roomFake float64
 
-func (r roomFake) RoomToRead() bool { return bool(r) }
+func (r roomFake) RoomToRead(string) float64 { return float64(r) }
+
+// roomVar is a ReadRoom whose answer changes (bytes/s).
+type roomVar struct {
+	mu   sync.Mutex
+	rate float64
+}
+
+func (r *roomVar) RoomToRead(string) float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rate
+}
+
+func (r *roomVar) set(rate float64) {
+	r.mu.Lock()
+	r.rate = rate
+	r.mu.Unlock()
+}
 
 // The next episode's subtitle is timed before it opens without counting as a viewing; when it
 // opens, the fit shows once a re-fit with the played audio backed it.
@@ -167,18 +187,15 @@ func TestPreTimingIsNotAViewing(t *testing.T) {
 	}
 }
 
-// Pre-timing reads a file that plays from a swarm only while the line has room; TorBox files
-// are read anyway.
+// Pre-timing reads a file only while the playing streams leave room (a TorBox file too: the same
+// home line), no slower than the file plays, and each read keeps to that room. Without room it
+// gives up after the wait, and the episode's own timing is not held back by a failure.
 func TestPreTimingWaitsForRoom(t *testing.T) {
 	file := dialogue(43, episode)
 	svc, reads := newPreTest(t, file)
-	svc.cfg.ReadRoom = roomFake(false)
-	inner := cacheProviderSub(t, svc, "1|room|2|8|1", subtitleFor(file, 1, func(float64) float64 { return -1 }))
-	id := wrapSyncID(inner, syncHash, 1)
-	key, _ := syncKey(inner, syncHash, 1)
-	ctx := context.Background()
-	if state, _ := svc.PreTime(ctx, id); state != syncStatePending || svc.flights.running("sync|"+key) || *reads != 0 {
-		t.Fatalf("no room: %q, %d reads", state, *reads)
+	svc.sync.roomWait, svc.sync.roomPoll = 50*time.Millisecond, 10*time.Millisecond
+	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip", Bitrate: 1 << 20}, nil
 	}
 	debridHook.Store(&DebridSource{FileURL: func(h string, i int) string {
 		if h == syncHash && i == 1 {
@@ -187,12 +204,94 @@ func TestPreTimingWaitsForRoom(t *testing.T) {
 		return ""
 	}})
 	t.Cleanup(func() { debridHook.Store(nil) })
-	if state, _ := svc.PreTime(ctx, id); state != syncStatePending {
-		t.Fatalf("TorBox: %q", state)
+	var mu sync.Mutex
+	var rates []float64
+	truth := svc.sync.read
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		mu.Lock()
+		rates = append(rates, readRate(ctx))
+		mu.Unlock()
+		return truth(ctx, url, p, start, length)
 	}
+	inner := cacheProviderSub(t, svc, "1|room|2|8|1", subtitleFor(file, 1, func(float64) float64 { return -1 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	ctx := context.Background()
+	for _, room := range []float64{0, 1 << 19} { // none; less than the file's bitrate
+		svc.cfg.ReadRoom = roomFake(room)
+		if state, _ := svc.PreTime(ctx, id); state != syncStatePending {
+			t.Fatalf("room %.0f: %q", room, state)
+		}
+		waitFlight(t, svc, "sync|"+key)
+		if len(rates) != 0 || svc.sync.meta(key) != nil || svc.sync.recentlyFailed(key) {
+			t.Fatalf("room %.0f: %d reads, meta %+v, failed %v", room, len(rates), svc.sync.meta(key), svc.sync.recentlyFailed(key))
+		}
+	}
+	svc.cfg.ReadRoom = roomFake(3 << 20)
+	svc.PreTime(ctx, id)
 	waitFlight(t, svc, "sync|"+key)
 	if m := svc.sync.meta(key); m == nil || !m.Pre || *reads == 0 {
-		t.Fatalf("TorBox file not pre-timed: %+v", m)
+		t.Fatalf("not pre-timed: %+v", m)
+	}
+	for _, r := range rates {
+		if r != 3<<20 {
+			t.Fatalf("a read at %.0f B/s", r)
+		}
+	}
+}
+
+// The playing stream takes the line once the pre-timing read its first window: the next read
+// (the speech read with that own-track window) waits, and the job gives up without marking the
+// timing failed (before, the room was checked once and 11 more reads went on).
+func TestPreTimingChecksRoomBeforeEveryRead(t *testing.T) {
+	file := dialogue(71, episode)
+	svc, _ := newPreTest(t, file)
+	svc.sync.roomWait, svc.sync.roomPoll = 50*time.Millisecond, 10*time.Millisecond
+	room := &roomVar{rate: 1 << 20}
+	svc.cfg.ReadRoom = room
+	truth := svc.sync.read
+	var mu sync.Mutex
+	all := 0
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		mu.Lock()
+		all++
+		mu.Unlock()
+		room.set(0)
+		return truth(ctx, url, p, start, length)
+	}
+	inner := cacheProviderSub(t, svc, "1|flip|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	if _, err := svc.PreTime(context.Background(), wrapSyncID(inner, syncHash, 1)); err != nil {
+		t.Fatal(err)
+	}
+	waitFlight(t, svc, "sync|"+key)
+	mu.Lock()
+	defer mu.Unlock()
+	if all != 1 || svc.sync.meta(key) != nil || svc.sync.recentlyFailed(key) {
+		t.Fatalf("%d reads, meta %+v, failed %v", all, svc.sync.meta(key), svc.sync.recentlyFailed(key))
+	}
+}
+
+// Once the episode opens (its subtitle is asked for in a viewing) the pre-timing's waiting reads
+// go on like any timing's, unthrottled.
+func TestPreTimingReadsOnceTheFilePlays(t *testing.T) {
+	file := dialogue(73, episode)
+	svc, reads := newPreTest(t, file)
+	svc.sync.roomPoll = 10 * time.Millisecond
+	svc.cfg.ReadRoom = roomFake(0)
+	inner := cacheProviderSub(t, svc, "1|open|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	ctx := context.Background()
+	svc.PreTime(ctx, id)
+	time.Sleep(100 * time.Millisecond)
+	if *reads != 0 || !svc.flights.running("sync|"+key) {
+		t.Fatalf("no room: %d reads, waiting %v", *reads, svc.flights.running("sync|"+key))
+	}
+	svc.FileFor(ctx, id, 0)
+	waitFlight(t, svc, "sync|"+key)
+	if m := svc.sync.meta(key); m == nil || !m.fits() || *reads == 0 {
+		t.Fatalf("opened: %+v, %d reads", m, *reads)
 	}
 }
 
@@ -240,6 +339,9 @@ func TestSameCutKeepsTheFit(t *testing.T) {
 	if a.Sync != syncStateLive || !startsNear(vttCues(a.VTT), file, 40) || m == nil || m.SameCut != syncFileKey(syncHash, 1) || !m.Live {
 		t.Fatalf("same cut: %q %+v", a.Sync, m)
 	}
+	if m.RateWindows != 0 {
+		t.Fatalf("the copy keeps the first file's rate search (%d windows)", m.RateWindows)
+	}
 	if a, _ := svc.FileFor(ctx, wrapSyncID(inner, other, 1), 330); a.Sync != syncStatePending {
 		t.Fatalf("other cut: %q", a.Sync)
 	}
@@ -248,6 +350,131 @@ func TestSameCutKeepsTheFit(t *testing.T) {
 	otherKey, _ := syncKey(inner, other, 1)
 	waitFlight(t, svc, "sync|"+sameKey)
 	waitFlight(t, svc, "sync|"+otherKey)
+	// The new file's own windows back the copy: it stays timed
+	if m := svc.sync.meta(sameKey); m == nil || !m.fits() || !startsNear(vttCues(func() []byte { a, _ := svc.sync.result(sameKey, nil); return a.VTT }()), file, 40) {
+		t.Fatalf("same cut after its own windows: %+v", m)
+	}
+}
+
+// A subtitle that fits file A is asked for on file B of the same length and rate whose dialogue
+// is another episode's (a wrong pick, or another cut): B gets A's fit at once, but once B's own
+// windows say it does not fit them the copy goes (review: it stayed served as timed until the
+// file was covered).
+func TestSameCutGivesWayToTheFilesWindows(t *testing.T) {
+	file := dialogue(59, episode)
+	otherEp := dialogue(83, episode)
+	svc, _ := newPreTest(t, file)
+	const b = "5c8f6d1e2a3b4c5d6e7f8091a2b3c4d5e6f70812"
+	svc.sync.probe = func(_ context.Context, url string) (mediaProbe, error) {
+		d := episode
+		if strings.Contains(url, b) {
+			d = episode + 0.02
+		}
+		return mediaProbe{Duration: d, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none"}, nil
+	}
+	block := make(chan struct{})
+	truthA, truthB := readTruth(file, new(int)), readTruth(otherEp, new(int))
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if strings.Contains(url, b) {
+			select {
+			case <-block:
+			case <-ctx.Done():
+			}
+			return truthB(ctx, url, p, start, length)
+		}
+		return truthA(ctx, url, p, start, length)
+	}
+	sub := subtitleFor(file, 1, func(float64) float64 { return 2.5 })
+	inner := cacheProviderSub(t, svc, "1|cut|2|7|1", sub)
+	ctx := context.Background()
+	saved := syncFirstWait
+	syncFirstWait = 500 * time.Millisecond
+	t.Cleanup(func() { syncFirstWait = saved })
+	tap := svc.OpenSpeech(syncHash, 1, 0) // file A plays
+	defer tap.Close()
+	if a, _ := svc.FileFor(ctx, wrapSyncID(inner, syncHash, 1), 300); a.Sync != syncStateLive {
+		t.Fatalf("A: %q", a.Sync)
+	}
+	keyB, _ := syncKey(inner, b, 1)
+	if a, _ := svc.FileFor(ctx, wrapSyncID(inner, b, 1), 330); a.Sync != syncStateLive || svc.sync.meta(keyB).SameCut == "" {
+		t.Fatalf("B before its own windows: %q", a.Sync)
+	}
+	close(block)
+	waitFlight(t, svc, "sync|"+keyB)
+	f := svc.sync.liveFile(b, 1)
+	injectLive(f, otherEp, []int{5, 6, 7, 8, 9, 10, 11, 12})
+	svc.sync.refitFile(f)
+	m := svc.sync.meta(keyB)
+	a, _ := svc.FileFor(ctx, wrapSyncID(inner, b, 1), 400)
+	if m.fits() || m.SameCut != "" || a.Sync == syncStateLive || startsNear(vttCues(a.VTT), file, 40) {
+		t.Fatalf("A's fit stays on B although the subtitle does not fit B: %q %+v", a.Sync, m)
+	}
+}
+
+// Only a viewing of the last minutes lends its fit (a step down or sidegrade during playback).
+func TestSameCutOnlyFromARecentViewing(t *testing.T) {
+	file := dialogue(61, episode)
+	svc, _ := newPreTest(t, file)
+	const b = "5c8f6d1e2a3b4c5d6e7f8091a2b3c4d5e6f70812"
+	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none"}, nil
+	}
+	inner := cacheProviderSub(t, svc, "1|recent|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 1.5 }))
+	ctx := context.Background()
+	tap := svc.OpenSpeech(syncHash, 1, 0)
+	defer tap.Close()
+	if a, _ := svc.FileFor(ctx, wrapSyncID(inner, syncHash, 1), 300); a.Sync != syncStateLive {
+		t.Fatalf("A: %q", a.Sync)
+	}
+	keyA, _ := syncKey(inner, syncHash, 1)
+	keyB, _ := syncKey(inner, b, 1)
+	base, _ := svc.File(ctx, inner)
+	svc.sync.mu.Lock()
+	svc.sync.served[keyA].last = time.Now().Add(-liveServedFor - time.Minute)
+	svc.sync.mu.Unlock()
+	svc.sync.sameCut(ctx, inner, b, 1, base)
+	if m := svc.sync.meta(keyB); m != nil {
+		t.Fatalf("an old viewing lent its fit: %+v", m)
+	}
+	svc.sync.mu.Lock()
+	svc.sync.served[keyA].last = time.Now()
+	svc.sync.mu.Unlock()
+	svc.sync.sameCut(ctx, inner, b, 1, base)
+	if m := svc.sync.meta(keyB); m == nil || m.SameCut == "" {
+		t.Fatalf("a recent viewing did not lend its fit: %+v", m)
+	}
+}
+
+// While an untimed viewing re-fits every 5 s in its first minutes, the subtitle's alternatives
+// (up to 3, each at every frame rate) are fitted at most every refitGap; what is served stays.
+func TestPendingRefitsFitAlternativesLessOften(t *testing.T) {
+	svc := newLiveTest(t, episode)
+	file := dialogue(67, episode)
+	bad := cacheProviderSub(t, svc, "1|bad|2|10|1", dialogue(97, episode))
+	good := cacheProviderSub(t, svc, "2|good|2|10|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	svc.sync.listed([]Sub{{ID: bad, Source: SourceTurkceAltyazi, Language: "tr"},
+		{ID: good, Source: SourceTurkceAltyazi, Language: "tr"}}, map[string]bool{}, syncHash, 1)
+	key, _ := syncKey(bad, syncHash, 1)
+	goodKey, _ := syncKey(good, syncHash, 1)
+	svc.FileFor(context.Background(), wrapSyncID(bad, syncHash, 1), 0)
+	waitFlight(t, svc, "sync|"+key)
+	f := svc.sync.liveFile(syncHash, 1)
+	refit := func(w int) (*syncMeta, *syncMeta) {
+		injectLive(f, file, []int{w})
+		svc.sync.refitFile(f)
+		return svc.sync.meta(key), svc.sync.meta(goodKey)
+	}
+	injectLive(f, file, []int{0, 1, 2, 3, 4, 5})
+	if m, g := refit(6); m == nil || m.State != syncStateReplaced || g == nil || g.LiveWindows != 7 {
+		t.Fatalf("first re-fit: %+v / %+v", m, g)
+	}
+	if m, g := refit(7); m.State != syncStateReplaced || g.LiveWindows != 7 {
+		t.Fatalf("a re-fit soon after: served %q, the alternative fitted with %d windows", m.State, g.LiveWindows)
+	}
+	svc.sync.refitGap = 0 // the gap passed
+	if m, g := refit(8); m.State != syncStateReplaced || g.LiveWindows != 9 {
+		t.Fatalf("after the gap: served %q, the alternative fitted with %d windows", m.State, g.LiveWindows)
+	}
 }
 
 func TestMovesNear(t *testing.T) {

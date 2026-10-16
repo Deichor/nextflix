@@ -36,6 +36,9 @@ const (
 	syncWindowTimeout = 75 * time.Second
 	syncLineWait      = 2 * time.Minute // how long the reads may wait for a stream's start (LineGate)
 	syncJobLimit      = 5*time.Minute + syncLineWait
+	syncPreJobLimit   = 30 * time.Minute // a pre-timing job: its reads wait for room and are throttled
+	syncRoomWait      = 3 * time.Minute  // a pre-timing job's reads wait this long for room, together; then it gives up
+	syncRoomPoll      = 5 * time.Second
 	syncRetryAfter    = 10 * time.Minute // a failed timing is not tried again before this
 	syncAlternatives  = 3                // other subtitles tried when one does not fit
 	syncReads         = 2                // files whose reference is read at the same time
@@ -53,11 +56,88 @@ type LineGate interface {
 	WaitStartQuiet(ctx context.Context, hash string) bool
 }
 
-// ReadRoom says whether the window reads of a file that does not play yet (pre-timing) may take
-// the line now (streaming implements it).
+// ReadRoom says how much of the line the window reads of a file that does not play yet
+// (pre-timing) may take now (streaming implements it).
 type ReadRoom interface {
-	// RoomToRead: the line is known and the playing streams leave room on it
-	RoomToRead() bool
+	// RoomToRead is the bytes/s a read of a file of torrent hash may take beside the playing
+	// streams (0: none now): the line is known and they leave room on it, and on their swarm
+	// when hash is one of theirs (a season pack's next episode)
+	RoomToRead(hash string) float64
+}
+
+type preTimingKey struct{}
+
+// preTiming marks the reads of a pre-timing job (pretime): while its file does not play, every
+// window read waits for room beside the playing streams and takes at most that (readRoom).
+type preTiming struct {
+	hash   string
+	index  int
+	cancel context.CancelFunc // ends the job when it gives up
+	mu     sync.Mutex
+	waited time.Duration
+	logged bool
+	gaveUp bool
+}
+
+func (p *preTiming) givenUp() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.gaveUp
+}
+
+type readRateKey struct{}
+
+// readRate is the bytes/s a window read under ctx may pull (0: no cap; cappedURL keeps to it).
+func readRate(ctx context.Context) float64 {
+	r, _ := ctx.Value(readRateKey{}).(float64)
+	return r
+}
+
+// readRoom is the bytes/s the next window read under ctx may pull (0: no cap); false when ctx
+// ended. A read of a pre-timing job waits while its file does not play and the playing streams
+// leave less room than the file's bitrate (a window would read slower than it plays); after
+// y.roomWait of waiting in all the job gives up (its ctx ends).
+func (y *syncer) readRoom(ctx context.Context, bitrate float64) (float64, bool) {
+	p, _ := ctx.Value(preTimingKey{}).(*preTiming)
+	room := y.svc.cfg.ReadRoom
+	if p == nil || room == nil {
+		return 0, ctx.Err() == nil
+	}
+	for {
+		if y.viewing(p.hash, p.index) {
+			return 0, ctx.Err() == nil // the episode opened: its timing reads like any other
+		}
+		if r := room.RoomToRead(p.hash); r > 0 && r >= bitrate {
+			return r, ctx.Err() == nil
+		}
+		p.mu.Lock()
+		over, first := p.waited >= y.roomWait, !p.logged
+		p.gaveUp, p.logged = over, true
+		p.mu.Unlock()
+		if over {
+			p.cancel()
+			return 0, false
+		}
+		if first {
+			log.Printf("subtitles: pre-timing reads of %s:%d wait: no room beside the playing streams", p.hash[:8], p.index)
+		}
+		t := time.NewTimer(y.roomPoll)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return 0, false
+		}
+		p.mu.Lock()
+		p.waited += y.roomPoll
+		p.mu.Unlock()
+	}
+}
+
+// viewing reports whether the file plays or a subtitle was asked for it in a viewing.
+func (y *syncer) viewing(hash string, index int) bool {
+	fk := syncFileKey(hash, index)
+	return y.livePlaying(fk) || len(y.servedFor(fk)) > 0
 }
 
 type lineBudgetKey struct{}
@@ -196,6 +276,7 @@ type syncer struct {
 	probes map[string]mediaProbe
 	holes  map[string]*holeState // result key -> last hole comparison (nil: none on disk)
 	titles map[string]aiMeta     // file key -> the title it plays (hole translations)
+	altsAt map[string]time.Time  // result key -> last re-fit that fitted its alternatives
 
 	// Live timing (sync_live.go)
 	lives   map[string]*liveFile  // file key -> live reference
@@ -209,6 +290,7 @@ type syncer struct {
 
 	refitDelay, refitGap, pendingGap time.Duration
 	lineWait                         time.Duration // the LineGate wait of one job (syncLineWait; tests shorten it)
+	roomWait, roomPoll               time.Duration // a pre-timing job's wait for room (syncRoomWait, syncRoomPoll)
 }
 
 func newSyncer(svc *Service) *syncer {
@@ -217,7 +299,7 @@ func newSyncer(svc *Service) *syncer {
 		lists: map[string][]Sub{}, probes: map[string]mediaProbe{}, holes: map[string]*holeState{}, titles: map[string]aiMeta{},
 		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{}, early: map[string]bool{},
 		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap, pendingGap: livePendingGap,
-		lineWait: syncLineWait}
+		lineWait: syncLineWait, roomWait: syncRoomWait, roomPoll: syncRoomPoll, altsAt: map[string]time.Time{}}
 	y.onGrow = y.scheduleRefit
 	return y
 }
@@ -300,7 +382,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t flo
 	if a, ok := y.answer(key, base, listening); ok {
 		if y.meta(key).stale() && !y.recentlyFailed(key) {
 			// Timed by an older version: served as it is while it is timed again
-			y.startTiming(inner, hash, index, base)
+			y.startTiming(inner, hash, index, base, false)
 			if !a.Partial {
 				a.VTT, a.Partial = renderVTT(vttCues(a.VTT), true), true
 			}
@@ -314,7 +396,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t flo
 		}
 		return FileAnswer{VTT: base, Sync: syncStateFailed}, nil
 	}
-	call := y.startTiming(inner, hash, index, base)
+	call := y.startTiming(inner, hash, index, base, false)
 	timer := time.NewTimer(syncFirstWait)
 	defer timer.Stop()
 	finished := false
@@ -337,8 +419,9 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t flo
 // the subtitle they would show on the next episode near the end of the current one), so its
 // reference is read and the subtitle fitted before the file opens. It is not a viewing: nothing
 // is noted as served (live re-fits, the first answers' grace). Reads wait in the LineGate like
-// every timing read; a file that plays from a swarm is only read while the line has room beside
-// the playing streams (TorBox files always). It returns the timing state.
+// every timing read, and until the file plays each window read (TorBox files too: the same home
+// line) also waits for room beside the playing streams and takes at most that (readRoom); the
+// job gives up after syncRoomWait of waiting. It returns the timing state.
 func (y *syncer) pretime(ctx context.Context, inner, hash string, index int) (string, error) {
 	key, err := syncKey(inner, hash, index)
 	if err != nil {
@@ -357,13 +440,8 @@ func (y *syncer) pretime(ctx context.Context, inner, hash string, index int) (st
 	if err != nil {
 		return "", err
 	}
-	if r := y.svc.cfg.ReadRoom; r != nil && debridFileURL(hash, index) == "" && !r.RoomToRead() {
-		log.Printf("subtitles: pre-timing of %s on %s:%d skipped: the line has no room beside the playing streams",
-			shortSubID(inner), hash[:8], index)
-		return syncStatePending, nil
-	}
 	log.Printf("subtitles: pre-timing %s on %s:%d (next episode)", shortSubID(inner), hash[:8], index)
-	y.startTiming(inner, hash, index, base)
+	y.startTiming(inner, hash, index, base, true)
 	return syncStatePending, nil
 }
 
@@ -457,21 +535,36 @@ func (y *syncer) recentlyFailed(key string) bool {
 }
 
 // startTiming starts (or joins) the background timing of a subtitle for the file (one job per
-// result). A failed job, or one that left a result of an older version, is not started again for
-// syncRetryAfter.
-func (y *syncer) startTiming(inner, hash string, index int, base []byte) *flightCall {
+// result); pre marks a pre-timing job (pretime). A failed job, or one that left a result of an
+// older version, is not started again for syncRetryAfter, unless it was a pre-timing job of a
+// file nobody plays yet (its reads waited or were cut for the playing streams): the episode's
+// first request times it again.
+func (y *syncer) startTiming(inner, hash string, index int, base []byte, pre bool) *flightCall {
 	key, _ := syncKey(inner, hash, index)
 	return y.svc.flights.start("sync|"+key, func() (any, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
+		limit := syncJobLimit
+		if pre {
+			limit = syncPreJobLimit
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		ctx = y.withLineBudget(ctx)
 		defer cancel()
+		var p *preTiming
+		if pre {
+			p = &preTiming{hash: hash, index: index, cancel: cancel}
+			ctx = context.WithValue(ctx, preTimingKey{}, p)
+		}
 		start := time.Now()
 		err := y.run(ctx, inner, hash, index, base)
-		if err != nil {
+		switch {
+		case p != nil && p.givenUp():
+			log.Printf("subtitles: pre-timing of %s on %s:%d given up after %s: no room beside the playing streams",
+				shortSubID(inner), hash[:8], index, time.Since(start).Round(time.Second))
+		case err != nil:
 			log.Printf("subtitles: timing of %s on %s:%d failed after %s: %v", shortSubID(inner), hash[:8], index,
 				time.Since(start).Round(time.Second), err)
 		}
-		if err != nil || y.meta(key).stale() {
+		if (err != nil || y.meta(key).stale()) && (p == nil || y.viewing(hash, index)) {
 			y.mu.Lock()
 			y.failed[key] = time.Now()
 			y.mu.Unlock()
@@ -502,9 +595,10 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 // same cut (probed length within 0.05 s, same frame rate) that was served recently: a step down or
 // sidegrade during playback then keeps the timing instead of starting from the subtitle as it is
 // (Gilmore Girls S01E07: two more minutes 2.7 s off after a step down, although the fit on the
-// first file was right). It is provisional; the file's own windows take over in the re-fits.
-// Equal lengths alone do not make one cut (The Mentalist S02E11 and S02E15 NF are both 2551.616 s
-// long), but one subtitle names one episode: such pairs in the data lie within 30 ms of each other.
+// first file was right). It is provisional; the file's own windows take over in the re-fits, and
+// it only stays while it fits them (copyFits); its frame rate is searched again. Equal lengths
+// alone do not make one cut (The Mentalist S02E11 and S02E15 NF are both 2551.616 s long), but one
+// subtitle names one episode: such pairs in the data lie within 30 ms of each other.
 func (y *syncer) sameCut(ctx context.Context, inner, hash string, index int, base []byte) {
 	key, err := syncKey(inner, hash, index)
 	if err != nil || y.meta(key) != nil {
@@ -514,7 +608,7 @@ func (y *syncer) sameCut(ctx context.Context, inner, hash string, index int, bas
 	var others []servedSub
 	y.mu.Lock()
 	for _, s := range y.served {
-		if s.inner == inner && s.fk != fk {
+		if s.inner == inner && s.fk != fk && time.Since(s.last) < liveServedFor {
 			others = append(others, *s)
 		}
 	}
@@ -541,7 +635,7 @@ func (y *syncer) sameCut(ctx context.Context, inner, hash string, index int, bas
 			continue
 		}
 		c := *m // a pre-timed fit stays so until played audio backs it
-		c.Live, c.LiveWindows, c.LiveSeconds, c.SameCut = true, 0, 0, o.fk
+		c.Live, c.LiveWindows, c.LiveSeconds, c.SameCut, c.RateWindows = true, 0, 0, o.fk, 0
 		var vtt []byte
 		if c.State != syncStateUnchanged {
 			vtt = a.VTT
@@ -620,7 +714,8 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		prev = nil // an older timing's result holds back nothing (rate, hysteresis)
 	}
 	m, vtt, ref := y.fitOne(ctx, hash, index, ref, live, base, read, prev, complete)
-	if y.keepAccepted(key, base, prev, m, complete) {
+	if y.keepAccepted(key, base, prev, m, ref.Probe.Duration, complete) {
+		y.keepRates(key, prev, m)
 		logKept(inner, hash, index, m, len(live), liveSecs)
 		return true
 	}
@@ -630,8 +725,11 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 				// The played audio backs the pre-timed fit: served from now on
 				kept := *prev
 				kept.Pre, kept.LiveWindows, kept.LiveSeconds = false, len(live), liveSecs
+				kept.RateWindows = max(kept.RateWindows, m.RateWindows)
 				y.storeWatched(key, inner, hash, index, base, prev, kept, nil)
 				logSync(inner, hash, index, kept, time.Since(start))
+			} else {
+				y.keepRates(key, prev, m)
 			}
 			return true
 		}
@@ -643,7 +741,11 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		// Did not fit: the best fitting other subtitle of the language, when one fits. While
 		// provisional, a lined up subtitle stays served as it is (a few minutes cannot tell
 		// whether another release's offset holds for the whole file).
-		for _, alt := range y.alternatives(hash, index, inner) {
+		alts := y.alternatives(hash, index, inner)
+		if len(alts) > 0 && (prev == nil || !prev.fits()) && !y.altsDue(key, read) {
+			return true // what is served stays until the alternatives are fitted again
+		}
+		for _, alt := range alts {
 			altBase, err := y.svc.File(ctx, alt)
 			if err != nil {
 				continue
@@ -671,7 +773,8 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			if am == nil {
 				var a syncMeta
 				a, altVTT, ref = y.fitOne(ctx, hash, index, ref, live, altBase, read, altPrev, complete)
-				if y.keepAccepted(altKey, altBase, altPrev, a, complete) {
+				if y.keepAccepted(altKey, altBase, altPrev, a, ref.Probe.Duration, complete) {
+					y.keepRates(altKey, altPrev, a)
 					logKept(alt, hash, index, a, len(live), liveSecs)
 					am = altPrev
 					r, _ := y.result(altKey, altBase)
@@ -720,9 +823,10 @@ func (y *syncer) storeWatched(key, inner, hash string, index int, base []byte, p
 // keepAccepted reports whether a provisional fit that was accepted stays served although the
 // new one does not fit: a few more windows can tip a good timing below the bars (seen on The
 // Mentalist S02E10: accepted from 3 windows, poor at 6, two offsets fitting again at 8), and
-// serving the subtitle untimed meanwhile is worse. Once the file is covered the new result counts.
-func (y *syncer) keepAccepted(key string, base []byte, prev *syncMeta, m syncMeta, complete bool) bool {
-	if m.fits() || complete || prev == nil || !prev.Live || !prev.fits() {
+// serving the subtitle untimed meanwhile is worse. Once the file is covered the new result counts;
+// a fit taken from another file of the same cut stays only while it fits this file (copyFits).
+func (y *syncer) keepAccepted(key string, base []byte, prev *syncMeta, m syncMeta, duration float64, complete bool) bool {
+	if m.fits() || complete || prev == nil || !prev.Live || !prev.fits() || !copyFits(prev, m, base, duration) {
 		return false
 	}
 	_, ok := y.result(key, base)
@@ -734,17 +838,60 @@ func (y *syncer) keepAccepted(key string, base []byte, prev *syncMeta, m syncMet
 // worth of matched lines, the cues would only move back and forth between re-fits.
 func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, complete bool) bool {
 	if complete || prev == nil || !prev.Live || !prev.fits() || !m.fits() || len(m.Fit.windows) == 0 ||
-		m.Fit.Scale != prev.Fit.Scale || !fitChanged(prev, m) {
+		m.Fit.Scale != prev.Fit.Scale || !fitChanged(prev, m) || !copyFits(prev, m, base, duration) {
 		return false
 	}
+	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
+	return m.Fit.Score*lines-old < syncSplitPenalty
+}
+
+// copyFits reports whether a fit taken from another file of the same cut (sameCut) fits this
+// file's own windows, the new fit's: its offsets beat chance there by the gain bar. The copy is
+// not held against them (another cut, or another episode of the same length).
+func copyFits(prev *syncMeta, m syncMeta, base []byte, duration float64) bool {
+	if prev.SameCut == "" || len(m.Fit.windows) == 0 {
+		return true
+	}
+	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
+	return lines > 0 && old/lines-m.Fit.Base >= syncMinGain
+}
+
+// baseSpans are the subtitle's cue times as the fits see them.
+func baseSpans(base []byte, duration float64) []span {
 	cues := vttCues(base)
 	spans := make([]span, len(cues))
 	for i, c := range cues {
 		spans[i] = span{c.start, c.end}
 	}
-	spans = clampSpans(spans, duration)
-	old, lines := rescore(spans, m.Fit.windows, prev.Fit)
-	return m.Fit.Score*lines-old < syncSplitPenalty
+	return clampSpans(spans, duration)
+}
+
+// keepRates notes on a kept result that every frame rate was tried with m's windows (meta only,
+// nothing served changes), so the next re-fits keep its rate until the reference grew by half
+// again instead of trying every rate each time.
+func (y *syncer) keepRates(key string, prev *syncMeta, m syncMeta) {
+	if prev != nil && m.RateWindows > prev.RateWindows {
+		kept := *prev
+		kept.RateWindows = m.RateWindows
+		y.store(key, kept, nil)
+	}
+}
+
+// altsDue reports whether a decide may fit the alternatives of key now: the first timing (read)
+// always, a re-fit at most every refitGap, so the re-fits of an untimed viewing's first minutes
+// (every 5 s) do not fit up to syncAlternatives other subtitles at every frame rate each time.
+func (y *syncer) altsDue(key string, read bool) bool {
+	now := time.Now()
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	if !read && now.Sub(y.altsAt[key]) < y.refitGap {
+		return false
+	}
+	if len(y.altsAt) > 1000 {
+		y.altsAt = map[string]time.Time{}
+	}
+	y.altsAt[key] = now
+	return true
 }
 
 func logKept(inner, hash string, index int, m syncMeta, liveWindows int, liveSecs float64) {
@@ -1131,20 +1278,32 @@ func (y *syncer) readWindow(ctx context.Context, hash, url string, p mediaProbe,
 	if !y.waitLine(ctx, hash) {
 		return refWindow{}, nil, ctx.Err()
 	}
-	wctx, cancel := context.WithTimeout(ctx, syncWindowTimeout)
-	defer cancel()
-	w, err := y.read(wctx, url, p, at, syncWindowLen)
+	w, err := y.readOne(ctx, url, p, at)
 	if err != nil || w.Kind != "subs" || p.Audio < 0 {
 		return w, nil, err
 	}
 	speechOnly := p
 	speechOnly.OwnSub = -1
-	sctx, scancel := context.WithTimeout(ctx, syncWindowTimeout)
-	defer scancel()
-	if s, err := y.read(sctx, url, speechOnly, at, syncWindowLen); err == nil && s.Kind != "subs" {
+	if s, err := y.readOne(ctx, url, speechOnly, at); err == nil && s.Kind != "subs" {
 		return w, []refWindow{s}, nil
 	}
 	return w, nil, nil
+}
+
+// readOne reads one window at at, within the room of a pre-timing job (readRoom): a throttled read
+// may take as long as its byte cap needs at that rate.
+func (y *syncer) readOne(ctx context.Context, url string, p mediaProbe, at float64) (refWindow, error) {
+	rate, ok := y.readRoom(ctx, p.Bitrate)
+	if !ok {
+		return refWindow{}, ctx.Err()
+	}
+	timeout := syncWindowTimeout
+	if rate > 0 {
+		timeout = max(timeout, time.Duration(float64(windowByteCap(p, syncWindowLen))/rate*float64(time.Second)))
+	}
+	wctx, cancel := context.WithTimeout(context.WithValue(ctx, readRateKey{}, rate), timeout)
+	defer cancel()
+	return y.read(wctx, url, p, at, syncWindowLen)
 }
 
 // windowStarts spreads reference windows over the file: from the opening scene to before the
@@ -1325,7 +1484,7 @@ func (y *syncer) listed(subs []Sub, made map[string]bool, hash string, index int
 }
 
 // fitOf is the stored timing result of a provider subtitle for the file: 1 fits (as served),
-// -1 does not fit, 0 unknown.
+// -1 does not fit, 0 unknown (also a result of an older timing: it is timed again when served).
 func (y *syncer) fitOf(id, hash string, index int) int {
 	key, err := syncKey(id, hash, index)
 	if err != nil {
@@ -1333,7 +1492,7 @@ func (y *syncer) fitOf(id, hash string, index int) int {
 	}
 	m := y.meta(key)
 	switch {
-	case m == nil:
+	case m == nil || m.stale():
 		return 0
 	case m.fits():
 		return 1
