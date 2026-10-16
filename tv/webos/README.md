@@ -182,7 +182,9 @@ animation.
   during the intro (OK skips, Left / Right still seek); during the end credits a focused "Next episode" button fills
   up for 5 s next to "Watch credits", then the next episode starts. Without credits data the countdown only comes
   when the video ends. See docs/ARCHITECTURE.md "Skip intro and Next episode".
-- Subtitles are fetched as WebVTT and drawn over the video at `stream offset + video time`. Without a subtitle in the
+- Subtitles are fetched as WebVTT and drawn over the video at `stream offset + video time`. While the server still times
+  a subtitle to the file, it is asked again (every 15 s while partial, every minute while playing when complete but
+  not final, see docs/API.md) and the new cues replace the old; only final answers are kept. Without a subtitle in the
   profile's language the list is fetched again after 8 s and 20 s (slower providers finish later). A subtitle file
   that brings no cues (e.g. an OpenSubtitles quota answer) is replaced by the next one of the language, another
   provider first. A TorBox (debrid) source shows a "⚡ TorBox" badge.

@@ -1,5 +1,8 @@
 package com.nextflix.tv.feature.player
 
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
 import com.nextflix.tv.core.Core
 import kotlinx.serialization.json.JsonArray
@@ -62,6 +65,7 @@ internal class PlaybackLog(
     private class Event(val t: Long, val k: String, val p: Double, val x: Map<String, Any>?)
 
     private val sid = Random.nextLong().toULong().toString(36).take(8)
+    private val app: String by lazy { appVersion(core.appContext) }
     private var seq = 0
     private var events = ArrayList<Event>()
     private var dropped = 0
@@ -323,7 +327,8 @@ internal class PlaybackLog(
         return buildJsonObject {
             put("sid", sid)
             put("seq", ++seq)
-            put("client", "tv")
+            put("client", CLIENT)
+            put("app", app)
             put(
                 "ctx",
                 buildJsonObject {
@@ -360,6 +365,8 @@ internal class PlaybackLog(
     }
 
     companion object {
+        /** The log's client tag ("tv" is the webOS app) */
+        const val CLIENT = "atv"
         const val TICK_MS = 250L
         private const val FRAMES_EVERY = 8
         private const val AHEAD_EVERY = 4
@@ -375,4 +382,17 @@ internal class PlaybackLog(
 
         private fun r2(n: Double) = (n * 100).roundToLong() / 100.0
     }
+}
+
+/** versionName of the installed app ("" when unknown), as in the settings' info block */
+private fun appVersion(context: Context): String = try {
+    val info = if (Build.VERSION.SDK_INT >= 33) {
+        context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+    } else {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0)
+    }
+    info.versionName.orEmpty()
+} catch (_: PackageManager.NameNotFoundException) {
+    ""
 }

@@ -23,6 +23,7 @@ type batch struct {
 	SID     string  `json:"sid"`
 	Seq     int     `json:"seq"`
 	Client  string  `json:"client"`
+	App     string  `json:"app"` // the player's version; older players send none
 	Ctx     *ctx    `json:"ctx"`
 	Dropped int     `json:"dropped"`
 	Events  []event `json:"events"`
@@ -120,6 +121,9 @@ func format(b batch) []string {
 	head += fmt.Sprintf(" events=%d", len(b.Events)-skipped)
 	if b.Dropped > 0 || skipped > 0 {
 		head += fmt.Sprintf(" dropped=%d invalid=%d", max(b.Dropped, 0), skipped)
+	}
+	if b.App != "" {
+		head += " app=" + token(b.App, 16)
 	}
 	lines[0] = head
 	return lines

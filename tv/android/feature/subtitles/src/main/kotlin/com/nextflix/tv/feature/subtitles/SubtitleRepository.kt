@@ -57,8 +57,8 @@ class SubtitleRepository(private val core: Core) {
      * GET /api/subtitles/file?id=[&t=] parsed from WebVTT (cue text kept as sent; SubtitleOverlay reads its
      * <i>, <b>, <u> markup and entities). [at]: the viewer's position (s) so a live embedded track is read from
      * there. Recognizes the "NOTE nextflix-partial" / "NOTE nextflix-ai-translating" markers, X-Subtitle-Sync and
-     * X-Subtitle-Holes. Complete files (not partial) are kept in a small LRU (5 files); 5xx / network errors give
-     * `failed = true`.
+     * X-Subtitle-Holes. Final answers (complete, final timing: SubtitleRules.finalCues) are kept in a small LRU
+     * (5 files); 5xx / network errors give `failed = true`.
      */
     suspend fun cues(id: String, at: Double? = null): CueFile {
         synchronized(cueCache) { cueCache[id] }?.let { return it }
@@ -88,7 +88,7 @@ class SubtitleRepository(private val core: Core) {
         } catch (e: RuntimeException) {
             CueFile(emptyList(), sync = SubsLog.SYNC_NONE, failed = true, status = 0)
         }
-        if (file.cues.isNotEmpty() && !file.partial) synchronized(cueCache) { cueCache[id] = file }
+        if (file.cues.isNotEmpty() && SubtitleRules.finalCues(file.partial, file.sync)) synchronized(cueCache) { cueCache[id] = file }
         return file
     }
 
@@ -97,6 +97,8 @@ class SubtitleRepository(private val core: Core) {
         const val LIVE_CUES_POLL_MS = 15_000L
         /** an AI translation still missing the lines at the position is asked again this often */
         const val AI_CUES_POLL_MS = 3_000L
+        /** a complete file whose timing may still change (live, pending, failed) is asked again this often while playing */
+        const val PROVISIONAL_CUES_POLL_MS = 60_000L
         /** late uploads: while the profile's language is missing, the list is asked again (refresh) this often */
         const val LATE_SUBTITLE_POLL_MS = 10 * 60 * 1000L
         /** the list is asked again this long after the first answer when it lacks the profile's language */
