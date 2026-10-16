@@ -1415,10 +1415,10 @@ that change at splits), simplified:
   A short line drawn with a small palette that replaces a shown one directly still reads as a change of it: sizes
   cannot tell it from a palette update, and a timing rule would read palette animations as lines. Progress waits at
   the start of a line still showing (15 s at most). Measured on The Mentalist S03E02 (d3g WEBRip, English PGS made
-  by DVDFab: 970 lines) and Night of the Living Dead 1968 (YTS 2160p, Blu-ray English SDH): every line one picture set (1724-65013 bytes) and one
-  clear (30 bytes), nothing between; the tap from 1200, 1202.5 and 1205 s and window reads from 1500 s gave every
-  display set of the extracted track to the ms (the seek's keyframe 0.3-0.8 s before `t`: a line starting before it
-  comes as a lone clear, which is skipped). Same safeguards as the speech
+  by DVDFab: 970 lines) and Night of the Living Dead 1968 (YTS 2160p, Blu-ray English SDH): every line one picture
+  set (1724-65013 bytes) and one clear (30 bytes), nothing between; the tap from 1200, 1202.5 and 1205 s and window
+  reads from 1500 s gave every display set of the extracted track to the ms (the seek's keyframe 0.3-0.8 s before
+  `t`: a line starting before it comes as a lone clear, which is skipped). Same safeguards as the speech
   tap (256-event queue, a panicking sink stops getting data, a failing run retries without both taps). Subtitles
   runs the same energy detector on 10 ms frames (energies kept per frame, 1 byte) and puts them
   on a 60 s grid of the file, so the stretches of several streams (a seek starts a new one; overlapping, in any
@@ -1497,8 +1497,9 @@ that change at splits), simplified:
   (S02E22's captions timed, not known, timed at 15 / 26 / 34 stretches; 2bafee48 timed, then another cut at 32,
   while all stretches at once say timed), 1 now (loose to tight at 56 %); every file ends as all its stretches at
   once say, except one never decided by them (kept timed from 4). Logged `subtitles: own track of <hash8>:<index>
-  against the speech of <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech start)` / `… but loose
-  …: no line refinement` / `not timed to the file (another cut): timed from the speech only`. On the snapshot
+  against the speech of <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech
+  start)` / `… but loose …: no line refinement` / `not timed to the file (another cut): timed from the speech only`.
+  On the snapshot
   (`TestSnapshotOwnCheck`): S03E02's PGS track timed and tight (+0.05 s, 76 %; from 2-3 stretches on), S03E01's
   another cut (26 %, from 8 stretches), S02E22's two caption tracks timed but loose (+0.17 s, 39 %), 8 own tracks
   of other files tight (60-83 %), 10 loose (38-52 %: the season 2 NF WEB-DL captions, Gilmore Girls MONOLITH), the
@@ -1591,9 +1592,10 @@ that change at splits), simplified:
   0.05 s, splits by 1 s); `timing reference of …: … no read, timed from the played audio` for files above the budget,
   `timing reference of …: subs (PGS), …` / `… early windows of its own PGS track …` naming the own track's kind,
   `read the speech of its own-track windows, <n> of <m> windows` / `read its own PGS track where its speech was
-  read, …` for a reference saved before (`(cut: the rest next time)`); the own-track check's line above. When what is served changes and the player sent its position (`t`, within 2 minutes), `timing of … moved
-  <n> of <m> cues within 300 s of the viewer at <t>s: max ±…s, median ±…s` says how the cues just ahead of the viewer
-  moved (matched by text, nearest start; lines of another subtitle counted apart), so slips near the viewer show
+  read, …` for a reference saved before (`(cut: the rest next time)`); the own-track check's line above. When what
+  is served changes and the player sent its position (`t`, within 2 minutes), `timing of … moved <n> of <m> cues
+  within 300 s of the viewer at <t>s: max ±…s, median ±…s` says how the cues just ahead of the viewer moved
+  (matched by text, nearest start; lines of another subtitle counted apart), so slips near the viewer show
   without the players' logs. Pre-timing logs `pre-timing … (next episode)` or `… skipped: the line has no room …`.
 - Ranking: later lists show a timed fitting subtitle as `synced` (after the ones made for the file) and move ones
   that do not fit down; the file's probed frame rate is the ranking's fps hint. A subtitle made for the playing
