@@ -212,7 +212,7 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         every(PlaybackLog.TICK_MS) {
             plog.tick()
             onTime()
-            if (++ticks % 4 == 0 && s.phase == Phase.Ready && hash.isNotEmpty()) subtitles.onPosition(positionNow())
+            if (++ticks % 4 == 0 && s.phase == Phase.Ready && hash.isNotEmpty()) subtitles.onPosition(positionNow(), exo.isPlaying)
         }
         subtitles.log = SubtitleLogSink { event, fields -> plog.note(event, fields) }
         scope.launch { subtitles.events.collect { onSubtitleEvent(it) } }

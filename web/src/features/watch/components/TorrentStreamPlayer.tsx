@@ -23,8 +23,6 @@ import {
   subtitleRetryAt,
   type SubtitleFailure,
   type SubtitleFile,
-  LIVE_CUES_POLL_MS,
-  AI_CUES_POLL_MS,
   SUBALT_RETRY_MAX,
   fetchSubtitles,
   groupSubtitles,
@@ -85,8 +83,9 @@ import { UpscaleLog } from '@/features/watch/upscaleLog';
 import { PlaybackNotes, deviceToken } from '@/features/watch/playbackLog';
 import { attachStream, detachStream, fedFetching, fedStoppedByPause, setFeedNote, usesFedStream } from '@/features/watch/streamSource';
 import {
-  DELAY_SETTLE_MS, DelayLog, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
+  DELAY_SETTLE_MS, DelayLog, idHash, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
 } from '@/features/watch/subsLog';
+import { LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, cuePollMs } from '@/features/watch/cuePoll';
 import upscaleCss from '@/features/watch/components/upscale.module.css';
 import { useHomeScreenHint, useMobileFullscreen, useNoBounce, useTouchUi, useViewportFitCover, useWakeLock } from '@/features/watch/mobile';
 import mobileCss from '@/features/watch/components/mobilePlayer.module.css';
@@ -2033,21 +2032,22 @@ function PlayerCore({
     if (!e) return;
     const id = subIdRef.current;
     const s = id ? subsRef.current?.find(x => x.id === id) : undefined;
-    subLogRef.current?.note('subdelay', { ...e, id: id ? logToken(id, 24) : undefined, provider: s ? logToken(s.source, 16) : undefined });
+    subLogRef.current?.note('subdelay', { ...e, id: id ? idHash(id) : undefined, provider: s ? logToken(s.source, 16) : undefined });
   }, []);
   const noteSubsNone = useCallback((why: string, extra?: SubsFields, items?: SubtitleItem[]) => {
     subLogRef.current?.note('subs-none', noneFields(why, localeRef.current, items ?? subsRef.current, extra));
   }, []);
-  // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew)
+  // Logged when it starts, and when an answer moved, replaced or finished the cues (not when a live track grew);
+  // moves near what the viewer sees at once
   const noteSubs = useCallback((id: string, f: SubtitleFile) => {
     const prev = subShownRef.current;
     const next: SubsShown = { id, cues: f.cues, partial: f.partial, sync: f.sync };
-    const change = subsChange(prev, next, Date.now() - subLoggedAtRef.current);
+    const change = subsChange(prev, next, Date.now() - subLoggedAtRef.current, filePosRef.current - delayLog().current);
     if (!change.log) return;
     subShownRef.current = next;
     subLoggedAtRef.current = Date.now();
     const why = prev?.id === id ? 'poll' : subWhyRef.current;
-    subLogRef.current?.note('subs', subsFields(subsRef.current?.find(s => s.id === id), next, why, delayLog().current, change));
+    subLogRef.current?.note('subs', subsFields(subsRef.current?.find(s => s.id === id), next, why, delayLog().current, change.moves));
   }, [delayLog]);
   // The viewer's delay change is logged once it settled
   const changeSubDelay = useCallback((d: number) => {
@@ -2275,7 +2275,7 @@ function PlayerCore({
       subWhyRef.current = 'fallback';
       setSubId(next);
     } else if (current) {
-      noteSubsNone('failed', { id: logToken(id, 24) });
+      noteSubsNone('failed', { id: idHash(id) });
     }
   }, [noteSubsNone]);
 
@@ -2289,24 +2289,30 @@ function PlayerCore({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let errors = 0;
-    // Asked again every LIVE_CUES_POLL_MS while partial: a live embedded track (read from the playing position
-    // on, it grows) and a subtitle the server still times to the file alike; the final answer stops it
-    const load = () => {
-      // It answered before (a poll, or a seek while partial): a failure now (network, 5xx) asks again, keeping the cues
+    // Asked again while partial (cuePollMs): a live embedded track (read from the playing position on, it grows)
+    // and a subtitle the server still times to the file alike; then, while the viewer watches (whilePlaying),
+    // every minute while its timing is not final
+    const load = (whilePlaying = false) => {
+      const v = videoRef.current;
+      if (whilePlaying && (!v || v.paused)) {
+        timer = setTimeout(() => load(true), PROVISIONAL_CUES_POLL_MS);
+        return;
+      }
+      // It answered before (a poll, or a seek): a failure (network, 5xx) or an empty answer now keeps the cues and asks again
       const answered = subShownRef.current?.id === subId;
       fetchSubtitleFile(subId, filePosRef.current, answered).then(f => {
         if (cancelled) return;
+        if (answered && (f.failed || (f.cues.length === 0 && !f.partial))) {
+          timer = setTimeout(() => load(), LIVE_CUES_POLL_MS);
+          return;
+        }
         if (f.failed) {
-          if (answered) {
-            timer = setTimeout(load, LIVE_CUES_POLL_MS);
-            return;
-          }
           setCues([]);
           // Another subtitle takes over when there is one (this effect then ends); a server or network
           // error is asked again after its short wait (5 s, doubling) instead of failing for minutes
           if (errors++ === 0) subtitleFailed(subId, f.failed);
           const at = subtitleRetryAt(subId);
-          if (f.failed === 'error' && at) timer = setTimeout(load, Math.max(1000, at - Date.now()));
+          if (f.failed === 'error' && at) timer = setTimeout(() => load(), Math.max(1000, at - Date.now()));
           return;
         }
         if (errors > 0 && failedSubsRef.current.has(subId)) {
@@ -2319,7 +2325,8 @@ function PlayerCore({
         setAiTranslating(!!f.translating);
         // The overlay looks the cue up again in the new list; the delay stays
         if (f.cues.length > 0 || !f.partial) setCues(f.cues);
-        if (f.partial) timer = setTimeout(load, f.translating ? AI_CUES_POLL_MS : LIVE_CUES_POLL_MS);
+        const wait = cuePollMs(f);
+        if (wait !== null) timer = setTimeout(() => load(!f.partial), wait);
       });
     };
     load();

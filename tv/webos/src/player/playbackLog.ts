@@ -135,7 +135,7 @@ export class PlaybackLog {
     this.events = [];
     this.dropped = 0;
     this.lastFlush = Date.now();
-    const head = { sid: this.sid, seq: ++this.seq, client: 'tv', ctx: this.ctx(), dropped };
+    const head = { sid: this.sid, seq: ++this.seq, client: 'tv', app: __APP_VERSION__, ctx: this.ctx(), dropped };
     let body = JSON.stringify({ ...head, events });
     // Over the cap: the oldest events go
     let keep = events;

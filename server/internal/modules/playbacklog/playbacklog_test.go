@@ -37,6 +37,25 @@ func TestFormatSanitizes(t *testing.T) {
 	}
 }
 
+func TestHeaderNamesClientAndAppVersion(t *testing.T) {
+	ev := []event{{T: 0, K: "subs", P: 1990.7, X: map[string]any{"id": "71abc72f", "here": -1.5, "near": 10.0}}}
+	// The Android TV app's own tag and version
+	lines := format(batch{SID: "abcd1234", Seq: 3, Client: "atv", App: "0.1.0", Ctx: &ctx{Type: "tv", TmdbID: 5920, Season: 3, Episode: 2}, Events: ev})
+	if !strings.HasPrefix(lines[0], "abcd1234 atv #3 tv:5920 S03E02") || !strings.HasSuffix(lines[0], " events=1 app=0.1.0") {
+		t.Fatalf("header %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "abcd1234 atv ") || !strings.Contains(lines[1], "subs here=-1.5 id=71abc72f near=10") {
+		t.Fatalf("event %q", lines[1])
+	}
+	// Players without a version (older ones) keep the old header; a strange version cannot break the line
+	if old := format(batch{SID: "abcd1234", Seq: 1, Client: "tv", Events: ev}); strings.Contains(old[0], "app=") {
+		t.Fatalf("header %q", old[0])
+	}
+	if odd := format(batch{SID: "abcd1234", Seq: 1, Client: "tv", App: "0.1.24 x\nlong-version-text"}); !strings.HasSuffix(odd[0], " app=0.1.24_x_long-ve") {
+		t.Fatalf("header %q", odd[0])
+	}
+}
+
 func TestRateLimitPerSession(t *testing.T) {
 	s := NewService("")
 	now := time.Unix(0, 0)

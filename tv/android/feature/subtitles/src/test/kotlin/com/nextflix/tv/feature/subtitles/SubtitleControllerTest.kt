@@ -53,8 +53,8 @@ class SubtitleControllerTest {
     private fun sub(id: String, lang: String, source: String = "subdl", synced: Boolean = false) =
         SubtitleTrack(id = id, source = source, language = lang, synced = synced)
 
-    private fun file(vararg texts: String, partial: Boolean = false, translating: Boolean = false) =
-        CueFile(texts.mapIndexed { i, t -> Cue(i * 5.0, i * 5.0 + 2, t) }, partial = partial, sync = "synced", translating = translating)
+    private fun file(vararg texts: String, partial: Boolean = false, translating: Boolean = false, sync: String = "synced") =
+        CueFile(texts.mapIndexed { i, t -> Cue(i * 5.0, i * 5.0 + 2, t) }, partial = partial, sync = sync, translating = translating)
 
     private val trQuery = SubtitleQuery(
         tmdbId = 1, type = MediaType.Movie, hash = "abc", index = 0, langs = listOf("tr", "en"), uiLang = "tr", originalLanguage = "en",
@@ -193,6 +193,47 @@ class SubtitleControllerTest {
         assertEquals(3, c.state.value.cues.size)
         advanceTimeBy(SubtitleRepository.LIVE_CUES_POLL_MS * 4)
         assertEquals(3, backend.cueCalls.size)
+    }
+
+    @Test
+    fun provisionalAnswersArePolledEveryMinuteWhilePlayingUntilFinal() = runTest {
+        val backend = FakeBackend().apply {
+            lists.add(listOf(sub("tr1", "tr")))
+            files["tr1"] = ArrayDeque(
+                listOf(
+                    file("bir", sync = "live"),
+                    CueFile(emptyList(), sync = SubsLog.SYNC_NONE, failed = true, status = 0),
+                    file("bir", "iki", sync = "live"),
+                    file("bir", "iki", "üç", sync = "synced"),
+                ),
+            )
+        }
+        val logs = ArrayList<Pair<String, Map<String, Any>>>()
+        val c = controller(backend, logs)
+        c.start(trQuery, "en")
+        runCurrent()
+        assertEquals(1, backend.cueCalls.size)
+        assertEquals(1, c.state.value.cues.size)
+        assertEquals(SubsLog.idHash("tr1"), logs.single().second["id"])
+        // Not final (live without the partial mark): asked again a minute later; a failed poll keeps the cues
+        advanceTimeBy(SubtitleRepository.PROVISIONAL_CUES_POLL_MS + 1)
+        assertEquals(2, backend.cueCalls.size)
+        assertEquals(1, c.state.value.cues.size)
+        advanceTimeBy(SubtitleRepository.LIVE_CUES_POLL_MS + 1)
+        assertEquals(3, backend.cueCalls.size)
+        assertEquals(2, c.state.value.cues.size)
+        // Paused: no poll until it plays again
+        c.onPosition(80.0, playing = false)
+        advanceTimeBy(SubtitleRepository.PROVISIONAL_CUES_POLL_MS * 3)
+        assertEquals(3, backend.cueCalls.size)
+        c.onPosition(80.0, playing = true)
+        advanceTimeBy(SubtitleRepository.PROVISIONAL_CUES_POLL_MS + 1)
+        assertEquals(4, backend.cueCalls.size)
+        assertEquals(3, c.state.value.cues.size)
+        assertEquals("synced", c.state.value.sync)
+        // Final: not asked again
+        advanceTimeBy(SubtitleRepository.PROVISIONAL_CUES_POLL_MS * 5)
+        assertEquals(4, backend.cueCalls.size)
     }
 
     @Test
