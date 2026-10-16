@@ -40,7 +40,16 @@ type tlFixture struct {
 	cues    []cueRec // the text track's cues, file time (none without one)
 }
 
-// tlCueSRT: a cue every 2.5 s from 2.345 s, 1.1 s long (on ms that no frame or packet grid hits).
+// tlCueTimes: a cue every 2.5 s from 2.345 s, 1.1 s long (on ms that no frame or packet grid hits).
+func tlCueTimes(d float64) []cueRec {
+	var out []cueRec
+	for i := 0; 2.345+2.5*float64(i)+1.1 < d; i++ {
+		s := 2.345 + 2.5*float64(i)
+		out = append(out, cueRec{s, s + 1.1})
+	}
+	return out
+}
+
 func tlCueSRT(t *testing.T, dir string, d float64) string {
 	t.Helper()
 	clock := func(s float64) string {
@@ -48,12 +57,54 @@ func tlCueSRT(t *testing.T, dir string, d float64) string {
 		return fmt.Sprintf("%02d:%02d:%02d,%03d", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
 	}
 	var b strings.Builder
-	for i := 0; 2.345+2.5*float64(i)+1.1 < d; i++ {
-		s := 2.345 + 2.5*float64(i)
-		fmt.Fprintf(&b, "%d\n%s --> %s\nline %d\n\n", i+1, clock(s), clock(s+1.1), i)
+	for i, c := range tlCueTimes(d) {
+		fmt.Fprintf(&b, "%d\n%s --> %s\nline %d\n\n", i+1, clock(c.start), clock(c.end), i)
 	}
 	file := filepath.Join(dir, "cues.srt")
 	if err := os.WriteFile(file, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// tlCueSup writes the same cues as a PGS .sup: per cue a display set with a picture (PCS with
+// one object, WDS, PDS, ODS of a 100x20 striped picture, END) and one that clears the screen.
+func tlCueSup(t *testing.T, dir string, d float64) string {
+	t.Helper()
+	var b []byte
+	seg := func(at float64, typ byte, data []byte) {
+		pts := uint32(math.Round(at * 90000))
+		b = append(b, 'P', 'G')
+		b = binary.BigEndian.AppendUint32(b, pts)
+		b = binary.BigEndian.AppendUint32(b, 0)
+		b = append(b, typ)
+		b = binary.BigEndian.AppendUint16(b, uint16(len(data)))
+		b = append(b, data...)
+	}
+	window := []byte{1, 0, 0, 0, 0, 10, 0, 100, 0, 20} // one window: id 0 at 0,10, 100x20
+	var rle []byte
+	for range 20 {
+		for x := range 100 {
+			rle = append(rle, byte(1+x%2))
+		}
+		rle = append(rle, 0, 0) // end of line
+	}
+	for i, c := range tlCueTimes(d) {
+		n := byte(2 * i)
+		// PCS: 320x48, composition n, epoch start, palette 0, object 0 in window 0 at 0,10
+		seg(c.start, 0x16, []byte{0x01, 0x40, 0, 0x30, 0x10, 0, n, 0x80, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10})
+		seg(c.start, 0x17, window)
+		seg(c.start, 0x14, []byte{0, 0, 1, 235, 128, 128, 255, 2, 16, 128, 128, 255})
+		ods := []byte{0, 0, 0, 0xc0}
+		ods = append(ods, byte((len(rle)+4)>>16), byte((len(rle)+4)>>8), byte(len(rle)+4), 0, 100, 0, 20)
+		seg(c.start, 0x15, append(ods, rle...))
+		seg(c.start, 0x80, nil)
+		seg(c.end, 0x16, []byte{0x01, 0x40, 0, 0x30, 0x10, 0, n + 1, 0, 0, 0, 0})
+		seg(c.end, 0x17, window)
+		seg(c.end, 0x80, nil)
+	}
+	file := filepath.Join(dir, "cues.sup")
+	if err := os.WriteFile(file, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return file
@@ -116,7 +167,7 @@ type tlSpec struct {
 	kfs                             string
 	extra                           []string
 	remux                           string
-	subs                            string // codec of a text track (srt, ass, webvtt, mov_text)
+	subs                            string // codec of a text track (srt, ass, webvtt, mov_text), or pgs
 }
 
 func tlMake(t *testing.T, dir string, sp tlSpec) tlFixture {
@@ -133,8 +184,13 @@ func tlMake(t *testing.T, dir string, sp tlSpec) tlFixture {
 	}
 	args = append(args, "-f", "lavfi", "-i", "aevalsrc='"+tlBurst+"|"+tlBurst+"':s=48000:d="+ds, "-map", "0:v", "-map", "1:a")
 	var subs []string
+	pgs := sp.subs == "pgs"
 	if sp.subs != "" {
 		subs = []string{"-i", tlCueSRT(t, dir, sp.d), "-map", "2:s", "-c:s", sp.subs}
+		if pgs {
+			// a packet per display set, as mkvmerge writes them (ffmpeg 7.1's muxer merges too)
+			subs = []string{"-i", tlCueSup(t, dir, sp.d), "-map", "2:s", "-c:s", "copy", "-bsf:s", "pgs_frame_merge"}
+		}
 		if sp.remux != "" {
 			// The capture's own clock: its streams start at about 10 + 1.4 s
 			subs = append([]string{"-itsoffset", "10"}, subs...)
@@ -173,7 +229,19 @@ func tlMake(t *testing.T, dir string, sp tlSpec) tlFixture {
 	fps, _ := tlRate(sp.rate)
 	f := tlFixture{name: sp.name, file: file, fps: fps, acodec: sp.acodec, vcopied: sp.vcodec != "mpeg4"}
 	f.vStart, f.aStart, f.kfs = tlProbeFixture(t, file)
-	if sp.subs != "" {
+	if pgs {
+		// The generated cues where ffmpeg put the track (each input starts at 0)
+		_, _, start := tlStreamStarts(t, file)
+		pts := tlPacketPTS(t, file, "s:0", false)
+		gen := tlCueTimes(sp.d)
+		if len(pts) != 2*len(gen) {
+			t.Fatalf("%s: %d PGS packets for %d cues", sp.name, len(pts), len(gen))
+		}
+		for _, c := range gen {
+			d := pts[0] - gen[0].start - start
+			f.cues = append(f.cues, cueRec{c.start + d, c.end + d})
+		}
+	} else if sp.subs != "" {
 		_, _, start := tlStreamStarts(t, file)
 		if f.cues = tlTextCues(t, file, start); len(f.cues) == 0 {
 			t.Fatalf("%s: no cues in the text track", sp.name)
@@ -881,6 +949,7 @@ func TestPlayTimeline(t *testing.T) {
 		{name: "ts", ext: "ts", rate: "24000/1001", acodec: "ac3", d: 60, kfs: kfs, extra: []string{"-output_ts_offset", "10"}},
 		{name: "mkv-from-ts", ext: "mkv", rate: "24000/1001", acodec: "ac3", d: 60, kfs: kfs, extra: []string{"-output_ts_offset", "10"}, remux: "ts", subs: "srt"},
 		{name: "mkv-mpeg4", ext: "mkv", rate: "24000/1001", vcodec: "mpeg4", acodec: "aac", d: 60, kfs: kfs, subs: "srt"},
+		{name: "mkv-pgs", ext: "mkv", rate: "24000/1001", acodec: "eac3", d: 60, kfs: kfs, subs: "pgs"},
 	}
 	if only := os.Getenv("TL_ONLY"); only != "" {
 		specs = slices.DeleteFunc(specs, func(s tlSpec) bool { return !strings.Contains(","+only+",", ","+s.name+",") })

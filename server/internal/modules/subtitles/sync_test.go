@@ -3,6 +3,7 @@ package subtitles
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,7 +71,8 @@ func vttOf(cues []span) []byte {
 	return renderVTT(lc, false)
 }
 
-// newSyncTest is a service whose file reads come from the given true cues of the file.
+// newSyncTest is a service whose file reads come from the given true cues of the file: its own
+// track's windows, and the speech read with them (the same lines; not counted in reads).
 func newSyncTest(t *testing.T, file []span) (*Service, *int) {
 	saved := syncReadDelay
 	syncReadDelay = 0
@@ -78,13 +80,27 @@ func newSyncTest(t *testing.T, file []span) (*Service, *int) {
 	svc := NewService(nil, Config{CacheDir: t.TempDir(), TorrServerURL: "http://torrserver"})
 	reads := 0
 	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
-		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, TextSub: -1}, nil
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}, nil
 	}
-	svc.sync.read = func(_ context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
-		reads++
-		return truthWindows(file, []float64{start}, 0.1, 0, int64(start))[0], nil
-	}
+	svc.sync.read = readTruth(file, &reads)
 	return svc, &reads
+}
+
+// readTruth reads windows of a file whose own track has the given cues: own windows, or with
+// no own track asked for the speech of the same lines (reads counts the own ones).
+func readTruth(file []span, reads *int) syncWindowReader {
+	return func(_ context.Context, _ string, p mediaProbe, start, _ float64) (refWindow, error) {
+		w := truthWindows(file, []float64{start}, 0.1, 0, int64(start))[0]
+		if p.OwnSub < 0 {
+			w.Kind = "audio"
+			for i, v := range w.Speech {
+				w.Speech[i] = min(v, 1)
+			}
+			return w, nil
+		}
+		*reads++
+		return w, nil
+	}
 }
 
 func cacheProviderSub(t *testing.T, svc *Service, ref string, cues []span) string {
@@ -241,14 +257,15 @@ func TestServeRetimesAFallbackWhoseCuesAreGone(t *testing.T) {
 
 func TestServePendingIsPartial(t *testing.T) {
 	file := dialogue(31, episode)
-	svc, _ := newSyncTest(t, file)
+	svc, reads := newSyncTest(t, file)
 	block := make(chan struct{})
-	svc.sync.read = func(ctx context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
+	read := readTruth(file, reads)
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
 		select {
 		case <-block:
 		case <-ctx.Done():
 		}
-		return truthWindows(file, []float64{start}, 0, 0, 1)[0], nil
+		return read(ctx, url, p, start, length)
 	}
 	saved := syncFirstWait
 	syncFirstWait = 0
@@ -364,10 +381,10 @@ func TestAddWindowsAfterEviction(t *testing.T) {
 	}
 }
 
-// TestSyncWindowFFmpeg reads windows of a generated MKV through the byte cap: cues come at the
-// file's times, and a subtitle read in a stretch without lines (which ffmpeg would continue to
-// the end of the file) stops at the cap. It needs ffmpeg (in the server image, not in plain
-// golang images) and writes a ~150 MB file to the temp dir.
+// TestSyncWindowFFmpeg reads windows of a generated MKV through the byte cap, with a text track
+// and with a PGS one: cues come at the file's times, and a subtitle read in a stretch without
+// lines (which ffmpeg would continue to the end of the file) stops at the cap. It needs ffmpeg
+// (in the server image, not in plain golang images) and writes ~300 MB to the temp dir.
 func TestSyncWindowFFmpeg(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not installed")
@@ -399,7 +416,7 @@ func TestSyncWindowFFmpeg(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 	p, err := probeMedia(ctx, srv.URL)
-	if err != nil || p.TextSub < 0 || p.Duration < 179 || p.Bitrate <= 0 {
+	if err != nil || p.OwnSub < 0 || p.Duration < 179 || p.Bitrate <= 0 {
 		t.Fatalf("probe %+v %v", p, err)
 	}
 	limit := windowByteCap(p, 20) + 64<<10
@@ -424,4 +441,87 @@ func TestSyncWindowFFmpeg(t *testing.T) {
 		t.Fatalf("silent stretch read %d (cap %d, file %d)", w.Read, limit, len(data))
 	}
 	t.Logf("file %d MB, cap per 20 s window %d MB", len(data)>>20, limit>>20)
+
+	// The same lines as a PGS track instead: cue times from its packets
+	var lines []span
+	for i := 0; i < 20; i++ {
+		lines = append(lines, span{float64(3*i + 1), float64(3*i) + 2.5})
+	}
+	sup, pgs := filepath.Join(dir, "s.sup"), filepath.Join(dir, "p.mkv")
+	writeSup(t, sup, lines)
+	cmd = exec.Command("ffmpeg", "-v", "error", "-i", mkv, "-i", sup, "-map", "0:v", "-map", "0:a", "-map", "1",
+		"-c", "copy", "-metadata:s:s:0", "language=eng", pgs)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg: %v %s", err, out)
+	}
+	pgsData, err := os.ReadFile(pgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "p.mkv", time.Time{}, bytes.NewReader(pgsData))
+	}))
+	defer srv2.Close()
+	if p, err = probeMedia(ctx, srv2.URL); err != nil || p.OwnSub != 2 || !p.picture() {
+		t.Fatalf("PGS probe %+v %v", p, err)
+	}
+	w, err = ffmpegSyncWindow(ctx, srv2.URL, p, 20.5, 20)
+	if err != nil || w.Kind != "subs" {
+		t.Fatalf("PGS window %v kind %q", err, w.Kind)
+	}
+	at = at[:0]
+	for i, v := range w.Speech {
+		if v == 2 {
+			at = append(at, i)
+		}
+	}
+	if len(at) != 7 || at[0] < 148 || at[0] > 154 || at[6]-at[0] != 1800 || w.Speech[at[0]+100] != 1 || w.Speech[at[0]+160] != 0 {
+		t.Fatalf("PGS line starts at frames %v", at)
+	}
+	if w, _ = ffmpegSyncWindow(ctx, srv2.URL, p, 100, 20); w.Read > limit {
+		t.Fatalf("PGS: silent stretch read %d (cap %d)", w.Read, limit)
+	}
+}
+
+// writeSup writes cues as a PGS .sup: per cue a display set with a picture (PCS with one object,
+// WDS, PDS, ODS of a 100x20 striped picture, END) and one that clears the screen; a clear at 0
+// first (the stream starts at 0).
+func writeSup(t *testing.T, file string, cues []span) {
+	t.Helper()
+	var b []byte
+	seg := func(at float64, typ byte, data []byte) {
+		b = append(b, 'P', 'G')
+		b = binary.BigEndian.AppendUint32(b, uint32(math.Round(at*90000)))
+		b = binary.BigEndian.AppendUint32(b, 0)
+		b = append(b, typ)
+		b = binary.BigEndian.AppendUint16(b, uint16(len(data)))
+		b = append(b, data...)
+	}
+	window := []byte{1, 0, 0, 0, 0, 10, 0, 100, 0, 20}
+	var rle []byte
+	for range 20 {
+		for x := range 100 {
+			rle = append(rle, byte(1+x%2))
+		}
+		rle = append(rle, 0, 0)
+	}
+	clear := func(at float64, n byte) {
+		seg(at, 0x16, []byte{0x01, 0x40, 0, 0xb4, 0x10, 0, n, 0, 0, 0, 0})
+		seg(at, 0x17, window)
+		seg(at, 0x80, nil)
+	}
+	clear(0, 0)
+	for i, c := range cues {
+		n := byte(2*i + 1)
+		seg(c.start, 0x16, []byte{0x01, 0x40, 0, 0xb4, 0x10, 0, n, 0x80, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10})
+		seg(c.start, 0x17, window)
+		seg(c.start, 0x14, []byte{0, 0, 1, 235, 128, 128, 255, 2, 16, 128, 128, 255})
+		ods := []byte{0, 0, 0, 0xc0, byte((len(rle) + 4) >> 16), byte((len(rle) + 4) >> 8), byte(len(rle) + 4), 0, 100, 0, 20}
+		seg(c.start, 0x15, append(ods, rle...))
+		seg(c.start, 0x80, nil)
+		clear(c.end, n+1)
+	}
+	if err := os.WriteFile(file, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

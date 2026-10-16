@@ -217,7 +217,7 @@ func servedStarts(spans []span, fit syncFit, read, live []refWindow) (fitted, re
 		fitted[i] = c.start
 	}
 	refined = make([]float64, len(spans))
-	for _, c := range refineFit(cues, fit, refineWindows(read, live)) {
+	for _, c := range refineFit(cues, fit, subsWindowsOf(read, live)) {
 		i, _ := strconv.Atoi(c.text)
 		refined[i] = c.start
 	}
