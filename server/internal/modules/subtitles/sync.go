@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,13 @@ var syncReadDelay = 20 * time.Second
 type LineGate interface {
 	// WaitStartQuiet waits while a stream starts (the file's own too); false when ctx ended.
 	WaitStartQuiet(ctx context.Context, hash string) bool
+}
+
+// ReadRoom says whether the window reads of a file that does not play yet (pre-timing) may take
+// the line now (streaming implements it).
+type ReadRoom interface {
+	// RoomToRead: the line is known and the playing streams leave room on it
+	RoomToRead() bool
 }
 
 type lineBudgetKey struct{}
@@ -118,6 +126,11 @@ type syncMeta struct {
 	RateWindows int `json:"rate_windows,omitempty"`
 	// Version of the timing that made it (syncVersion; 0 before versions)
 	Version int `json:"version,omitempty"`
+	// Pre: timed before the file played (pre-timing); served once a re-fit with its played audio
+	// backs it
+	Pre bool `json:"pre,omitempty"`
+	// SameCut: the fit was taken from this file of the same cut (a switch during playback)
+	SameCut string `json:"same_cut,omitempty"`
 }
 
 // syncVersion is the version of the timing. A result of an older one is timed again when it is
@@ -194,8 +207,8 @@ type syncer struct {
 	// result key -> *sync.Mutex: one decide per result at a time (first timing and live re-fits)
 	deciding sync.Map
 
-	refitDelay, refitGap time.Duration
-	lineWait             time.Duration // the LineGate wait of one job (syncLineWait; tests shorten it)
+	refitDelay, refitGap, pendingGap time.Duration
+	lineWait                         time.Duration // the LineGate wait of one job (syncLineWait; tests shorten it)
 }
 
 func newSyncer(svc *Service) *syncer {
@@ -203,7 +216,8 @@ func newSyncer(svc *Service) *syncer {
 		refs: map[string]*syncRefState{}, metas: map[string]*syncMeta{}, failed: map[string]time.Time{},
 		lists: map[string][]Sub{}, probes: map[string]mediaProbe{}, holes: map[string]*holeState{}, titles: map[string]aiMeta{},
 		lives: map[string]*liveFile{}, served: map[string]*servedSub{}, noLive: map[string]bool{}, early: map[string]bool{},
-		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap, lineWait: syncLineWait}
+		liveSem: make(chan struct{}, 1), refitDelay: liveRefitDelay, refitGap: liveRefitGap, pendingGap: livePendingGap,
+		lineWait: syncLineWait}
 	y.onGrow = y.scheduleRefit
 	return y
 }
@@ -261,8 +275,9 @@ type FileAnswer struct {
 	Holes string
 }
 
-// serve answers a file request of a subtitle served for a file.
-func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (FileAnswer, error) {
+// serve answers a file request of a subtitle served for a file, the player at t (seconds of the
+// file, 0 unknown).
+func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t float64) (FileAnswer, error) {
 	base, err := y.svc.File(ctx, inner)
 	if err != nil {
 		return FileAnswer{}, err
@@ -272,16 +287,20 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 		return FileAnswer{}, err
 	}
 	fk := syncFileKey(hash, index)
-	fresh := y.noteServed(key, inner, hash, index)
+	first, fresh := y.noteServed(key, inner, hash, index, t)
 	// Live audio may still come: keep the players asking
 	listening := func() bool { return y.svc.cfg.LiveTiming && (fresh || y.livePlaying(fk)) }
 	pending := func() FileAnswer {
 		return FileAnswer{VTT: renderVTT(vttCues(base), true), Partial: true, Sync: syncStatePending}
 	}
+	// A viewing that starts untimed is re-fitted sooner (sync_live.go)
+	if first && y.svc.cfg.LiveTiming && untimedMeta(y.meta(key)) {
+		y.markPending(hash, index)
+	}
 	if a, ok := y.answer(key, base, listening); ok {
 		if y.meta(key).stale() && !y.recentlyFailed(key) {
 			// Timed by an older version: served as it is while it is timed again
-			y.startTiming(key, inner, hash, index, base)
+			y.startTiming(inner, hash, index, base)
 			if !a.Partial {
 				a.VTT, a.Partial = renderVTT(vttCues(a.VTT), true), true
 			}
@@ -295,7 +314,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 		}
 		return FileAnswer{VTT: base, Sync: syncStateFailed}, nil
 	}
-	call := y.startTiming(key, inner, hash, index, base)
+	call := y.startTiming(inner, hash, index, base)
 	timer := time.NewTimer(syncFirstWait)
 	defer timer.Stop()
 	finished := false
@@ -314,8 +333,43 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int) (File
 	return pending(), nil
 }
 
+// pretime starts the timing of a subtitle for a file that does not play yet (the players ask for
+// the subtitle they would show on the next episode near the end of the current one), so its
+// reference is read and the subtitle fitted before the file opens. It is not a viewing: nothing
+// is noted as served (live re-fits, the first answers' grace). Reads wait in the LineGate like
+// every timing read; a file that plays from a swarm is only read while the line has room beside
+// the playing streams (TorBox files always). It returns the timing state.
+func (y *syncer) pretime(ctx context.Context, inner, hash string, index int) (string, error) {
+	key, err := syncKey(inner, hash, index)
+	if err != nil {
+		return "", err
+	}
+	if m := y.meta(key); m != nil && !m.stale() {
+		return m.State, nil
+	}
+	if y.recentlyFailed(key) {
+		return syncStateFailed, nil
+	}
+	if y.svc.flights.running("sync|" + key) {
+		return syncStatePending, nil
+	}
+	base, err := y.svc.File(ctx, inner)
+	if err != nil {
+		return "", err
+	}
+	if r := y.svc.cfg.ReadRoom; r != nil && debridFileURL(hash, index) == "" && !r.RoomToRead() {
+		log.Printf("subtitles: pre-timing of %s on %s:%d skipped: the line has no room beside the playing streams",
+			shortSubID(inner), hash[:8], index)
+		return syncStatePending, nil
+	}
+	log.Printf("subtitles: pre-timing %s on %s:%d (next episode)", shortSubID(inner), hash[:8], index)
+	y.startTiming(inner, hash, index, base)
+	return syncStatePending, nil
+}
+
 // answer is the stored answer of key; a provisional one is marked live (pending while nothing
-// fits yet) and partial while more audio may come.
+// fits yet) and partial while more audio may come. A pre-timed fit shows once a re-fit with the
+// played audio backed it: fits from the read windows alone can miss a teaser's own offset.
 func (y *syncer) answer(key string, base []byte, listening func() bool) (FileAnswer, bool) {
 	a, ok := y.result(key, base)
 	if !ok {
@@ -327,6 +381,9 @@ func (y *syncer) answer(key string, base []byte, listening func() bool) (FileAns
 			a.Sync = syncStateLive
 		}
 		if listening() {
+			if m.Pre {
+				return FileAnswer{VTT: renderVTT(vttCues(base), true), Partial: true, Sync: syncStatePending}, true
+			}
 			a.VTT, a.Partial = renderVTT(vttCues(a.VTT), true), true
 		}
 	}
@@ -399,9 +456,11 @@ func (y *syncer) recentlyFailed(key string) bool {
 	return ok
 }
 
-// startTiming times one subtitle for the file in the background (one job per result). A failed
-// job, or one that left a result of an older version, is not started again for syncRetryAfter.
-func (y *syncer) startTiming(key, inner, hash string, index int, base []byte) *flightCall {
+// startTiming starts (or joins) the background timing of a subtitle for the file (one job per
+// result). A failed job, or one that left a result of an older version, is not started again for
+// syncRetryAfter.
+func (y *syncer) startTiming(inner, hash string, index int, base []byte) *flightCall {
+	key, _ := syncKey(inner, hash, index)
 	return y.svc.flights.start("sync|"+key, func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), syncJobLimit)
 		ctx = y.withLineBudget(ctx)
@@ -423,6 +482,9 @@ func (y *syncer) startTiming(key, inner, hash string, index int, base []byte) *f
 
 // run times one subtitle for the file and stores the result.
 func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []byte) error {
+	if y.svc.cfg.LiveTiming {
+		y.sameCut(ctx, inner, hash, index, base)
+	}
 	ref, err := y.reference(ctx, hash, index)
 	if err != nil {
 		return err
@@ -434,6 +496,87 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 	}
 	y.decide(ctx, inner, hash, index, base, ref, true)
 	return nil
+}
+
+// sameCut serves a subtitle first asked for this file with the fit it has on another file of the
+// same cut (probed length within 0.05 s, same frame rate) that was served recently: a step down or
+// sidegrade during playback then keeps the timing instead of starting from the subtitle as it is
+// (Gilmore Girls S01E07: two more minutes 2.7 s off after a step down, although the fit on the
+// first file was right). It is provisional; the file's own windows take over in the re-fits.
+// Equal lengths alone do not make one cut (The Mentalist S02E11 and S02E15 NF are both 2551.616 s
+// long), but one subtitle names one episode: such pairs in the data lie within 30 ms of each other.
+func (y *syncer) sameCut(ctx context.Context, inner, hash string, index int, base []byte) {
+	key, err := syncKey(inner, hash, index)
+	if err != nil || y.meta(key) != nil {
+		return
+	}
+	fk := syncFileKey(hash, index)
+	var others []servedSub
+	y.mu.Lock()
+	for _, s := range y.served {
+		if s.inner == inner && s.fk != fk {
+			others = append(others, *s)
+		}
+	}
+	y.mu.Unlock()
+	if len(others) == 0 {
+		return
+	}
+	sort.Slice(others, func(i, j int) bool { return others[i].last.After(others[j].last) })
+	p, err := y.probeFile(ctx, hash, index, torrFileURL(y.svc.cfg.TorrServerURL, hash, index))
+	if err != nil || p.Duration <= 0 || p.FPS <= 0 {
+		return
+	}
+	for _, o := range others {
+		m := y.meta(o.key)
+		if m == nil || m.stale() || !m.fits() && m.State != syncStateReplaced {
+			continue
+		}
+		op, ok := y.knownProbe(o.hash, o.index)
+		if !ok || math.Abs(op.Duration-p.Duration) > 0.05 || math.Abs(op.FPS-p.FPS) > 0.01 {
+			continue
+		}
+		a, ok := y.result(o.key, base)
+		if !ok {
+			continue
+		}
+		c := *m // a pre-timed fit stays so until played audio backs it
+		c.Live, c.LiveWindows, c.LiveSeconds, c.SameCut = true, 0, 0, o.fk
+		var vtt []byte
+		if c.State != syncStateUnchanged {
+			vtt = a.VTT
+		}
+		mu := y.decideLock(key)
+		mu.Lock()
+		if y.meta(key) == nil {
+			log.Printf("subtitles: timing of %s on %s:%d: the fit on %s:%d (same cut: %.2f s, %.3f fps), provisional",
+				shortSubID(inner), hash[:8], index, o.hash[:8], o.index, p.Duration, p.FPS)
+			y.storeWatched(key, inner, hash, index, base, nil, c, vtt)
+		}
+		mu.Unlock()
+		return
+	}
+}
+
+// knownProbe is a file's probe from memory or its reference on disk, without probing it.
+func (y *syncer) knownProbe(hash string, index int) (mediaProbe, bool) {
+	fk := syncFileKey(hash, index)
+	y.mu.Lock()
+	p, ok := y.probes[fk]
+	y.mu.Unlock()
+	if ok {
+		return p, true
+	}
+	st, release := y.refState(fk)
+	defer release()
+	if !st.mu.TryLock() {
+		return mediaProbe{}, false
+	}
+	defer st.mu.Unlock()
+	if !y.loadRef(fk, st) {
+		return mediaProbe{}, false
+	}
+	return st.ref.Probe, st.ref.Probe.Duration > 0
 }
 
 func (y *syncer) decideLock(key string) *sync.Mutex {
@@ -471,7 +614,8 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		(windowSeconds(merged) < liveMinCover || (len(live) > 0 || ref.Skipped) && refLines(prepare(merged)) < liveMinLines) {
 		return false // too little to tell yet
 	}
-	prev := y.meta(key)
+	served := y.meta(key)
+	prev := served
 	if prev.stale() {
 		prev = nil // an older timing's result holds back nothing (rate, hysteresis)
 	}
@@ -482,10 +626,19 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	}
 	if keepStable(prev, m, base, ref.Probe.Duration, complete) {
 		if _, ok := y.result(key, base); ok {
+			if prev.Pre && len(live) > 0 {
+				// The played audio backs the pre-timed fit: served from now on
+				kept := *prev
+				kept.Pre, kept.LiveWindows, kept.LiveSeconds = false, len(live), liveSecs
+				y.storeWatched(key, inner, hash, index, base, prev, kept, nil)
+				logSync(inner, hash, index, kept, time.Since(start))
+			}
 			return true
 		}
 	}
 	provisional := !ref.Full && y.svc.cfg.LiveTiming && !complete
+	// Timed before the file played (pre-timing): none of its audio was heard
+	pre := provisional && len(live) == 0 && !y.livePlaying(syncFileKey(hash, index))
 	if !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced)) {
 		// Did not fit: the best fitting other subtitle of the language, when one fits. While
 		// provisional, a lined up subtitle stays served as it is (a few minutes cannot tell
@@ -524,7 +677,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 					r, _ := y.result(altKey, altBase)
 					altVTT = r.VTT
 				} else {
-					a.Live, a.LiveWindows, a.LiveSeconds = !ref.Full && y.svc.cfg.LiveTiming && !complete, len(live), liveSecs
+					a.Live, a.LiveWindows, a.LiveSeconds, a.Pre = !ref.Full && y.svc.cfg.LiveTiming && !complete, len(live), liveSecs, pre
 					y.store(altKey, a, altVTT)
 					am = &a
 					if read || fitChanged(altPrev, a) {
@@ -542,12 +695,26 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			}
 		}
 	}
-	m.Live, m.LiveWindows, m.LiveSeconds = provisional, len(live), liveSecs
-	y.store(key, m, vtt)
+	m.Live, m.LiveWindows, m.LiveSeconds, m.Pre = provisional, len(live), liveSecs, pre
+	y.storeWatched(key, inner, hash, index, base, served, m, vtt)
 	if read || fitChanged(prev, m) {
 		logSync(inner, hash, index, m, time.Since(start))
 	}
 	return true
+}
+
+// storeWatched stores a result of key and, while a player of it sent its position, logs how the
+// cues ahead of the viewer moved (logNear).
+func (y *syncer) storeWatched(key, inner, hash string, index int, base []byte, prev *syncMeta, m syncMeta, vtt []byte) {
+	_, watched := y.viewerAt(key)
+	var before []liveCue
+	if watched {
+		before = y.servedCues(key, base, prev)
+	}
+	y.store(key, m, vtt)
+	if watched {
+		y.logNear(key, inner, hash, index, before, y.servedCues(key, base, &m))
+	}
 }
 
 // keepAccepted reports whether a provisional fit that was accepted stays served although the
@@ -587,7 +754,7 @@ func logKept(inner, hash string, index int, m syncMeta, liveWindows int, liveSec
 
 // fitChanged reports whether a new result differs from the stored one in what is served.
 func fitChanged(prev *syncMeta, m syncMeta) bool {
-	if prev == nil || prev.State != m.State || prev.ReplacedBy != m.ReplacedBy || prev.Live != m.Live ||
+	if prev == nil || prev.State != m.State || prev.ReplacedBy != m.ReplacedBy || prev.Live != m.Live || prev.Pre != m.Pre ||
 		prev.Fit.Scale != m.Fit.Scale || len(prev.Fit.Segments) != len(m.Fit.Segments) {
 		return true
 	}
@@ -615,6 +782,9 @@ func logSync(inner, hash string, index int, m syncMeta, took time.Duration) {
 	}
 	if m.Live {
 		extra += " (provisional)"
+	}
+	if m.Pre {
+		extra += " (pre-timed: shown once the played audio backs it)"
 	}
 	live := ""
 	if m.LiveWindows > 0 {

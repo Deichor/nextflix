@@ -322,7 +322,7 @@ func (s *ownSink) Heard(t float64) {
 	s.pos = b
 	f.ownGrown += float64(n) / syncRate
 	f.checkComplete()
-	grown := f.ownGrown >= liveRefitGrowth
+	grown := f.ownGrown >= f.growStep()
 	if grown {
 		f.ownGrown = 0
 	}

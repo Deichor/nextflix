@@ -59,31 +59,20 @@ func (h handler) list(c *gin.Context) {
 }
 
 func (h handler) file(c *gin.Context) {
-	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks)
+	if c.Query("pre") == "1" {
+		// Pre-timing (the next episode): the timing starts, nothing is served or noted as played
+		state, err := h.s.PreTime(c.Request.Context(), c.Query("id"))
+		if fileError(c, err) {
+			return
+		}
+		c.Header("X-Subtitle-Sync", state)
+		c.Status(http.StatusNoContent)
+		return
+	}
+	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks, timing logs)
 	a, err := h.s.FileFor(c.Request.Context(), c.Query("id"), t)
 	vtt, partial := a.VTT, a.Partial
-	var qe QuotaError
-	var ke AIKeyError
-	switch {
-	case errors.As(err, &qe):
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "OpenSubtitles download quota used up", "quota": true,
-			"reset_at": qe.Until.UTC().Format(time.RFC3339)})
-		return
-	case errors.Is(err, ErrBadID):
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subtitle id"})
-		return
-	case errors.Is(err, ErrAIOff):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "ai": true})
-		return
-	case errors.As(err, &ke):
-		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true})
-		return
-	case errors.Is(err, ErrRateLimited):
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
-		return
-	case err != nil:
-		log.Printf("subtitles: file: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+	if fileError(c, err) {
 		return
 	}
 	// Every answer names its timing state; original: not timed (made for the file, or no file named)
@@ -109,6 +98,31 @@ func (h handler) file(c *gin.Context) {
 		c.Header("Cache-Control", "private, max-age=86400")
 	}
 	c.Data(http.StatusOK, "text/vtt; charset=utf-8", vtt)
+}
+
+// fileError answers the error of a subtitle file request; false when there is none.
+func fileError(c *gin.Context, err error) bool {
+	var qe QuotaError
+	var ke AIKeyError
+	switch {
+	case err == nil:
+		return false
+	case errors.As(err, &qe):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "OpenSubtitles download quota used up", "quota": true,
+			"reset_at": qe.Until.UTC().Format(time.RFC3339)})
+	case errors.Is(err, ErrBadID):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subtitle id"})
+	case errors.Is(err, ErrAIOff):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "ai": true})
+	case errors.As(err, &ke):
+		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true})
+	case errors.Is(err, ErrRateLimited):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+	default:
+		log.Printf("subtitles: file: %v", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+	}
+	return true
 }
 
 func (h handler) getSettings(c *gin.Context) {

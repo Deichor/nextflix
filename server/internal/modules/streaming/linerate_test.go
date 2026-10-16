@@ -164,6 +164,39 @@ func TestLineLoad(t *testing.T) {
 	}
 }
 
+// The next episode's subtitle timing reads a swarm only with a known line that the playing
+// streams (of known bitrate) leave half of.
+func TestRoomToRead(t *testing.T) {
+	s := NewService(nil, Config{})
+	s.line.once.Do(func() {}) // no stored value, no sampler
+	if s.RoomToRead() {
+		t.Fatal("room on an unknown line")
+	}
+	s.line.load(4*mbps, time.Now())
+	if !s.RoomToRead() {
+		t.Fatal("no room while nothing plays")
+	}
+	s.playing["aa"] = 1
+	p := &tsProbe{}
+	p.Format.BitRate = "15938355" // 1.9 MB/s
+	s.probeCache.Store("aa:1", p)
+	if !s.RoomToRead() {
+		t.Fatal("no room beside a stream needing under half the line")
+	}
+	q := &tsProbe{}
+	q.Format.BitRate = "4194304" // 0.5 MB/s
+	s.playing["bb"] = 1
+	s.probeCache.Store("bb:2", q)
+	if s.RoomToRead() {
+		t.Fatal("room beside streams needing 2.4 of 4 MB/s")
+	}
+	delete(s.playing, "bb")
+	s.playing["cc"] = 1 // bitrate unknown
+	if s.RoomToRead() {
+		t.Fatal("room beside a stream of unknown bitrate")
+	}
+}
+
 func TestLineState(t *testing.T) {
 	s := NewService(nil, Config{})
 	s.playing["aa"] = 1

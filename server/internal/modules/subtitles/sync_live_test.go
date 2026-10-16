@@ -510,7 +510,7 @@ func TestLiveFindsTheTitleSequenceEarly(t *testing.T) {
 // Live audio re-fits by itself (debounced) once enough of it came in.
 func TestLiveRefitIsScheduled(t *testing.T) {
 	svc := newLiveTest(t, episode)
-	svc.sync.refitDelay, svc.sync.refitGap = 10*time.Millisecond, 0
+	svc.sync.refitDelay, svc.sync.refitGap, svc.sync.pendingGap = 10*time.Millisecond, 0, 0
 	svc.sync.onGrow = svc.sync.scheduleRefit
 	file := dialogue(17, episode)
 	inner := cacheProviderSub(t, svc, "1|s|2|10|1", subtitleFor(file, 1, func(float64) float64 { return -2 }))

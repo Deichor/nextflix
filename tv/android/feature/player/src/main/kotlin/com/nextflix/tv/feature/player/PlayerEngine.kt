@@ -161,6 +161,8 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
     private val played = LinkedHashSet<String>()
     private var current = ""
     private var nextWarm: ResolveParams? = null
+    // the next episode's subtitle timed before it opens; cancelled when the player moves on
+    private var nextPretime: Job? = null
     private var countdownTimer: Job? = null
     private var toastTimer: Job? = null
     private val plog: PlaybackLog
@@ -714,9 +716,25 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         val m = meta
         val next = s.next
         if (m.type == MediaType.Tv && next != null && nextWarm == null && nextWarmDue(position, s.duration)) {
-            val p = m.copy(season = next.first, episode = next.second, episodeTitle = null, runtimeMinutes = null).resolveParams(cap)
+            val nextMeta = m.copy(season = next.first, episode = next.second, episodeTitle = null, runtimeMinutes = null)
+            val p = nextMeta.resolveParams(cap)
             nextWarm = p
             core.warmup.prefetch(p, next = position to s.duration)
+            pretimeNext(p, nextMeta)
+        }
+    }
+
+    /** Once the next episode's source is known, the subtitle the open would pick there is timed before it opens. */
+    private fun pretimeNext(params: ResolveParams, next: PlayRequest) {
+        nextPretime?.cancel()
+        nextPretime = scope.launch {
+            repeat(PRETIME_TRIES) { i ->
+                if (i > 0) delay(PRETIME_POLL_MS)
+                val src = api.cached(params) ?: return@repeat
+                val title = src.torrentTitle?.takeIf { it.isNotEmpty() } ?: src.fileName
+                subtitles.pretime(SubtitleQuery.of(next, src.hash.lowercase(), src.index, language, title)).join()
+                return@launch
+            }
         }
     }
 
@@ -1375,6 +1393,8 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         // The finished episode is done; the next one was warmed for this moment
         core.warmup.release(params())
         nextWarm = null
+        nextPretime?.cancel()
+        nextPretime = null
         meta = meta.copy(season = next.first, episode = next.second, episodeTitle = null, runtimeMinutes = null, startAt = 0.0, source = null)
         startAt = null
         given = null
@@ -1502,6 +1522,9 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         // A /seekpoint that failed (its pieces were not in yet) is asked again after these delays
         val SEEKPOINT_RETRY_MS = listOf(3000L, 10_000L, 30_000L)
         const val SUBALT_RETRY_MAX = 4
+        // The next episode's prefetched source is looked up this often, this many times (webOS player/pretime.ts)
+        const val PRETIME_POLL_MS = 20_000L
+        const val PRETIME_TRIES = 9
         // Trick play frames made ahead of a seek: grid steps behind and ahead of the position
         const val THUMB_BEHIND = 3
         const val THUMB_AHEAD = 3

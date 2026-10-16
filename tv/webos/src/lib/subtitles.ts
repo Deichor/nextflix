@@ -255,6 +255,11 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
   return req;
 }
 
+/** The server times a subtitle of a file that does not play yet (the next episode, see player/pretime.ts). */
+export function pretimeSubtitle(id: string): Promise<void> {
+  return request(`/api/subtitles/file?id=${encodeURIComponent(id)}&pre=1`).then(() => undefined, () => undefined);
+}
+
 // An AI translation does not count: a real subtitle that turns up later still replaces it
 export const hasSubtitleLang = (items: SubtitleItem[], lang: string) =>
   items.some(s => s.source !== 'ai' && normLang(s.language) === normLang(lang));

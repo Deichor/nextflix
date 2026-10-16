@@ -110,11 +110,14 @@ object SubtitleRules {
 
     /**
      * When to ask a subtitle file again (ms), null once its answer is final: partial every LIVE_CUES_POLL_MS
-     * (AI_CUES_POLL_MS while the lines at the position are being translated), complete but with timing that may
+     * (AI_CUES_POLL_MS while the lines at the position are being translated, PENDING_CUES_POLL_MS while still
+     * untimed in the first PENDING_FAST_FOR_MS after it was put on: [shownMs]), complete but with timing that may
      * still change (live, pending, failed) every PROVISIONAL_CUES_POLL_MS while the viewer watches.
      */
-    fun pollMs(partial: Boolean, sync: String, translating: Boolean = false): Long? = when {
-        partial -> if (translating) SubtitleRepository.AI_CUES_POLL_MS else SubtitleRepository.LIVE_CUES_POLL_MS
+    fun pollMs(partial: Boolean, sync: String, translating: Boolean = false, shownMs: Long = Long.MAX_VALUE): Long? = when {
+        partial && translating -> SubtitleRepository.AI_CUES_POLL_MS
+        partial && sync == "pending" && shownMs < SubtitleRepository.PENDING_FAST_FOR_MS -> SubtitleRepository.PENDING_CUES_POLL_MS
+        partial -> SubtitleRepository.LIVE_CUES_POLL_MS
         finalCues(false, sync) -> null
         else -> SubtitleRepository.PROVISIONAL_CUES_POLL_MS
     }

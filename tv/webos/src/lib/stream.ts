@@ -372,6 +372,19 @@ export async function resolveSource(
   }
 }
 
+/** The source Play would use when the server already found it (resolve?cached=1: never searches or holds), else null. */
+export async function cachedSource(params: ResolveParams): Promise<ResolvedSource | null> {
+  if (!params.title.trim()) return null;
+  const q = addCaps(resolveQuery(params));
+  q.set('cached', '1');
+  try {
+    const r = await getJson<ResolvedSource>(`/api/torrent-stream/resolve?${q.toString()}`);
+    return r && r.hash ? r : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * How a saved source (Continue Watching, a resumed episode) plays: from TorBox when it has the release
  * cached, from its swarm when that keeps up at `t`, else 'resolve' (search again without it). null when

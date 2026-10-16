@@ -343,6 +343,11 @@ export function fetchSubtitleFile(id: string, at?: number, poll = false): Promis
 }
 
 
+/** The server times a subtitle of a file that does not play yet (the next episode, see pretime.ts); nothing is shown. */
+export function pretimeSubtitle(id: string): Promise<void> {
+  return fetch(`${getApiUrl()}/api/subtitles/file?id=${encodeURIComponent(id)}&pre=1`).then(() => undefined, () => undefined);
+}
+
 const TIME = /(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})/;
 
 function parseTime(s: string): number | null {
