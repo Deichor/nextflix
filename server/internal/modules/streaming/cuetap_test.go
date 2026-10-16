@@ -237,11 +237,16 @@ func TestCueTracks(t *testing.T) {
 			Disposition: map[string]int{"default": 1}},
 		{CodecType: "subtitle", CodecName: "dvd_subtitle"},
 		{CodecType: "subtitle", CodecName: "ass", Tags: map[string]string{"language": "tur"}, Disposition: map[string]int{"forced": 1}},
+		// older mkvmerge: the statistics tags carry their language
+		{CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"language": "eng", "NUMBER_OF_FRAMES-eng": "40"}},
+		{CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"number_of_frames": "1744"}},
 	}}
 	got := p.cueTracks()
 	want := []CueTrack{{Stream: 2, Lang: "eng", Codec: "hdmv_pgs_subtitle", Frames: 1940},
 		{Stream: 3, Lang: "eng", Title: "SDH", Codec: "subrip", Default: true},
-		{Stream: 5, Lang: "tur", Codec: "ass", Forced: true}}
+		{Stream: 5, Lang: "tur", Codec: "ass", Forced: true},
+		{Stream: 6, Lang: "eng", Codec: "hdmv_pgs_subtitle", Frames: 40},
+		{Stream: 7, Codec: "hdmv_pgs_subtitle", Frames: 1744}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("got %+v", got)
 	}
@@ -301,8 +306,9 @@ func TestPumpCuesPGS(t *testing.T) {
 }
 
 // Palette updates (fades) and moves change the cue showing; a new picture replaces it; a
-// display set kept as a packet per segment counts as one; a cue whose end never comes is held
-// for tsCueOpenMax at most.
+// display set kept as a packet per segment counts as one; a fade step read as a clear and the
+// next as a picture make no line of 0.1 s; a cue whose end never comes is held for
+// tsCueOpenMax at most.
 func TestPumpCuesPGSUpdates(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("#tb 0: 1/1000\n#tb 1: 1/1000\n")
@@ -322,12 +328,17 @@ func TestPumpCuesPGSUpdates(t *testing.T) {
 	sub(6500, 22, 13, 85, 4000, 3) // PCS, WDS, PDS, ODS, END as packets
 	fmt.Fprintf(&b, "1, %d, %d, 32, 1024, 0x0\n", 6600, 6600)
 	sub(6800, 14, 13, 3)
-	sub(7000, 5000) // a line whose clear is lost
+	sub(7000, 5000) // a line fading out: a small step reads as a clear, the next as a picture
+	sub(7833, 300)
+	sub(7875, 50)
+	sub(7917, 120)
+	sub(8000, 30)
+	sub(9000, 5000) // a line whose clear is lost
 	for ms := 7000; ms <= 30000; ms += 32 {
 		fmt.Fprintf(&b, "1, %d, %d, 32, 1024, 0x0\n", ms, ms)
 	}
 	sink := pumpFile(t, b.String(), 100, tsPGSRule)
-	want := []cueRec{{101, 103}, {103, 104}, {105, 106}, {106.5, 106.8}, {107, 107 + tsCueOpenMax}}
+	want := []cueRec{{101, 103}, {103, 104}, {105, 106}, {106.5, 106.8}, {107, 107.875}, {109, 109 + tsCueOpenMax}}
 	if fmt.Sprint(sink.cues) != fmt.Sprint(want) {
 		t.Fatalf("cues %v, want %v", sink.cues, want)
 	}

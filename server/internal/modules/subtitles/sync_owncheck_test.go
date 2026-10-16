@@ -68,9 +68,82 @@ func TestCheckOwn(t *testing.T) {
 	}
 }
 
-// A fit takes the own track's windows only once the check says it is timed to the file; until
-// then (and for another cut) the speech read with them and heard stands in, and only a tight
-// track refines lines.
+// A decision stands: not against a check that does not decide (S02E22's captions went timed,
+// not known, timed), nor against another decision from fewer than a third more stretches; a
+// tight track stays tight down to 45 % of its line starts on an onset, a loose one needs 55 %.
+func TestOwnCheckSettles(t *testing.T) {
+	timed := ownCheck{State: ownTimed, Tight: true, Near: 0.6, Pairs: 9}
+	cases := []struct {
+		name      string
+		prev, c   ownCheck
+		state     string
+		tight     bool
+		fromFresh bool
+	}{
+		{"first decision", ownCheck{}, ownCheck{State: ownOther, Pairs: 2}, ownOther, false, true},
+		{"not known", timed, ownCheck{Pairs: 13}, ownTimed, true, false},
+		{"other from 11 stretches", timed, ownCheck{State: ownOther, Pairs: 11}, ownTimed, true, false},
+		{"other from 12 stretches", timed, ownCheck{State: ownOther, Pairs: 12}, ownOther, false, true},
+		{"tight at 48 %", timed, ownCheck{State: ownTimed, Near: 0.48, Pairs: 12}, ownTimed, true, true},
+		{"loose at 40 %", timed, ownCheck{State: ownTimed, Near: 0.40, Pairs: 12}, ownTimed, false, true},
+		{"loose stays at 50 %", ownCheck{State: ownTimed, Near: 0.4, Pairs: 9}, ownCheck{State: ownTimed, Near: 0.5, Pairs: 12},
+			ownTimed, false, true},
+	}
+	for _, c := range cases {
+		got := settleOwn(c.prev, c.c)
+		if got.State != c.state || got.Tight != c.tight || (got.Pairs == c.c.Pairs) != c.fromFresh {
+			t.Errorf("%s: %+v", c.name, got)
+		}
+	}
+}
+
+// The check is done again only from all stretches: a stand-in reference (its read runs) does
+// not decide from the played ones alone. Once decided it is kept with the live windows, so a
+// restart goes on from it; live files saved before have none.
+func TestOwnCheckKept(t *testing.T) {
+	svc := newLiveTest(t, 1500)
+	y := svc.sync
+	file := dialogue(73, 1500)
+	f := y.liveFile(syncHash, 1)
+	f.mu.Lock()
+	for _, p := range checkPairs(file, file, gridStarts(0, 600), 0.15, 0.08, 9) {
+		g := int(p.start / syncWindowLen)
+		var starts []int
+		for i, v := range p.own {
+			if v == 2 {
+				starts = append(starts, i)
+			}
+		}
+		f.ownDone[g] = liveWin{Bits: packBits(p.own), Frames: len(p.own), Starts: starts}
+		f.done[g] = liveWin{Bits: packBits(p.speech), Frames: len(p.speech)}
+	}
+	f.mu.Unlock()
+	probe := mediaProbe{Duration: 1500, OwnSub: 2, SubCodec: "subrip", Audio: 1}
+	if got, _ := y.checkOwnTrack(syncHash, 1, syncRef{Probe: probe, Skipped: true, Busy: true}, nil); got.Own.State != "" || f.checkN != 0 {
+		t.Fatalf("a stand-in decided: %+v", got.Own)
+	}
+	got, _ := y.checkOwnTrack(syncHash, 1, syncRef{Probe: probe, Skipped: true}, nil)
+	if got.Own.State != ownTimed || !got.Own.Tight || !f.dirty {
+		t.Fatalf("from the played stretches: %+v", got.Own)
+	}
+	y.saveLive(f)
+	again := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync.liveFile(syncHash, 1)
+	if c := again.check; c.State != ownTimed || !c.Tight || c.Pairs != got.Own.Pairs || again.checkN != c.Pairs {
+		t.Fatalf("reloaded %+v (n %d), saved %+v", c, again.checkN, got.Own)
+	}
+	old := []byte(`{"windows":{"3":{"bits":"AQ==","n":8}},"complete":true}`)
+	if err := svc.files.write("synclive", syncFileKey(testHash, 1), ".json", old); err != nil {
+		t.Fatal(err)
+	}
+	if g := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync.liveFile(testHash, 1); g.check.State != "" ||
+		len(g.done) != 1 || !g.complete {
+		t.Fatalf("an older live file: %+v", g)
+	}
+}
+
+// A fit takes a PGS track's windows only once the check says it is timed to the file, a text
+// track's also while that is not known (its speech may not tell); for another cut the speech
+// read with them and heard stands in, and only a tight track refines lines.
 func TestCheckOwnTrackWindows(t *testing.T) {
 	svc := newLiveTest(t, 1500)
 	y := svc.sync
@@ -81,11 +154,17 @@ func TestCheckOwnTrackWindows(t *testing.T) {
 	for i := range speech {
 		speech[i].Kind = "audio"
 	}
-	ref := syncRef{Probe: mediaProbe{Duration: 1500, OwnSub: 2, SubCodec: "subrip", Audio: 1}, Windows: own}
-	// without the speech: not known, no windows
+	ref := syncRef{Probe: mediaProbe{Duration: 1500, OwnSub: 2, SubCodec: "hdmv_pgs_subtitle", Audio: 1}, Windows: own}
+	// without the speech: not known, no windows of a PGS track
 	got, _ := y.checkOwnTrack(syncHash, 1, ref, nil)
 	if got.Own.State != "" || len(got.Windows) != 0 || refineWindows(got, nil) != nil {
-		t.Fatalf("unchecked: %+v, %d windows", got.Own, len(got.Windows))
+		t.Fatalf("unchecked PGS: %+v, %d windows", got.Own, len(got.Windows))
+	}
+	// a text track's windows are used (no line refinement while not known)
+	ref.Probe.SubCodec = "subrip"
+	got, _ = y.checkOwnTrack(syncHash, 1, ref, nil)
+	if got.Own.State != "" || got.kind() != "subs" || len(got.Windows) != len(own) || refineWindows(got, nil) != nil {
+		t.Fatalf("unchecked text: %+v, %d windows (%s)", got.Own, len(got.Windows), got.kind())
 	}
 	ref.Speech = speech
 	got, _ = y.checkOwnTrack(syncHash, 1, ref, nil)

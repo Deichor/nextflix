@@ -156,6 +156,12 @@ func TestPictureWindow(t *testing.T) {
 	if got := pictureCues(ps, 60); fmt.Sprint(got) != fmt.Sprint([]span{{10, 12}, {12, 13}, {14, 15}, {16, 17}}) {
 		t.Fatalf("updates: %v", got)
 	}
+	// A fade-out whose small step reads as a clear and the next one as a picture: no line of
+	// 0.1 s (the line ends at the step)
+	ps = []framePacket{{20, 9000}, {21.9, 300}, {21.94, 50}, {21.98, 120}, {22.08, 30}, {23, 5000}, {25, 30}}
+	if got := pictureCues(ps, 60); fmt.Sprint(got) != fmt.Sprint([]span{{20, 21.94}, {23, 25}}) {
+		t.Fatalf("fade: %v", got)
+	}
 }
 
 // A file above the byte budget whose reference was saved before picture tracks counted: the
@@ -197,12 +203,13 @@ func TestEarlyReadsPictureTrack(t *testing.T) {
 }
 
 // A reference saved before picture tracks counted (speech windows, no sub_codec, like The
-// Mentalist S03E02's) is read again once from the file's PGS track; one of a file without any
-// own track only gets its probe brought up to date.
+// Mentalist S03E02's) is probed again and its PGS track read once at its windows (their speech,
+// read before, is the pair: no audio is read again); one of a file without any own track only
+// gets its probe brought up to date.
 func TestOldReferenceReadsPictureTrack(t *testing.T) {
 	file := dialogue(11, episode)
 	for _, codec := range []string{"hdmv_pgs_subtitle", "none"} {
-		svc, reads := newSyncTest(t, file)
+		svc, _ := newSyncTest(t, file)
 		y := svc.sync
 		y.probe = func(context.Context, string) (mediaProbe, error) {
 			p := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: codec}
@@ -211,12 +218,17 @@ func TestOldReferenceReadsPictureTrack(t *testing.T) {
 			}
 			return p, nil
 		}
-		read := readTruth(file, reads)
-		y.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
-			if p.OwnSub >= 0 && !p.picture() {
-				t.Errorf("read at %.0f without the PGS track", start)
+		y.read = func(_ context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
+			t.Errorf("%s: window at %.0f read again", codec, start)
+			return refWindow{}, errors.New("no")
+		}
+		var at []float64
+		y.readSubs = func(_ context.Context, _ string, p mediaProbe, start, _ float64) (refWindow, error) {
+			if !p.picture() || p.OwnSub != 2 {
+				t.Errorf("own read at %.0f with %+v", start, p)
 			}
-			return read(ctx, url, p, start, length)
+			at = append(at, start)
+			return truthWindows(file, []float64{start}, 0, 0, 1)[0], nil
 		}
 		fk := syncFileKey(syncHash, 1)
 		old := []byte(`{"probe":{"duration":2560,"fps":23.976,"audio":1,"center":true,"text_sub":-1,"bitrate":360178},` +
@@ -226,17 +238,19 @@ func TestOldReferenceReadsPictureTrack(t *testing.T) {
 		}
 		ctx := context.Background()
 		r, err := y.reference(ctx, syncHash, 1)
-		if err != nil || r.Probe.SubCodec != codec {
-			t.Fatalf("%s: reference %v, probe %+v", codec, err, r.Probe)
+		if err != nil || r.Probe.SubCodec != codec || len(r.Windows) != 2 || r.kind() != "audio" {
+			t.Fatalf("%s: reference %v, probe %+v, %d windows", codec, err, r.Probe, len(r.Windows))
 		}
-		if codec == "none" {
-			if *reads != 0 || len(r.Windows) != 2 {
-				t.Fatalf("no own track: %d reads, %d windows", *reads, len(r.Windows))
+		if r.unpaired() != (codec != "none") {
+			t.Fatalf("%s: unpaired %v", codec, r.unpaired())
+		}
+		if codec != "none" {
+			p, ok := y.pairRef(ctx, syncHash, 1)
+			if !ok || len(at) != 2 || at[0] != 20 || at[1] != 500 || p.kind() != "subs" || len(p.Speech) != 2 ||
+				p.Speech[0].Kind != "audio" || !p.Paired || p.unpaired() {
+				t.Fatalf("PGS: own reads at %v, reference %s, %d speech windows, paired %v", at, p.kind(), len(p.Speech), p.Paired)
 			}
-		} else if *reads == 0 || r.kind() != "subs" || len(r.Speech) != len(r.Windows) {
-			t.Fatalf("PGS: %d reads, reference %s, %d speech windows", *reads, r.kind(), len(r.Speech))
 		}
-		n := *reads
 		b, _ := svc.files.read("syncref", fk, ".json", 0)
 		if !strings.Contains(string(b), `"sub_codec":"`+codec+`"`) {
 			t.Fatalf("%s: saved %s", codec, b[:min(len(b), 200)])
@@ -247,8 +261,8 @@ func TestOldReferenceReadsPictureTrack(t *testing.T) {
 			t.Error("probed again")
 			return mediaProbe{}, errors.New("no")
 		}
-		if r2, err := again.sync.reference(ctx, syncHash, 1); err != nil || r2.Probe.SubCodec != codec || *reads != n {
-			t.Fatalf("%s: again %v %+v, %d reads", codec, err, r2.Probe, *reads-n)
+		if r2, err := again.sync.reference(ctx, syncHash, 1); err != nil || r2.Probe.SubCodec != codec || r2.unpaired() {
+			t.Fatalf("%s: again %v %+v, unpaired %v", codec, err, r2.Probe, r2.unpaired())
 		}
 	}
 }

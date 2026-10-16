@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -108,6 +109,103 @@ func logCheck(t *testing.T, note string, pairs []ownPair) ownCheck {
 		}
 	}
 	return c
+}
+
+// checkChanges counts what a viewer would get from the check's results as the stretches come:
+// decided states that change (to not known among them) and tightness switched on or off.
+type checkChanges struct {
+	steps                   []string
+	flips, unknown, toggles int
+}
+
+func (c *checkChanges) note(k int, prev, cur ownCheck) {
+	if cur.State == prev.State && cur.Tight == prev.Tight {
+		return
+	}
+	state := cur.State
+	if state == "" {
+		state = "-"
+	}
+	c.steps = append(c.steps, fmt.Sprintf("%d:%s/%v(%.0f%%)", k, state, cur.Tight, 100*cur.Near))
+	if prev.State != "" && cur.State != prev.State {
+		c.flips++
+		if cur.State == "" {
+			c.unknown++
+		}
+	}
+	if prev.State == ownTimed && cur.State == ownTimed && cur.Tight != prev.Tight {
+		c.toggles++
+	}
+}
+
+// TestSnapshotOwnCheckSequence replays every file's stretches in the order they come (read ones,
+// then the played ones in time order) through the check as the re-fits run it: before (every
+// new result replaced the last; 6 of 34 files changed a decided state or tightness) and now
+// (checkOwnCached, settleOwn).
+func TestSnapshotOwnCheckSequence(t *testing.T) {
+	files, _ := loadSnapshot(t)
+	var before, now checkChanges
+	files0, changed0, changed1 := 0, 0, 0
+	run := func(label string, pairs []ownPair) {
+		var read, live []ownPair
+		for _, p := range pairs {
+			if p.start == math.Floor(p.start/syncWindowLen)*syncWindowLen {
+				live = append(live, p)
+			} else {
+				read = append(read, p)
+			}
+		}
+		sort.Slice(live, func(i, j int) bool { return live[i].start < live[j].start })
+		seq := append(read, live...)
+		var b, a checkChanges
+		var prev ownCheck
+		n := 0
+		for k := 1; k <= len(seq); k++ { // the check before: every result replaced the last
+			if k == n || prev.State != "" && k < n+max(1, n/3) {
+				continue
+			}
+			c := checkOwn(seq[:k])
+			b.note(k, prev, c)
+			prev, n = c, k
+		}
+		f := newLiveFile(label, 1)
+		prev = ownCheck{}
+		for k := 1; k <= len(seq); k++ {
+			c := checkOwnCached(f, seq[:k], true, "", 1)
+			a.note(k, prev, c)
+			prev = c
+		}
+		files0++
+		if b.flips+b.toggles > 0 {
+			changed0++
+		}
+		if a.flips+a.toggles > 0 {
+			changed1++
+		}
+		before.flips, before.unknown, before.toggles = before.flips+b.flips, before.unknown+b.unknown, before.toggles+b.toggles
+		now.flips, now.unknown, now.toggles = now.flips+a.flips, now.unknown+a.unknown, now.toggles+a.toggles
+		all := checkOwn(seq)
+		t.Logf("%-46s %3d stretches | before %s | now %s | all at once: %s/%v(%.0f%%)", label, len(seq), strings.Join(b.steps, " "),
+			strings.Join(a.steps, " "), all.State, all.Tight, 100*all.Near)
+		if a.unknown > 0 {
+			t.Errorf("%s: a decided check went back to not known", label)
+		}
+	}
+	for _, c := range ownCheckCases {
+		f := findFile(files, c.file)
+		track := loadFullOwn(t, c.times)
+		if f == nil || len(track) == 0 {
+			continue
+		}
+		run(c.note, snapOwnPairs(f, track))
+	}
+	for _, f := range files {
+		if pairs := append(snapOwnPairs(f, nil), tapOwnPairs(t, f)...); len(pairs) > 0 {
+			run(f.label(), pairs)
+		}
+	}
+	t.Logf("%d sequences; changed a decided state or tightness: before %d (%d flips, %d to not known, %d tight toggles), now %d (%d, %d, %d)",
+		files0, changed0, before.flips, before.unknown, before.toggles, changed1, now.flips, now.unknown, now.toggles)
 }
 
 func TestSnapshotOwnCheck(t *testing.T) {

@@ -23,6 +23,7 @@ const (
 	ownCheckMin    = 2    // stretches the check needs
 	ownNearTol     = 0.2  // seconds: a line start "on" a speech onset (tightness)
 	ownTightShare  = 0.55 // share of line starts (with an onset within 1 s) on one: tight
+	ownLooseShare  = 0.45 // a tight track stays tight down to this share (settleOwn)
 	ownChanceMin   = 8    // stretches after which a track that does not fit
 	ownChanceShare = 0.3  // and has no more line starts on an onset than this at any lag is another cut's
 )
@@ -48,6 +49,13 @@ type ownCheck struct {
 	Near    float64 // share of line starts with a speech onset within ownNearTol (of those within 1 s)
 	Pairs   int     // stretches compared
 	Matched int     // line starts with an onset within 1 s
+}
+
+// ownSaved is a decided check as kept with the file's live windows (a restart goes on from it).
+type ownSaved struct {
+	State string `json:"state"`
+	Tight bool   `json:"tight,omitempty"`
+	Pairs int    `json:"pairs"`
 }
 
 // checkOwn times the own track's lines to the speech of the pairs.

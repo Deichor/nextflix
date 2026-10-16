@@ -370,6 +370,193 @@ func TestWeakReferenceIsNotKept(t *testing.T) {
 	}
 }
 
+// failingSpeech reads a file's own track (counted in reads) while every speech read fails, as
+// for audio the server cannot decode (counted in speech).
+func failingSpeech(file []span, reads, speech *int) syncWindowReader {
+	own := readTruth(file, reads)
+	return func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub < 0 {
+			*speech++
+			return refWindow{}, errors.New("audio: decoder failed")
+		}
+		return own(ctx, url, p, start, length)
+	}
+}
+
+// Speech reads that always fail: a text track is used as before the own-track check (the review
+// saw such a file never timed), and the reference is not read again by every request (it was:
+// own reads 6, 12, 18, 24 over 4 requests).
+func TestSpeechReadsThatFailAreTriedOnce(t *testing.T) {
+	file := dialogue(41, episode)
+	svc, reads := newSyncTest(t, file)
+	speech := 0
+	svc.sync.read = failingSpeech(file, reads, &speech)
+	inner := cacheProviderSub(t, svc, "1|sf|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	if a, err := svc.FileFor(context.Background(), id, 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("a file with an exact own text track: sync %q, %v", a.Sync, err)
+	}
+	n, s := *reads, speech
+	for range 3 {
+		svc.FileFor(context.Background(), id, 0)
+	}
+	if *reads != n || speech != s || n == 0 || s != n {
+		t.Fatalf("own reads %d -> %d, speech reads %d -> %d", n, *reads, s, speech)
+	}
+	// A PGS track whose speech cannot be read times nothing: the job fails (10 minutes) instead
+	// of being started again by every poll
+	svc, reads = newSyncTest(t, file)
+	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "hdmv_pgs_subtitle"}, nil
+	}
+	speech = 0
+	svc.sync.read = failingSpeech(file, reads, &speech)
+	inner = cacheProviderSub(t, svc, "1|pf|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	id = wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, _ := svc.FileFor(context.Background(), id, 0); a.Sync != syncStateFailed || !svc.sync.recentlyFailed(key) {
+		t.Fatalf("PGS without its speech: sync %q, failed %v", a.Sync, svc.sync.recentlyFailed(key))
+	}
+	n = *reads
+	for range 3 {
+		svc.FileFor(context.Background(), id, 0)
+	}
+	if *reads != n || svc.flights.running("sync|"+key) {
+		t.Fatalf("polls read again: %d -> %d", n, *reads)
+	}
+}
+
+// writeOldRef saves a reference as the version before the own-track check did: own-track
+// windows without their speech.
+func writeOldRef(t *testing.T, svc *Service, file []span) []float64 {
+	t.Helper()
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}
+	starts := windowStarts(episode, syncWindowLen, syncMaxWindows)
+	b, _ := json.Marshal(syncRef{Probe: probe, Windows: truthWindows(file, starts, 0, 0, 1), MaxWindows: syncMaxWindows})
+	if err := svc.files.write("syncref", syncFileKey(syncHash, 1), ".json", b); err != nil {
+		t.Fatal(err)
+	}
+	return starts
+}
+
+// A reference saved before the own-track check (34 of 50 stored ones) times at once; then only
+// the speech at its windows is read, once. When those reads fail the saved reference stays (the
+// job failed and threw it away: "only 0 of 6 reference windows could be read").
+func TestOldReferenceKeptWhenItsPairReadsFail(t *testing.T) {
+	file := dialogue(43, episode)
+	svc, _ := newSyncTest(t, file)
+	starts := writeOldRef(t, svc, file)
+	own, speech := 0, 0
+	svc.sync.read = func(_ context.Context, _ string, p mediaProbe, _, _ float64) (refWindow, error) {
+		if p.OwnSub >= 0 {
+			own++
+		} else {
+			speech++
+		}
+		return refWindow{}, errors.New("window read timed out")
+	}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|old|2|7|1", subtitleFor(file, 1, func(float64) float64 { return -3 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, err := svc.FileFor(ctx, wrapSyncID(inner, syncHash, 1), 0); err != nil || a.Sync != syncStateSynced {
+		t.Fatalf("the saved reference was not used: %q %v", a.Sync, err)
+	}
+	waitFlight(t, svc, "sync|"+key)
+	r, err := svc.sync.reference(ctx, syncHash, 1)
+	if own != 0 || speech != len(starts) || err != nil || len(r.Windows) != len(starts) || !r.Paired || r.unpaired() {
+		t.Fatalf("own reads %d, speech reads %d of %d; reference %d windows, paired %v, %v", own, speech, len(starts),
+			len(r.Windows), r.Paired, err)
+	}
+	// another subtitle of the file reads nothing
+	other := cacheProviderSub(t, svc, "2|old|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	if a, _ := svc.FileFor(ctx, wrapSyncID(other, syncHash, 1), 0); a.Sync != syncStateSynced || own+speech != len(starts) {
+		t.Fatalf("second subtitle: %q, %d more reads", a.Sync, own+speech-len(starts))
+	}
+}
+
+// While the speech of an old reference's windows is read, the reference is not locked: re-fits
+// get it (not the probe-only stand-in), and the subtitle is served timed from it meanwhile.
+func TestOldReferencePairReadsLeaveItUsable(t *testing.T) {
+	file := dialogue(44, episode)
+	svc, _ := newSyncTest(t, file)
+	starts := writeOldRef(t, svc, file)
+	block := make(chan struct{})
+	truth := readTruth(file, new(int))
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub >= 0 {
+			t.Errorf("own window at %.0f read again", start)
+		}
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+		return truth(ctx, url, p, start, length)
+	}
+	saved := syncFirstWait
+	syncFirstWait = 200 * time.Millisecond
+	t.Cleanup(func() { syncFirstWait = saved })
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|use|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	if a, _ := svc.FileFor(ctx, wrapSyncID(inner, syncHash, 1), 0); a.Sync != syncStateSynced {
+		t.Fatalf("not timed from the saved reference at once: %q", a.Sync)
+	}
+	if r := svc.sync.liveRef(ctx, syncHash, 1); r.Busy || len(r.Windows) != len(starts) || r.kind() != "subs" {
+		t.Fatalf("while the speech is read: busy %v, %d windows (%s)", r.Busy, len(r.Windows), r.kind())
+	}
+	close(block)
+	waitFlight(t, svc, "sync|"+key)
+	if r, _ := svc.sync.reference(ctx, syncHash, 1); len(r.Speech) != len(starts) || !r.Paired {
+		t.Fatalf("%d speech windows of %d, paired %v", len(r.Speech), len(starts), r.Paired)
+	}
+	if m := svc.sync.meta(key); m == nil || !m.fits() {
+		t.Fatalf("after the pairs: %+v", m)
+	}
+}
+
+// A first read cut by the job's time keeps the windows it read when they are enough (it threw
+// all of them away).
+func TestCutReadKeepsItsWindows(t *testing.T) {
+	file := dialogue(45, episode)
+	svc, reads := newSyncTest(t, file)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	truth := readTruth(file, reads)
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub >= 0 && *reads == 3 {
+			cancel() // out of time after this window's reads
+		}
+		return truth(ctx, url, p, start, length)
+	}
+	r, err := svc.sync.reference(ctx, syncHash, 1)
+	// the cut window's own track is kept; its speech is not read once the job is out of time
+	if err != nil || len(r.Windows) != 4 || len(r.Speech) != 3 || !svc.files.has("syncref", syncFileKey(syncHash, 1), ".json") {
+		t.Fatalf("cut read: %d windows, %d speech, %v", len(r.Windows), len(r.Speech), err)
+	}
+}
+
+// The speech read with each own-track window counts against the file's byte budget: once a
+// window's reads would pass it, the own track is read alone.
+func TestPairedReadsKeepTheByteBudget(t *testing.T) {
+	file := dialogue(46, episode)
+	svc, reads := newSyncTest(t, file)
+	truth := readTruth(file, reads)
+	speech := 0
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		if p.OwnSub < 0 {
+			speech++
+		}
+		w, err := truth(ctx, url, p, start, length)
+		w.Read = 150 << 20
+		return w, err
+	}
+	r, err := svc.sync.reference(context.Background(), syncHash, 1)
+	// 6 windows of 150 MB: two with their speech (600 MB), then a pair would pass 800 MB
+	if err != nil || len(r.Windows) != 6 || speech != 2 || len(r.Speech) != 2 {
+		t.Fatalf("%d windows, %d speech reads, %v", len(r.Windows), speech, err)
+	}
+}
+
 func TestRefStateEvictionKeepsUsedStates(t *testing.T) {
 	y := NewService(nil, Config{CacheDir: t.TempDir()}).sync
 	held, release := y.refState("held")
