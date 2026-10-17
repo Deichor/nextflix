@@ -1,7 +1,7 @@
 import { getApiUrl } from '@/shared/lib/api';
 
 // Player diagnostics for the server's playback log (POST /api/playback-log, see docs/API.md): a few
-// events sent every 30 s and on close; read with scripts/playback-log.sh. Clients: "web" (subtitles,
+// events sent every 30 s, on close and on pagehide; read with scripts/playback-log.sh. Clients: "web" (subtitles,
 // device, restarts and media errors), "web-a4k" (upscaler).
 
 type Val = number | string | boolean;
@@ -66,6 +66,11 @@ export class PlaybackNotes {
 
   close() {
     clearInterval(this.timer);
+    this.flush(true);
+  }
+
+  /** Sends what is pending now, surviving a page close (pagehide) */
+  send() {
     this.flush(true);
   }
 

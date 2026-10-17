@@ -1240,10 +1240,19 @@ screen agree within 0.02 s, so subtitles need nothing extra. What the feed handl
   every switch (sidegrade, upgrade, step down, subtitles release) restarts the playing element on the new source
   at the position (`switchInPlace`: probe, then a restart with a short loading screen). Only a source failure still remounts the player; a refused start there shows the play
   button instead of the loading screen (`play-rejected` in the log).
+- A copied stream starts on the keyframe before the position, up to ~10 s earlier (x265 releases). A restart the
+  viewer did not ask for (switch, recovery, audio change, resume after the feed stopped) therefore catches up
+  (`catchUp.ts`): the element stays hidden and held (stall hold) while the old frame shows dimmed, and once the
+  metadata loaded, `/seekpoint` answered `t` and the buffer reaches `target − t` it seeks there (stepping through
+  the buffer when the feed waits with 8 s ahead); the position reads the target meanwhile. After 15 s it gives up
+  and plays from the keyframe. Seeks of the viewer start on the keyframe as before.
 - Playback log (client `web`): `device` (`fed=true`), `feed-hold`, `feed-quota`, `feed-stuck` (where the feed waits
-  after 5 s without data), `feed-evicted`, `feed-paused-out`, `feed-end`, `feed-error`, and `timeline` samples for
-  the first 3 minutes (element clock, frame time, stream offset, buffered range); every player also logs `switch`
-  (seamless switch result and why it was dropped) and `play-rejected`.
+  after 5 s without data), `feed-evicted`, `feed-paused-out`, `feed-end`, `feed-error`, `catch-up` (`res` `ok` or
+  `timeout`, `s` the skip, `ct` the element time), and `timeline` samples for the first 3 minutes (element clock,
+  frame time, stream offset, buffered range); every player also logs `switch` (seamless switch result and why it was
+  dropped), `play-rejected`, `pagehide` and `exit` (`why`, see [API](API.md)).
+- A player paused by the viewer or refused to autoplay (`NotAllowedError`, until Play) is not starving: no
+  `sidegrade` poll or step down, its stalls are dropped, and the slow start handover waits.
 
 Release from the web app: an open player marks its title / episode as playing (`holdPlaying` in `api.ts`) and
 `releaseTitle` skips a playing title, so only that player releases it when it closes (or on Next). The detail page
