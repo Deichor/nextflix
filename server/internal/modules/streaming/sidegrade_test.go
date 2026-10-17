@@ -34,23 +34,36 @@ func TestSidegradeNeverOffersStarvingSpare(t *testing.T) {
 
 // The Mentalist S03E03 on an iPhone: Safari blocked autoplay, so the paused player's buffer was
 // empty and it polled with critical=1, and a TorBox spare at x9.34 replaced the source at
-// x3.05 (restart at 0:00, another encode, subtitles off). A source that keeps up is never
-// left, whatever the player reports: nothing is offered and nothing searched. A starving or
-// unmeasured one still gets the spare.
+// x3.05 27 s after the pick (restart at 0:00, another encode, subtitles off). While a keeps-up
+// verdict is recent (tsSideTrust) the source is never left, whatever the player reports:
+// nothing is offered and nothing searched. An older one gives way to a draining player (it may
+// have slowed down since) under the old rules: a clearly faster spare, a lower resolution only
+// with critical=1. A starving, dead or unmeasured source always gets the spare.
 func TestSidegradeKeepsSourceThatKeepsUp(t *testing.T) {
+	ok := measured("cur", "1080p", 3.05, 1).Health
+	fast := measured(hx('b'), "1080p", 9.34, 1)
+	drain, crit := tsSideOpts{draining: true}, tsSideOpts{draining: true, critical: true}
+	old := tsSideTrust + time.Second
 	for _, tc := range []struct {
-		name string
-		cur  *tsHealth
-		opt  tsSideOpts
-		want bool
+		name          string
+		cur           *tsHealth
+		age           time.Duration
+		opt           tsSideOpts
+		spare         *tsResolveResult
+		offer, search bool
 	}{
-		{"keeps up", measured("cur", "1080p", 3.05, 1).Health, tsSideOpts{}, false},
-		{"keeps up, draining", measured("cur", "1080p", 3.05, 1).Health, tsSideOpts{draining: true}, false},
-		{"keeps up, critical", measured("cur", "1080p", 3.05, 1).Health, tsSideOpts{draining: true, critical: true}, false},
-		{"starving", measured("cur", "1080p", 0.9, 1).Health, tsSideOpts{}, true},
-		{"starving, draining", measured("cur", "1080p", 0.9, 1).Health, tsSideOpts{draining: true}, true},
-		{"dead", &tsHealth{Need: tsMB, Dead: true}, tsSideOpts{draining: true}, true},
-		{"not measured", nil, tsSideOpts{draining: true}, true},
+		{"keeps up", ok, 27 * time.Second, tsSideOpts{}, fast, false, false},
+		{"keeps up, draining", ok, 27 * time.Second, drain, fast, false, false},
+		{"keeps up, critical", ok, 27 * time.Second, crit, fast, false, false},
+		{"kept up long ago", ok, old, tsSideOpts{}, fast, false, false},
+		{"kept up long ago, draining", ok, old, drain, fast, true, true},
+		{"kept up long ago, draining, spare not clearly faster", ok, old, drain, measured(hx('b'), "1080p", 3.5, 1), false, true},
+		{"kept up long ago, draining, lower spare", ok, old, drain, measured(hx('b'), "720p", 5, 1), false, true},
+		{"kept up long ago, critical, lower spare", ok, old, crit, measured(hx('b'), "720p", 5, 1), true, true},
+		{"starving", measured("cur", "1080p", 0.9, 1).Health, 0, tsSideOpts{}, fast, true, false},
+		{"starving, draining", measured("cur", "1080p", 0.9, 1).Health, 0, drain, fast, true, true},
+		{"dead", &tsHealth{Need: tsMB, Dead: true}, 0, drain, fast, true, true},
+		{"not measured", nil, 0, drain, fast, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newWarmService(t)
@@ -59,9 +72,9 @@ func TestSidegradeKeepsSourceThatKeepsUp(t *testing.T) {
 			w := s.holdWarm(key)
 			s.setSource(w, hx('a'))
 			s.warmMu.Lock()
-			w.health = tc.cur
+			w.health, w.healthAt = tc.cur, time.Now().Add(-tc.age)
 			s.warmMu.Unlock()
-			s.addSpare(w, measured(hx('b'), "1080p", 9.34, 1))
+			s.addSpare(w, tc.spare)
 			var calls atomic.Int32
 			playedLong(t, s, hx('a'))
 			s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
@@ -69,20 +82,20 @@ func TestSidegradeKeepsSourceThatKeepsUp(t *testing.T) {
 				return nil, nil, errNoSource
 			}
 			got := s.sidegradeFor(key, q, hx('a'), 1080, tc.opt)
-			if (got != nil) != tc.want {
-				t.Fatalf("sidegrade = %v, want an offer: %v", got, tc.want)
+			if (got != nil) != tc.offer {
+				t.Fatalf("sidegrade = %v, want an offer: %v", got, tc.offer)
 			}
-			if c, _ := s.cachedSource(key); !tc.want && c != nil {
+			if c, _ := s.cachedSource(key); !tc.offer && c != nil {
 				t.Fatalf("stored %v as the next source", c)
 			}
-			// A drain of a source that keeps up searches nothing either
+			// The next poll without spares searches only for a source that may be left
 			s.warmMu.Lock()
 			w.sideAt, w.spares = time.Time{}, map[string]*tsSpare{}
 			s.warmMu.Unlock()
-			s.sidegradeFor(key, q, hx('a'), 1080, tsSideOpts{draining: true})
+			s.sidegradeFor(key, q, hx('a'), 1080, tc.opt)
 			time.Sleep(20 * time.Millisecond)
-			if searched := calls.Load() > 0; searched != tc.want {
-				t.Fatalf("searched %v, want %v", searched, tc.want)
+			if searched := calls.Load() > 0; searched != tc.search {
+				t.Fatalf("searched %v, want %v", searched, tc.search)
 			}
 		})
 	}

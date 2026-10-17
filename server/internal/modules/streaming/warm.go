@@ -41,6 +41,7 @@ var (
 	tsSpareWindow     = 3 * time.Minute  // ... and this long after it started
 	tsSpareFresh      = 45 * time.Second // a spare measurement this old still counts for a sidegrade
 	tsSidegradeEvery  = 2 * time.Minute  // at most one sidegrade per title in this time
+	tsSideTrust       = 3 * time.Minute  // a draining player does not overrule a keeps-up verdict this recent
 	tsSideSearchEvery = 3 * time.Minute  // a draining player starts a search for alternatives at most this often
 	tsSideSearchAfter = time.Minute      // ... and not before its stream played this long
 	tsJanitorTick     = 5 * time.Second
@@ -61,6 +62,7 @@ type tsWarm struct {
 	hashes    map[string]bool // torrents added for this title and not dropped yet
 	source    string          // the picked / cached source
 	health    *tsHealth       // measured health of source (nil = unknown)
+	healthAt  time.Time       // when health was taken over (useSource)
 	spares    map[string]*tsSpare
 	holdUntil time.Time
 	releaseAt time.Time // pending delayed release (zero = none)
@@ -150,7 +152,7 @@ func (s *Service) useSource(w *tsWarm, r *tsResolveResult) string {
 		s.warmMu.Lock()
 		if w.source == r.Hash {
 			h := *r.Health
-			w.health = &h
+			w.health, w.healthAt = &h, time.Now()
 		}
 		s.warmMu.Unlock()
 	}
@@ -254,12 +256,13 @@ func tsFaster(r, cur *tsHealth) bool {
 	return r.ratio() >= tsFasterMinRatio && r.ratio() > cur.ratio() && r.ratio() >= tsClearlyFaster*cur.ratio()
 }
 
-// tsSideWhy says why the playing source (its last measurement cur) may be left for a spare,
-// "" while it keeps up. A player's draining / critical poll does not overrule that: a paused
-// or autoplay-blocked player drains too, and a switch restarts it on another encode whose
-// subtitle timing may not fit (The Mentalist S03E03 on an iPhone: a TorBox file at x3.05
-// was left for one at x9.34).
-func tsSideWhy(cur *tsHealth) string {
+// tsSideWhy says why the playing source (its last measurement cur, taken age ago) may be left
+// for a spare, "" while it keeps up. A draining / critical poll overrules a keeps-up verdict
+// only once it is tsSideTrust old (the source may have slowed down since): a paused or
+// autoplay-blocked player drains too, and a switch restarts it on another encode whose
+// subtitle timing may not fit (The Mentalist S03E03 on an iPhone: a TorBox file at x3.05 was
+// left for one at x9.34 27 s after the pick).
+func tsSideWhy(cur *tsHealth, age time.Duration, opt tsSideOpts) string {
 	switch {
 	case cur == nil:
 		return "current not measured"
@@ -267,18 +270,22 @@ func tsSideWhy(cur *tsHealth) string {
 		return "current dead"
 	case !cur.KeepsUp:
 		return fmt.Sprintf("current starving at x%.2f", cur.ratio())
+	case (opt.draining || opt.critical) && age >= tsSideTrust:
+		return fmt.Sprintf("current kept up at x%.2f %s ago, the player drains", cur.ratio(), age.Round(time.Second))
 	}
 	return ""
 }
 
-// tsSidegradeWorthy: a measured spare of a fitting length that keeps up, for a playing source
-// that does not (tsSideWhy). A spare that does not keep up is never offered: a switch
-// restarts or reloads the player.
+// tsSidegradeWorthy: a measured spare of a fitting length that keeps up and, when the
+// playing source's last measurement (cur) kept up too, delivers tsClearlyFaster times its
+// rate / need. Against an unmeasured, starving or dead source keeping up is enough. A spare
+// that does not keep up is never offered: a switch restarts or reloads the player.
+// Whether the source may be left at all is tsSideWhy's call.
 func tsSidegradeWorthy(r *tsResolveResult, cur *tsHealth) bool {
 	if r.Health == nil || !r.Health.KeepsUp || r.Health.Dead || !r.durationOK() {
 		return false
 	}
-	return tsSideWhy(cur) != ""
+	return cur == nil || !cur.KeepsUp || cur.Dead || r.Health.ratio() >= tsClearlyFaster*cur.ratio()
 }
 
 // addSpare keeps r as a spare of w for a sidegrade (never one unfit for the client); false
@@ -593,10 +600,10 @@ func (s *Service) warmTick(now time.Time) (ping []string) {
 // sidegradeFor returns a spare of the title that keeps up now (measured within
 // tsSpareFresh), is not current or in q.avoid and has at least resolution curQ; nil
 // otherwise, and then it measures the spares in the background so a later call can answer.
-// Only a spare that keeps up is offered, and only while the source's last measurement does
-// not keep up (tsSideWhy); otherwise nothing is offered, measured or searched. A draining
-// player (opt) with no spare left to measure starts a search for alternatives
-// (searchSidegrade).
+// Only a spare that keeps up is offered (tsSidegradeWorthy), and only while the source may be
+// left (tsSideWhy: it does not keep up, or a draining player overrules an old keeps-up
+// verdict); otherwise nothing is offered, measured or searched. A draining player (opt) with
+// no spare left to measure starts a search for alternatives (searchSidegrade).
 func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, curQ int, opt tsSideOpts) *tsResolveResult {
 	now := time.Now()
 	played, resolving := s.playedFor(current, now), s.titleResolving(key)
@@ -617,7 +624,8 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 	if w.source == current {
 		cur = w.health
 	}
-	why := tsSideWhy(cur)
+	age := now.Sub(w.healthAt)
+	why := tsSideWhy(cur, age, opt)
 	if why == "" {
 		logNo := now.Sub(w.heldAt) >= 30*time.Second
 		if logNo {
@@ -625,7 +633,8 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 		}
 		s.warmMu.Unlock()
 		if logNo {
-			log.Printf("warm: no sidegrade from %s: it keeps up at x%.2f (%s)", tsShortHash(current), cur.ratio(), opt)
+			log.Printf("warm: no sidegrade from %s: it kept up at x%.2f %s ago (%s)", tsShortHash(current), cur.ratio(),
+				age.Round(time.Second), opt)
 		}
 		return nil
 	}
