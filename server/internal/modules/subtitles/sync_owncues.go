@@ -119,8 +119,10 @@ func (f *liveFile) ownState() string {
 
 // checkOwnTrack applies the own-track check (sync_owncheck.go) to the windows a fit uses (ref
 // read, live played): the own track's windows stay when it is timed to the file, a text track's
-// also while that is not known (as before the check: its speech may not tell, music or noise),
-// else the speech of the same stretches stands in (read with each window, heard while playing).
+// also while that is not known (as before the check: its speech may not tell, music or noise)
+// unless its lines found no fit in speech that had the lines for one (NoFit), else the speech of
+// the same stretches stands in (read with each window, heard while playing). Set aside for NoFit
+// (ref.OwnAside), the track's windows may still time a subtitle the speech does not (decide).
 // ref.Own tells the line refinement whether the track is tight.
 func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWindow) (syncRef, []refWindow) {
 	if ref.Full {
@@ -137,9 +139,10 @@ func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWi
 	pairs := ownPairsOf(ref, f)
 	c := checkOwnCached(f, pairs, !ref.Busy, hash, index)
 	ref.Own = c
-	if c.State == ownTimed || c.State == "" && !picture {
+	if c.State == ownTimed || c.State == "" && !picture && !c.NoFit {
 		return ref, live
 	}
+	ref.OwnAside = c.State == "" && !picture && (hasOwnWindows(ref.Windows) || hasOwnWindows(live))
 	if hasOwnWindows(ref.Windows) {
 		ws := make([]refWindow, 0, len(ref.Windows))
 		for _, w := range ref.Windows {
@@ -182,7 +185,7 @@ func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index 
 	}
 	f.check, f.checkN = c, len(pairs)
 	f.mu.Unlock()
-	if c.State != prev.State || c.Tight != prev.Tight {
+	if c.State != prev.State || c.Tight != prev.Tight || c.NoFit != prev.NoFit {
 		logOwnCheck(hash, index, c)
 	}
 	return c
@@ -214,6 +217,9 @@ func logOwnCheck(hash string, index int, c ownCheck) {
 	switch {
 	case c.State == ownOther:
 		what = "not timed to the file (another cut): timed from the speech only"
+	case c.NoFit:
+		what = fmt.Sprintf("no fit (at best %.0f %% of %d line starts on a speech start), not known yet: the speech times subtitles, the track only those the speech does not",
+			100*c.Near, c.Matched)
 	case c.Tight:
 		what = fmt.Sprintf("timed to the file (%+.2f s) and tight (%.0f %% of %d line starts on a speech start)",
 			offset, 100*c.Near, c.Matched)

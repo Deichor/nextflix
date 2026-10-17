@@ -68,6 +68,7 @@ type liveFile struct {
 	ownPic   bool     // the cue tap reads a picture (PGS) track
 	check    ownCheck // the own track against the speech (sync_owncheck.go)
 	checkN   int      // stretches that check compared (it is redone when there are more)
+	sameCut  string   // the file of the same cut whose own-track windows the fits use (sameCutWindows; logged once)
 	duration float64
 	complete bool
 	taps     int
@@ -894,6 +895,12 @@ func (y *syncer) refitSubs(f *liveFile, subs []servedSub) {
 			continue
 		}
 		if base, err := y.svc.File(ctx, s.inner); err == nil {
+			if y.meta(s.key) == nil {
+				// a fit of the same cut that landed since the timing started (sameCut)
+				if c, ok := y.sameCutFit(ctx, s.inner, f.hash, f.index, base, ref.Probe); ok {
+					y.storeSameCut(s.key, s.inner, f.hash, f.index, base, c)
+				}
+			}
 			y.decide(ctx, s.inner, f.hash, f.index, base, ref, false)
 		}
 		mu.Unlock()
