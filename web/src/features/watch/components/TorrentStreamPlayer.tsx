@@ -80,6 +80,7 @@ import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, healthStarving, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
+import { catchUpStep, catchUpTime } from '@/features/watch/catchUp';
 import { savePosition } from '@/features/watch/progressSave';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
 import { Upscaler, upscaleSupported, type UpscaleMode, type UpscaleStop } from '@/features/watch/upscale';
@@ -110,6 +111,8 @@ interface CoreSwitch {
   stats(): string;
   /** Safari: restart the playing element on `next` at the position instead of remounting; false when it can't */
   replace(next: StreamSource): Promise<boolean>;
+  /** Paused by the viewer or refused to autoplay: an empty buffer says nothing about the source then */
+  idle(): boolean;
 }
 
 interface StreamFile {
@@ -179,6 +182,8 @@ const AFTER_PAUSE_MS = 5 * 60 * 1000;
 // The loading overlay shows after this long without frames and hides once frames ran this long
 const LOADING_SHOW_MS = 400;
 const LOADING_HIDE_MS = 300;
+// Safari: a restart that has not seeked past the frames before its position by then shows them
+const CATCH_UP_MAX_MS = 15000;
 // A wait mid-playback counts as buffering (and holds for a larger buffer) only once it lasted this
 // long: shorter waits (a gap of a few frames, a decoder hiccup) play on by themselves
 const STALL_CONFIRM_MS = 800;
@@ -463,6 +468,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // Live playback position and video quality class (0 until probed), written by PlayerCore
   const positionRef = useRef(0);
   const qualityRef = useRef(0);
+  // Why the mounted PlayerCore goes away, for its `exit` log event ('' = it just unmounted)
+  const exitWhyRef = useRef('');
   const [toast, setToast] = useState<MessageKey | ''>('');
   const [toastVars, setToastVars] = useState<Record<string, string>>({});
   // Source PlayerCore switched to without remounting (seamless upgrade / sidegrade); only valid
@@ -501,6 +508,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   useEffect(() => {
     const retry = retryRef.current;
     retryRef.current = { refresh: false };
+    // The mounted PlayerCore gives way to the new resolve (next episode keeps its own reason)
+    if (coreSwitchRef.current && !exitWhyRef.current) exitWhyRef.current = 'remount';
     // A retry or switch never starts over at 0 once the item played past REWIND_GUARD_S
     const startPos = guardedStart(retry.startAt ?? item.startAt ?? 0, positionRef.current);
 
@@ -839,6 +848,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     const now = Date.now();
     if (!m || !src || sidegradeBusy.current || now - lastSidegradeRef.current < SIDEGRADE_EVERY_MS) return false;
     if (proactive && (coreSwitchRef.current?.busy() || now - lastSwitchRef.current < SWITCH_EVERY_MS)) return false;
+    // A paused or autoplay-blocked player is not starving, however empty its buffer
+    if (coreSwitchRef.current?.idle()) return false;
     sidegradeBusy.current = true;
     try {
       const up = await checkSidegrade(paramsOf(m, cap ?? capRef.current), src.hash, quality || releaseHeight(src.quality), undefined,
@@ -1216,6 +1227,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
 
   const playNext = useCallback(() => {
     if (!next || !item.meta) return;
+    exitWhyRef.current = 'next';
     // The episode that ended is done; the next one was warmed for this moment
     playHoldRef.current?.();
     releaseTitle(paramsOf(item.meta));
@@ -1322,7 +1334,9 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !document.fullscreenElement) onClose();
+      if (e.key !== 'Escape' || document.fullscreenElement) return;
+      exitWhyRef.current = 'escape';
+      onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -1381,6 +1395,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
           onSubtitleState={item.meta ? onSubtitleState : undefined}
           subAlt={subAltOffer}
           wantSubLangRef={wantSubLangRef}
+          exitWhyRef={exitWhyRef}
           onClose={onClose}
           fullscreen={fullscreen}
           toggleFullscreen={toggleFullscreen}
@@ -1542,6 +1557,8 @@ interface PlayerCoreProps {
   subAlt?: { lang: string; busy: boolean; onSwitch: () => void } | null;
   /** The viewer switched for this subtitle language: the next list picks it */
   wantSubLangRef?: React.MutableRefObject<string>;
+  /** Why this player goes away (`exit` in the playback log); read and cleared on unmount */
+  exitWhyRef?: React.MutableRefObject<string>;
   onClose: () => void;
   fullscreen: boolean;
   toggleFullscreen: () => void;
@@ -1566,10 +1583,14 @@ const PAUSE_SCREEN_MS = 6000;
 function PlayerCore({
   magnet, source, startAt, meta, title, subtitle, nextLabel, onNext, onPrefetchNext, onSourceFailed, recovering = false, frameShown = false,
   freezeFrame, onRecovering, onRecovered, onStruggling, onSlowStart, onWrongLength,
-  onBufferHealth, positionRef, qualityRef, switchRef, onSwitched, onSubtitleState, subAlt, wantSubLangRef, onClose, fullscreen,
+  onBufferHealth, positionRef, qualityRef, switchRef, onSwitched, onSubtitleState, subAlt, wantSubLangRef, exitWhyRef, onClose, fullscreen,
   toggleFullscreen, touchUi = false, canFullscreen = true, onRotate,
 }: PlayerCoreProps) {
   const apiUrl = getApiUrl();
+  const closeAs = (why: string) => {
+    if (exitWhyRef) exitWhyRef.current = why;
+    onClose();
+  };
   // Two <video> slots: the active one is on screen, the other loads a seamless switch muted and
   // invisible. videoRef always points to the active element.
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1660,6 +1681,8 @@ function PlayerCore({
   // Pause handling: when the viewer paused (0 = playing), a restart that keeps the element
   // paused, and the resume check after a long pause
   const viewerPausedAtRef = useRef(0);
+  // The browser refused play() without a tap (NotAllowedError) and the viewer has not pressed Play since
+  const playBlockedRef = useRef(false);
   // The next pause event is adopt()'s pause + play (see there), not the viewer's
   const wakeNudgeRef = useRef(false);
   const startPausedRef = useRef(false);
@@ -1875,6 +1898,8 @@ function PlayerCore({
 
   const struggling = useCallback(() => {
     stallTimes.current = [];
+    // A paused or autoplay-blocked element is not starving
+    if (viewerPausedAtRef.current > 0 || playBlockedRef.current) return;
     const v = videoInfoRef.current;
     onStrugglingRef.current?.(v ? videoQuality(v.width, v.height) : 0);
   }, []);
@@ -1901,6 +1926,13 @@ function PlayerCore({
     if (stallTimes.current.length >= 2) struggling();
   }, [struggling]);
 
+  // The viewer paused or the browser refused to play: the wait so far is not the source's
+  const dropStall = useCallback(() => {
+    if (longStallTimer.current) clearTimeout(longStallTimer.current);
+    longStallTimer.current = null;
+    stall.current = null;
+  }, []);
+
   useEffect(() => () => { if (longStallTimer.current) clearTimeout(longStallTimer.current); }, []);
 
   // A torrent that shows no frame SLOW_START_MS after it opened hands over at once (sidegrade or a
@@ -1913,7 +1945,8 @@ function PlayerCore({
   useEffect(() => {
     if (!source || source.debrid || !onSlowStartRef.current) return;
     const timer = setTimeout(() => {
-      if (everPlayed.current || viewerPausedAtRef.current > 0) return;
+      // Waiting for a tap is no slow swarm
+      if (everPlayed.current || viewerPausedAtRef.current > 0 || playBlockedRef.current) return;
       console.info(`[nextflix] restart: no frame ${SLOW_START_MS / 1000} s after the start: trying another source`);
       freezeFrameRef.current?.(videoRef.current);
       onRecoveringRef.current?.();
@@ -1925,6 +1958,42 @@ function PlayerCore({
     // PlayerCore is keyed by its source: counted once from its mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Safari: a restart the viewer did not ask for (switch, recovery, step down) seeks past the frames
+  // before its target inside the new stream (catchUp.ts). Meanwhile the element is hidden and held,
+  // and the position reads the target. rel: element time of the target, -1 until /seekpoint answers.
+  const catchUpRef = useRef<{ target: number; rel: number; seeking: boolean; last: boolean; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const [catchingUp, setCatchingUp] = useState(false);
+  const endCatchUp = useCallback((res: '' | 'ok' | 'timeout') => {
+    const c = catchUpRef.current;
+    if (!c) return;
+    clearTimeout(c.timer);
+    catchUpRef.current = null;
+    setCatchingUp(false);
+    if (!res) return;
+    const v = videoRef.current;
+    if (v) setCur(v.currentTime);
+    subLogRef.current?.note('catch-up', { res, s: Math.round(c.rel * 100) / 100, ct: v ? Math.round(v.currentTime * 100) / 100 : undefined });
+    // A buffer hold counts from here
+    const h = holdRef.current;
+    if (h) {
+      h.since = h.kind === 'stall' ? Date.now() : null;
+      h.ahead = 0;
+    }
+  }, [setCur]);
+  const stepCatchUp = useCallback(() => {
+    const c = catchUpRef.current;
+    const v = videoRef.current;
+    // iOS ignores a seek before the metadata
+    if (!c || c.rel <= 0 || c.seeking || !v || v.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    const step = catchUpStep(c.rel, v.currentTime, v.buffered);
+    if (!step) return;
+    v.currentTime = step.to;
+    if (Math.abs(v.currentTime - step.to) > 1) return;
+    c.seeking = true;
+    c.last = step.last;
+  }, []);
+  useEffect(() => () => { if (catchUpRef.current) clearTimeout(catchUpRef.current.timer); }, []);
 
   // Restart the stream at `target` right away. Copied video can only start on a keyframe,
   // so /seekpoint runs in parallel and its answer becomes the offset as soon as it arrives.
@@ -1949,6 +2018,11 @@ function PlayerCore({
     freezeFrameRef.current?.(v);
     if (v) detachStream(v);
     setCur(0);
+    endCatchUp('');
+    if (!userAsked && target > 0 && everPlayed.current && usesFedStream()) {
+      catchUpRef.current = { target, rel: -1, seeking: false, last: false, timer: setTimeout(() => endCatchUp('timeout'), CATCH_UP_MAX_MS) };
+      setCatchingUp(true);
+    }
     offsetRef.current = target;
     exactRef.current = target <= 0;
     setStartPoint({ t: target, exact: target <= 0 });
@@ -1975,9 +2049,20 @@ function PlayerCore({
         exactRef.current = true;
         offsetRef.current = t;
         setStartPoint({ t, exact: true });
+        const c = catchUpRef.current;
+        if (c) {
+          c.rel = catchUpTime(target, t);
+          if (c.rel > 0) {
+            // The position reads the target while the element is still before it
+            setCur(c.rel);
+            stepCatchUp();
+          } else {
+            endCatchUp('');
+          }
+        }
       }
     })();
-  }, [apiUrl, beginStall, positionRef, setCur]);
+  }, [apiUrl, beginStall, positionRef, setCur, endCatchUp, stepCatchUp]);
 
   // Stops the resume check after a long pause
   const clearResumeCheck = useCallback(() => {
@@ -2090,10 +2175,12 @@ function PlayerCore({
     if (!log) return;
     clearTimeout(delayTimerRef.current);
     noteDelay(delayLog().take(Date.now(), true));
-    log.note('exit', { subdelay: subIdRef.current ? delayLog().current : undefined });
+    const why = exitWhyRef?.current || 'unmount';
+    if (exitWhyRef) exitWhyRef.current = '';
+    log.note('exit', { why, subdelay: subIdRef.current ? delayLog().current : undefined });
     log.close();
     subLogRef.current = null;
-  }, [delayLog, noteDelay]);
+  }, [delayLog, noteDelay, exitWhyRef]);
   useEffect(() => {
     subLogRef.current = new PlaybackNotes('web', () => {
       const m = metaRef.current;
@@ -2112,10 +2199,18 @@ function PlayerCore({
       subLogRef.current?.note(document.visibilityState, { paused: v?.paused, muted: v?.muted });
     };
     document.addEventListener('visibilitychange', onVisibility);
+    // Page closed or reloaded (no unmount, so no `exit`); persisted: kept for the back/forward cache
+    const onPageHide = (e: PageTransitionEvent) => {
+      const v = videoRef.current;
+      subLogRef.current?.note('pagehide', { persisted: e.persisted, paused: v?.paused });
+      subLogRef.current?.send();
+    };
+    window.addEventListener('pagehide', onPageHide);
     const feedNote = (k: string, x?: Record<string, number | string | boolean | undefined>) => subLogRef.current?.note(k, x);
     setFeedNote(feedNote);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
       setFeedNote(null);
       closeSubLog();
     };
@@ -2425,9 +2520,11 @@ function PlayerCore({
     subLogRef.current?.note('play-rejected', { name: name || String(e) });
     setPlaying(false);
     if (name !== 'NotAllowedError') return;
+    playBlockedRef.current = true;
+    dropStall();
     setBuffering(false);
     onRecoveredRef.current?.();
-  }, []);
+  }, [dropStall]);
 
   // The handovers ran out: a source without a frame gets LAST_START_MS more, then the error (Retry);
   // the stall watchdog waits meanwhile (armStall)
@@ -2518,6 +2615,10 @@ function PlayerCore({
         h.ahead = ahead;
         armStall();
       }
+      if (catchUpRef.current) {
+        stepCatchUp();
+        return;
+      }
       const dur = stateRef.current.duration;
       const done = holdDone(h.kind, {
         ahead,
@@ -2530,7 +2631,7 @@ function PlayerCore({
       v.play().catch(playRejected);
     }, 250);
     return () => clearInterval(timer);
-  }, [holding, armStall, clearHold, playRejected]);
+  }, [holding, armStall, clearHold, playRejected, stepCatchUp]);
 
   useEffect(() => () => {
     clearStall();
@@ -2573,6 +2674,10 @@ function PlayerCore({
     if (needsStartHold(s?.ratio) && !s?.debrid && startHeldRef.current !== key) {
       startHeldRef.current = key;
       startHold('start');
+    } else if (catchUpRef.current) {
+      // Held until it seeked past the frames before the position (a stall hold then plays on)
+      startHeldRef.current = key;
+      startHold('stall');
     } else {
       startHeldRef.current = key;
       v.play().catch(playRejected);
@@ -2648,6 +2753,7 @@ function PlayerCore({
     // Already buffered in the current stream: seek in place, no restart and no audio glitch
     if (v && stream && !ended && rel >= 0 &&
         inRanges(v.buffered, rel, 0.5) && inRanges(v.seekable, rel, 0)) {
+      endCatchUp('');
       v.currentTime = rel;
       if (Math.abs(v.currentTime - rel) < 1) {
         prepRef.current?.onSeek(target);
@@ -2660,7 +2766,7 @@ function PlayerCore({
       }
     }
     restartAt(target, true);
-  }, [duration, offset, stream, ended, restartAt, setCur]);
+  }, [duration, offset, stream, ended, restartAt, setCur, endCatchUp]);
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
@@ -3031,6 +3137,7 @@ function PlayerCore({
     cancel: () => prepRef.current?.cancel('cancelled'),
     // cancelled / busy: the player moved on or switches already, nothing to remount for
     replace: next => switchInPlace(next, 'hard').then(r => r !== 'unavailable' && r !== 'abandoned'),
+    idle: () => viewerPausedAtRef.current > 0 || playBlockedRef.current,
   }), [prepareSwitch, switchInPlace]);
 
   useEffect(() => {
@@ -3417,12 +3524,12 @@ function PlayerCore({
             key={i}
             ref={slotRefs[i]}
             className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-150 ${
-              i === activeSlot ? 'opacity-100 z-[1]' : i === fadingSlot ? 'opacity-100 z-0' : 'opacity-0 z-0 pointer-events-none'
+              i === activeSlot ? (catchingUp ? 'opacity-0 z-[1]' : 'opacity-100 z-[1]') : i === fadingSlot ? 'opacity-100 z-0' : 'opacity-0 z-0 pointer-events-none'
             }`}
             playsInline
             // CORS-mode load, so the upscaler may read frames into WebGL (the API allows the app's origins)
             crossOrigin="anonymous"
-            onPlay={e => { if (isActive(e)) { savedFinishedRef.current = false; setPlaying(true); resumed(); } }}
+            onPlay={e => { if (isActive(e)) { playBlockedRef.current = false; savedFinishedRef.current = false; setPlaying(true); resumed(); } }}
             onPause={e => {
               if (isActive(e) && wakeNudgeRef.current) {
                 wakeNudgeRef.current = false;
@@ -3432,7 +3539,9 @@ function PlayerCore({
               setPlaying(false);
               persist();
               // A viewer's pause (not the end, not a restart): keep-alives run until Play
-              if (!e.currentTarget.ended) viewerPausedAtRef.current = Date.now();
+              if (e.currentTarget.ended) return;
+              viewerPausedAtRef.current = Date.now();
+              dropStall();
             }}
             onWaiting={e => {
               if (!isActive(e)) return;
@@ -3471,14 +3580,24 @@ function PlayerCore({
               v.muted = mutedRef.current;
               v.volume = volumeRef.current;
               setVideoAspect(aspectOf(v));
+              stepCatchUp();
             }}
             // A paused start shows its first frame without a 'playing' event
             onLoadedData={e => { if (isActive(e) && e.currentTarget.videoWidth > 0) setPictureShown(true); }}
             onResize={e => { if (isActive(e)) setVideoAspect(aspectOf(e.currentTarget)); }}
             onEmptied={e => { if (isActive(e)) setVideoAspect(0); }}
-            onSeeked={e => { if (isActive(e) && nativeSeekTimer.current) clearTimeout(nativeSeekTimer.current); }}
-            onTimeUpdate={e => {
+            onSeeked={e => {
               if (!isActive(e)) return;
+              if (nativeSeekTimer.current) clearTimeout(nativeSeekTimer.current);
+              const c = catchUpRef.current;
+              if (!c?.seeking) return;
+              c.seeking = false;
+              if (c.last) endCatchUp('ok');
+              else stepCatchUp();
+            }}
+            onTimeUpdate={e => {
+              // Still before the target: the position keeps reading it
+              if (!isActive(e) || catchUpRef.current) return;
               const now = e.currentTarget.currentTime;
               // The refs follow every tick; the player re-renders only when the shown second changes
               curRef.current = now;
@@ -3503,7 +3622,11 @@ function PlayerCore({
             onEnded={e => { if (isActive(e)) handleEnded(); }}
             onError={e => { if (isActive(e)) handleError(); }}
             onSuspend={e => { if (isActive(e)) suspendSeenRef.current = true; }}
-            onProgress={e => { if (isActive(e)) lastDataRef.current = Date.now(); }}
+            onProgress={e => {
+              if (!isActive(e)) return;
+              lastDataRef.current = Date.now();
+              stepCatchUp();
+            }}
           />
         ))}
         {upscaleOn && (
@@ -3527,7 +3650,7 @@ function PlayerCore({
       </div>
 
       {/* Subtitles are drawn here (the stream restarts with offsets, so native tracks would drift) */}
-      {playable && pictureShown && !!subId && cues.length > 0 && (
+      {playable && pictureShown && !catchingUp && !!subId && cues.length > 0 && (
         <SubtitleOverlay videoRef={videoRef} offsetRef={offsetRef} cues={cues} delay={subDelay} raised={controlsVisible} scale={subScale} layout={subLayout} />
       )}
 
@@ -3566,7 +3689,7 @@ function PlayerCore({
                     <RotateCw className="w-4 h-4" /> {t('player.retry')}
                   </button>
                 )}
-                <button onClick={onClose} className="px-5 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg">{t('common.close')}</button>
+                <button onClick={() => closeAs('error')} className="px-5 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg">{t('common.close')}</button>
               </div>
             </div>
           ) : (
@@ -3603,7 +3726,7 @@ function PlayerCore({
 
       {/* Top bar */}
       <div className={`absolute top-0 inset-x-0 bg-gradient-to-b from-black/80 to-transparent flex items-center transition-opacity duration-300 ${touchUi ? `${mobileCss.topBar} z-[8] gap-2` : 'p-4 md:p-6 gap-4'} ${hiddenCls}`}>
-        <BackButton label={t('player.back')} onClick={onClose} onFocus={revealControls} />
+        <BackButton label={t('player.back')} onClick={() => closeAs('back')} onFocus={revealControls} />
         <div className="flex-1 min-w-0">
           <p className="text-white font-semibold truncate">{title}</p>
           {subtitle ? (

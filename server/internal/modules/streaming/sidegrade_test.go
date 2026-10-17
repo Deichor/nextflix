@@ -12,7 +12,7 @@ func drainService(t *testing.T) (*Service, *dropRecorder, string, *tsWarm) {
 	q := tsResolveQuery{mediaType: "movie", title: "Carnival of Souls", year: 1962}
 	key := tsResolveKey(q)
 	w := s.holdWarm(key)
-	s.useSource(w, result(hx('a'), "1080p", 3)) // kept up when resolve measured it
+	s.useSource(w, result(hx('a'), "1080p", 0.9)) // starving (x0.9) when resolve measured it
 	return s, rec, key, w
 }
 
@@ -25,63 +25,91 @@ func TestSidegradeNeverOffersStarvingSpare(t *testing.T) {
 	w.searchAt = time.Now() // no search in this test
 	s.warmMu.Unlock()
 	if s.sidegradeFor(key, tsResolveQuery{}, hx('a'), 1080, tsSideOpts{}) != nil {
-		t.Fatal("a starving spare replaced a source that kept up")
+		t.Fatal("a spare that does not keep up was offered")
 	}
 	if got := s.sidegradeFor(key, tsResolveQuery{}, hx('a'), 1080, tsSideOpts{draining: true}); got != nil {
 		t.Fatalf("draining: got %v, want none", got)
 	}
 }
 
-// Frieren on the TV: a 2160p pack measured 17.83 MB/s plays and the player reports a draining
-// buffer. The background search only finds a 1080p at 0.51 MB/s (its cap answer, "best so
-// far"): nothing is offered. A 1080p spare that keeps up but has less headroom than the
-// playing source is not offered either; one clearly faster is.
-func TestSidegradeDrainingKeepsFastSource(t *testing.T) {
-	s, _ := newWarmService(t)
-	q := tsResolveQuery{mediaType: "tv", title: "Frieren: Beyond Journey's End", season: 1, episode: 1, hevc: true}
-	key := tsResolveKey(q)
-	w := s.holdWarm(key)
-	playing := measured(hx('a'), "2160p", 17.83, 8) // x2.23
-	s.useSource(w, playing)
-	slow := measured(hx('b'), "1080p", 0.51, 1.02)
-	slow.DurationVerified, slow.durationChecked = true, true
-	var calls atomic.Int32
-	playedLong(t, s, hx('a'))
-	s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
-		calls.Add(1)
-		_, cancel := context.WithCancel(ctx)
-		return slow, &tsUpgradeSeed{pick: &tsPick{live: true}, cancel: cancel}, nil
-	}
-	if got := s.sidegradeFor(key, q, hx('a'), 2160, tsSideOpts{draining: true}); got != nil {
-		t.Fatalf("draining: got %v before any search", got)
-	}
-	deadline := time.Now().Add(time.Second)
-	for calls.Load() == 0 || func() bool { s.warmMu.Lock(); defer s.warmMu.Unlock(); return w.searching }() {
-		if time.Now().After(deadline) {
-			t.Fatal("the search did not run")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := s.sidegradeFor(key, q, hx('a'), 2160, tsSideOpts{draining: true}); got != nil {
-		t.Fatalf("offered the search's best-so-far answer %v", got)
-	}
-	s.addSpare(w, measured(hx('c'), "2160p", 16, 8)) // keeps up, x2.0: not clearly faster
-	if got := s.sidegradeFor(key, q, hx('a'), 2160, tsSideOpts{draining: true}); got != nil {
-		t.Fatalf("offered %v, slower than the playing source", got)
-	}
-	s.addSpare(w, measured(hx('d'), "2160p", 30, 8)) // x3.75
-	if got := s.sidegradeFor(key, q, hx('a'), 2160, tsSideOpts{draining: true}); got == nil || got.Hash != hx('d') {
-		t.Fatalf("got %v, want the clearly faster spare", got)
+// The Mentalist S03E03 on an iPhone: Safari blocked autoplay, so the paused player's buffer was
+// empty and it polled with critical=1, and a TorBox spare at x9.34 replaced the source at
+// x3.05 27 s after the pick (restart at 0:00, another encode, subtitles off). While a keeps-up
+// verdict is recent (tsSideTrust) the source is never left, whatever the player reports:
+// nothing is offered and nothing searched. An older one gives way to a draining player (it may
+// have slowed down since) under the old rules: a clearly faster spare, a lower resolution only
+// with critical=1. A starving, dead or unmeasured source always gets the spare.
+func TestSidegradeKeepsSourceThatKeepsUp(t *testing.T) {
+	ok := measured("cur", "1080p", 3.05, 1).Health
+	fast := measured(hx('b'), "1080p", 9.34, 1)
+	drain, crit := tsSideOpts{draining: true}, tsSideOpts{draining: true, critical: true}
+	old := tsSideTrust + time.Second
+	for _, tc := range []struct {
+		name          string
+		cur           *tsHealth
+		age           time.Duration
+		opt           tsSideOpts
+		spare         *tsResolveResult
+		offer, search bool
+	}{
+		{"keeps up", ok, 27 * time.Second, tsSideOpts{}, fast, false, false},
+		{"keeps up, draining", ok, 27 * time.Second, drain, fast, false, false},
+		{"keeps up, critical", ok, 27 * time.Second, crit, fast, false, false},
+		{"kept up long ago", ok, old, tsSideOpts{}, fast, false, false},
+		{"kept up long ago, draining", ok, old, drain, fast, true, true},
+		{"kept up long ago, draining, spare not clearly faster", ok, old, drain, measured(hx('b'), "1080p", 3.5, 1), false, true},
+		{"kept up long ago, draining, lower spare", ok, old, drain, measured(hx('b'), "720p", 5, 1), false, true},
+		{"kept up long ago, critical, lower spare", ok, old, crit, measured(hx('b'), "720p", 5, 1), true, true},
+		{"starving", measured("cur", "1080p", 0.9, 1).Health, 0, tsSideOpts{}, fast, true, false},
+		{"starving, draining", measured("cur", "1080p", 0.9, 1).Health, 0, drain, fast, true, true},
+		{"dead", &tsHealth{Need: tsMB, Dead: true}, 0, drain, fast, true, true},
+		{"not measured", nil, 0, drain, fast, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newWarmService(t)
+			q := tsResolveQuery{mediaType: "tv", title: "The Mentalist", season: 3, episode: 3}
+			key := tsResolveKey(q)
+			w := s.holdWarm(key)
+			s.setSource(w, hx('a'))
+			s.warmMu.Lock()
+			w.health, w.healthAt = tc.cur, time.Now().Add(-tc.age)
+			s.warmMu.Unlock()
+			s.addSpare(w, tc.spare)
+			var calls atomic.Int32
+			playedLong(t, s, hx('a'))
+			s.sideSearchFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
+				calls.Add(1)
+				return nil, nil, errNoSource
+			}
+			got := s.sidegradeFor(key, q, hx('a'), 1080, tc.opt)
+			if (got != nil) != tc.offer {
+				t.Fatalf("sidegrade = %v, want an offer: %v", got, tc.offer)
+			}
+			if c, _ := s.cachedSource(key); !tc.offer && c != nil {
+				t.Fatalf("stored %v as the next source", c)
+			}
+			// The next poll without spares searches only for a source that may be left
+			s.warmMu.Lock()
+			w.sideAt, w.spares = time.Time{}, map[string]*tsSpare{}
+			s.warmMu.Unlock()
+			s.sidegradeFor(key, q, hx('a'), 1080, tc.opt)
+			time.Sleep(20 * time.Millisecond)
+			if searched := calls.Load() > 0; searched != tc.search {
+				t.Fatalf("searched %v, want %v", searched, tc.search)
+			}
+		})
 	}
 }
 
-// Lower resolutions only when the buffer is nearly empty (critical=1); avoided spares never.
+// Lower resolutions for an unmeasured source only when the buffer is nearly empty
+// (critical=1); avoided spares never.
 func TestSidegradeCriticalAndAvoid(t *testing.T) {
 	s, rec, key, w := drainService(t)
 	s.addSpare(w, result(hx('b'), "720p", 5))
 	s.addSpare(w, result(hx('c'), "1080p", 3))
 	q := tsResolveQuery{avoid: []string{hx('c')}}
 	s.warmMu.Lock()
+	w.health = nil          // a starving one would take the lower resolution anyway
 	w.searchAt = time.Now() // no search in this test
 	s.warmMu.Unlock()
 	if s.sidegradeFor(key, q, hx('a'), 1080, tsSideOpts{draining: true}) != nil {

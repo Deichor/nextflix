@@ -967,10 +967,16 @@ source is linked through the source cache when it starts.
   keeps up (`tsSidegradeWorthy`), measured within 45 s (else it measures them in the background), and, when the
   playing source's last measurement kept up too, has ≥ 1.5× its rate / need (against an unmeasured, starving or dead
   source keeping up is enough); at most one per title every 2 minutes, never one in `avoid=` (such spares are
-  dropped). A spare that does not keep up is never offered, whatever the player reports: a switch reloads or
-  restarts the player (the TV once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a
-  starving source a spare of a lower resolution counts too when it keeps up (the playing resolution or higher is
-  preferred).
+  dropped). Whether the source may be left at all is `tsSideWhy`'s call: a keeps-up verdict taken over less than 3
+  minutes ago (`tsSideTrust`) is never overruled, whatever the player reports (`draining` / `critical` also come
+  from a paused or autoplay-blocked player): nothing is offered, measured or searched, logged `warm: no sidegrade
+  from <hash>: it kept up at x<ratio> <age> ago (draining=… critical=…)` at most every 30 s (an iPhone whose Safari
+  blocked autoplay left a TorBox file at x3.05 for another encode at x9.34 27 s after the pick: restart at 0:00,
+  subtitle timing lost). An older verdict gives way to a `draining=1` / `critical=1` poll (the source may have slowed
+  down since); without those flags a source that kept up stays. A sidegrade is logged with the reason and the
+  player's flags. A spare that does not keep up is never offered: a switch reloads or restarts the player (the TV
+  once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a starving source a spare of a lower
+  resolution counts too when it keeps up (the playing resolution or higher is preferred).
 - A draining player (`draining=1`, polled every 5-10 s while its buffer drains) keeps the spares alive;
   `critical=1` (under 6 s of buffer) also allows a lower resolution. When no spare is left to measure, it starts a
   background search (`searchSidegrade`, at most every 3 minutes per title): the title is resolved again capped at the
@@ -1240,10 +1246,19 @@ screen agree within 0.02 s, so subtitles need nothing extra. What the feed handl
   every switch (sidegrade, upgrade, step down, subtitles release) restarts the playing element on the new source
   at the position (`switchInPlace`: probe, then a restart with a short loading screen). Only a source failure still remounts the player; a refused start there shows the play
   button instead of the loading screen (`play-rejected` in the log).
+- A copied stream starts on the keyframe before the position, up to ~10 s earlier (x265 releases). A restart the
+  viewer did not ask for (switch, recovery, audio change, resume after the feed stopped) therefore catches up
+  (`catchUp.ts`): the element stays hidden and held (stall hold) while the old frame shows dimmed, and once the
+  metadata loaded, `/seekpoint` answered `t` and the buffer reaches `target − t` it seeks there (stepping through
+  the buffer when the feed waits with 8 s ahead); the position reads the target meanwhile. After 15 s it gives up
+  and plays from the keyframe. Seeks of the viewer start on the keyframe as before.
 - Playback log (client `web`): `device` (`fed=true`), `feed-hold`, `feed-quota`, `feed-stuck` (where the feed waits
-  after 5 s without data), `feed-evicted`, `feed-paused-out`, `feed-end`, `feed-error`, and `timeline` samples for
-  the first 3 minutes (element clock, frame time, stream offset, buffered range); every player also logs `switch`
-  (seamless switch result and why it was dropped) and `play-rejected`.
+  after 5 s without data), `feed-evicted`, `feed-paused-out`, `feed-end`, `feed-error`, `catch-up` (`res` `ok` or
+  `timeout`, `s` the skip, `ct` the element time), and `timeline` samples for the first 3 minutes (element clock,
+  frame time, stream offset, buffered range); every player also logs `switch` (seamless switch result and why it was
+  dropped), `play-rejected`, `pagehide` and `exit` (`why`, see [API](API.md)).
+- A player paused by the viewer or refused to autoplay (`NotAllowedError`, until Play) is not starving: no
+  `sidegrade` poll or step down, its stalls are dropped, and the slow start handover waits.
 
 Release from the web app: an open player marks its title / episode as playing (`holdPlaying` in `api.ts`) and
 `releaseTitle` skips a playing title, so only that player releases it when it closes (or on Next). The detail page
@@ -1492,8 +1507,13 @@ that change at splits), simplified:
   track is timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and
   the cue tap and early reads stop for the file (another cut only). A text track is used while the check cannot
   tell (as before the check: music, noise or speech the server cannot read; such a file was never timed and read
-  again by every request), with no line refinement. Checked with every re-fit (one decide hook, done again from all
-  stretches when they grew by a third; not from a stand-in while the reference is read) and kept per file with its
+  again by every request), with no line refinement, unless its lines found no fit although the speech had the lines
+  for one (`NoFit`; The Mentalist S03E03 KONTRAST WEBRip: 6 stretches, its lines 0 to 4 s off by stretch, 35 % on
+  an onset at best, so every Turkish subtitle came out poor against it, peak 0.0): then the speech stands in as for
+  another cut, and the track's windows only time a subtitle the speech does not fit (or while there is too little
+  speech); its cue tap goes on, so more stretches may still decide. Checked with every re-fit (one decide hook, done
+  again from all stretches when they grew by a third; not from a stand-in while the reference is read) and kept per
+  file with its
   live windows (`synclive` `check`: state, tight, stretches), so a restart goes on from it. Each change re-fits the
   subtitles with other windows, so a decision stands against a check that does not decide and against another
   decision from fewer than a third more stretches, and a tight track stays tight down to 45 % (on at 55 %). Replayed
@@ -1502,7 +1522,8 @@ that change at splits), simplified:
   while all stretches at once say timed), 1 now (loose to tight at 56 %); every file ends as all its stretches at
   once say, except one never decided by them (kept timed from 4). Logged `subtitles: own track of <hash8>:<index>
   against the speech of <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech
-  start)` / `… but loose …: no line refinement` / `not timed to the file (another cut): timed from the speech only`.
+  start)` / `… but loose …: no line refinement` / `not timed to the file (another cut): timed from the speech only`
+  / `no fit (at best 35 % of 63 line starts on a speech start), not known yet: …`.
   On the snapshot
   (`TestSnapshotOwnCheck`): S03E02's PGS track timed and tight (+0.05 s, 76 %; from 2-3 stretches on), S03E01's
   another cut (26 %, from 8 stretches), S02E22's two caption tracks timed but loose (+0.17 s, 39 %), 8 own tracks
@@ -1582,6 +1603,19 @@ that change at splits), simplified:
   Mentalist S02E11 and S02E15 NF are both 2551.616 s, Gilmore Girls S01E06 / S01E08 0.043 s apart), but one subtitle
   names one episode, and such pairs in the snapshot match at lag 0-30 ms on every common live window (3 pairs, 14
   windows). The live windows themselves are not shared: one wrong match would make a wrong result final.
+  Because a fit can land on the first file after the switch (The Mentalist S03E03: 4 minutes later, its reference
+  read in parallel), every re-fit takes the copy again while the file's result is none, untimed (provisional and not
+  fitting, or pre-timed) or a copy, never over its own fits; the first file's fit landing re-fits the other files
+  (`sync_samecut.go`). The copy is also held when the two files' speech matches at offset 0 (`same_speech`: per
+  stretch of 30 s both read or played, 60 % of the speech onsets within 0.1 s of one of the other's, at least 40,
+  and no stretch with 10 under 40 %; S03E03 NF / KONTRAST 91 % of 118, other episodes and the same files 0.5 s
+  apart at most 14 %): speech windows alone may score the right fit under the gain bar (0.12 there), and a
+  pre-timed fit then shows once the new file plays. With that match, the new file's fits also use the first file's
+  read own-track windows when that track is timed to it and the new file's is not known to be (logged `<hash8>:<index>
+  is the same cut as …: its fits use the <n> own-track windows of …`): S03E03's KONTRAST speech alone fitted -1.05 s
+  where NF's track had -1.48 s; with them it serves NF's timing. Every fit builds its windows so (`fitRef`: the
+  own-track check, then these), the first timing's after it read more windows too. The reference of the new file is still read: the
+  match needs its speech, and the two reads ran at the same time.
 - Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox
   proxy's first chunk and read-ahead) and need at least 8 windows, so files above about 10 Mbit/s (1080p WEB-DLs of
   The Mentalist S02E10 at 13.6 Mbit/s, every 4K file) read none and are timed from the played audio (the first

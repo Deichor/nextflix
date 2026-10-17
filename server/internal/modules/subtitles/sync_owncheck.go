@@ -14,8 +14,10 @@ import (
 // were timed to the speech of the same stretches (the speech read with each window, the played
 // audio heard with the cue tap) by the aligner, at the file's rate: offsets within the speech
 // lag (the lines lead the speech by 0 to 0.4 s) make it timed to the file, an offset elsewhere
-// another cut's. A timed track is tight when, at one offset, most of its line starts have a
-// speech onset (speech after a pause) right there; only a tight track refines single lines.
+// another cut's; no fit although the speech had the lines for one leaves it not known, but its
+// windows then do not time subtitles alone (checkOwnTrack). A timed track is tight when, at one
+// offset, most of its line starts have a speech onset (speech after a pause) right there; only a
+// tight track refines single lines.
 
 const (
 	ownLagLo       = -0.5 // offsets (speech after the lines) a track timed to the file may have
@@ -49,6 +51,9 @@ type ownCheck struct {
 	Near    float64 // share of line starts with a speech onset within ownNearTol (of those within 1 s)
 	Pairs   int     // stretches compared
 	Matched int     // line starts with an onset within 1 s
+	// NoFit: not known, although the speech had the lines for a fit: the track's lines found none
+	// there, so they do not time subtitles alone (checkOwnTrack)
+	NoFit bool
 }
 
 // ownSaved is a decided check as kept with the file's live windows (a restart goes on from it).
@@ -88,16 +93,19 @@ func checkOwn(pairs []ownPair) ownCheck {
 	}
 	// No fit: over enough stretches, line starts no nearer to speech onsets than by chance (a
 	// fifth: within 0.2 s of 1 s) at every lag mean another cut, loose within its stretches
-	// (S03E01's PGS track: 26-28 %; loose captions on the file's timeline: 36-44 %)
-	if len(pairs) >= ownChanceMin {
+	// (S03E01's PGS track: 26-28 %; loose captions on the file's timeline: 36-44 %). Before that
+	// a track that found no fit with enough speech lines is not known, but not trusted either
+	// (The Mentalist S03E03 KONTRAST: 6 stretches, its lines 0 to 4 s off by stretch, 35 % at best).
+	c.NoFit = ok
+	if ok || len(pairs) >= ownChanceMin {
 		for lag := ownLagLo; lag <= ownLagHi+1e-9; lag += 0.1 {
 			if near, n := nearShare(pairs, lag); near > c.Near {
 				c.Near, c.Matched = near, n
 			}
 		}
-		if c.Near < ownChanceShare {
-			c.State = ownOther
-		}
+	}
+	if len(pairs) >= ownChanceMin && c.Near < ownChanceShare {
+		c.State, c.NoFit = ownOther, false
 	}
 	return c
 }
