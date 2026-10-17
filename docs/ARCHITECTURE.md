@@ -1598,7 +1598,8 @@ that change at splits), simplified:
   pre-timed fit then shows once the new file plays. With that match, the new file's fits also use the first file's
   read own-track windows when that track is timed to it and the new file's is not known to be (logged `<hash8>:<index>
   is the same cut as …: its fits use the <n> own-track windows of …`): S03E03's KONTRAST speech alone fitted -1.05 s
-  where NF's track had -1.48 s; with them it serves NF's timing. The reference of the new file is still read: the
+  where NF's track had -1.48 s; with them it serves NF's timing. Every fit builds its windows so (`fitRef`: the
+  own-track check, then these), the first timing's after it read more windows too. The reference of the new file is still read: the
   match needs its speech, and the two reads ran at the same time.
 - Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox
   proxy's first chunk and read-ahead) and need at least 8 windows, so files above about 10 Mbit/s (1080p WEB-DLs of

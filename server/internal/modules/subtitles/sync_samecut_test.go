@@ -101,6 +101,76 @@ func TestOwnTrackAsideTimesWhatTheSpeechDoesNot(t *testing.T) {
 	}
 }
 
+// The first timing reads more windows where the offset changes; the fit after that read builds its
+// windows as every fit does (fitRef), so the windows of a set-aside own track (lines 0 to 3 s off
+// by stretch, like KONTRAST's) do not come back with the windows read.
+func TestOwnTrackAsideAfterMoreWindows(t *testing.T) {
+	svc := newLiveTest(t, episode)
+	y := svc.sync
+	file := dialogue(77, episode)
+	starts := windowStarts(episode, syncWindowLen, 6)
+	shift := func(at float64) float64 {
+		i := slices.Index(starts, at)
+		if i < 0 {
+			i = int(at)
+		}
+		return []float64{-2, 2.5, -1, 3, 0.5, -3}[i%6]
+	}
+	reads := 0
+	y.read = func(_ context.Context, _ string, p mediaProbe, at, _ float64) (refWindow, error) {
+		reads++
+		if p.OwnSub < 0 {
+			w := truthWindows(file, []float64{at}, 0.1, 0, int64(at))[0]
+			w.Kind = "audio"
+			for i, v := range w.Speech {
+				w.Speech[i] = min(v, 1)
+			}
+			return w, nil
+		}
+		moved := make([]span, len(file))
+		for i, c := range file {
+			moved[i] = span{c.start + shift(at), c.end + shift(at)}
+		}
+		return truthWindows(moved, []float64{at}, 0.4, 0, int64(at)+7)[0], nil
+	}
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}
+	ref := syncRef{Probe: probe, Paired: true, MaxWindows: syncMaxWindows}
+	ctx := context.Background()
+	for _, at := range starts {
+		w, speech, err := y.readWindow(ctx, syncHash, "", probe, at, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref.Windows, ref.Speech = append(ref.Windows, w), append(ref.Speech, speech...)
+	}
+	setRef(y, syncHash, 1, ref)
+	if got, _ := y.checkOwnTrack(syncHash, 1, ref, nil); !got.OwnAside {
+		t.Fatalf("not set aside: %+v", got.Own)
+	}
+	reads = 0
+	sub := subtitleFor(file, 1, func(u float64) float64 {
+		if u < 1200 {
+			return 2
+		}
+		return 4
+	})
+	inner := cacheProviderSub(t, svc, "1|more|2|7|1", sub)
+	base, _ := svc.File(ctx, inner)
+	key, _ := syncKey(inner, syncHash, 1)
+	if !y.decide(ctx, inner, syncHash, 1, base, ref, true) {
+		t.Fatal("too little to tell")
+	}
+	m := y.meta(key)
+	if reads == 0 || m == nil || strings.Contains(m.Ref, "subs") {
+		t.Fatalf("%d reads: %+v", reads, m)
+	}
+	for _, u := range []float64{600, 1800} {
+		if want := 2.0 + 2*float64(int(u/1200)); !m.fits() || math.Abs(m.Fit.mapTime(u)-u-want) > 0.15 {
+			t.Fatalf("at %.0f s: %s, want %+.1f s", u, describeFit(m.Fit), want)
+		}
+	}
+}
+
 // switchTest serves one subtitle on two files of one length (a, b), b playing; refits are recorded.
 type switchTest struct {
 	svc        *Service
@@ -181,6 +251,40 @@ func TestSameCutSharesTheTimedOwnTrack(t *testing.T) {
 			if d := m.Fit.mapTime(u) - mNF.Fit.mapTime(u); math.Abs(d) > 0.15 {
 				t.Fatalf("at %.0f s %+.2f s off NF's fit: %s against %s", u, d, describeFit(m.Fit), describeFit(mNF.Fit))
 			}
+		}
+	}
+}
+
+// KONTRAST's first timing, NF's track already checked: the fit with NF's windows has its offset
+// change between windows far apart, so a window is read there. The fit after that read keeps NF's
+// windows (review: it fitted the reference as read, KONTRAST's speech only, and served that).
+func TestSameCutWindowsAfterMoreWindows(t *testing.T) {
+	kontrast, nf, sub := loadS03E03(t)
+	s := newSwitchTest(t, kontrast.Probe.Duration, nf, kontrast, sub)
+	y := s.y
+	reads := 0
+	y.read = func(_ context.Context, _ string, p mediaProbe, at, _ float64) (refWindow, error) {
+		reads++ // a stretch without lines: it adds a window, not evidence
+		w := refWindow{Start: at, Kind: "subs", Speech: make([]byte, int(syncWindowLen*syncRate))}
+		if p.OwnSub < 0 {
+			w.Kind = "audio"
+		}
+		return w, nil
+	}
+	if !y.decide(s.ctx, s.inner, s.a, 1, s.base, nf, false) {
+		t.Fatal("NF: too little to tell")
+	}
+	mNF := y.meta(s.keyA)
+	if !y.decide(s.ctx, s.inner, s.b, 1, s.base, kontrast, true) {
+		t.Fatal("KONTRAST: too little to tell")
+	}
+	m := y.meta(s.keyB)
+	if reads == 0 || m == nil || !m.fits() || !strings.Contains(m.Ref, "subs") {
+		t.Fatalf("%d reads: %+v", reads, m)
+	}
+	for _, u := range []float64{300, 1000, 2200} {
+		if d := m.Fit.mapTime(u) - mNF.Fit.mapTime(u); math.Abs(d) > 0.15 {
+			t.Fatalf("at %.0f s %+.2f s off NF's fit: %s against %s", u, d, describeFit(m.Fit), describeFit(mNF.Fit))
 		}
 	}
 }
