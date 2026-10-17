@@ -804,7 +804,11 @@ provider and file id, so a cached file never counts against a provider quota aga
 Event kinds (`tv/webos/src/player/playbackLog.ts`, engine): `wait` (a `waiting` until it played again: `d` ms, `end`, buffered `ahead`, `rs` readyState, `ns` networkState, `seeking`, `start`), `freeze` (media time fell behind the wall clock by `ms` without a `waiting`), `jump` (position moved by `by` s without a seek), `drops` (over 5 frames dropped in ~2 s), `late` (the 250 ms timer fired `ms` late: a long main-thread task), `stalled`, `seek` (`why`: `user`, `skip-intro`, `gap`, `align-start`, `align-split`, `splice-stuck` or `unmarked`), `restart` / `open` (`why`), `seekpoint` (`fix`), `buffering`, `hold` / `hold-end`, `health`, `splice` / `splice-end` / `splice-drop`, `subs` / `subs-none` / `subdelay` (below), `stream-fail`, `error`, `offline` (`net`: `offline` or `unreachable`) / `online`, `early-end`, `ended`, `next`, `exit` (`subdelay` while a subtitle is shown), `quota` (a SourceBuffer was full), `ranges` (each SourceBuffer's ranges near the playhead at a `waiting`), and a `summary` every 60 s (`ahead_min`, `ahead_avg`, `dropped`, `decoded`, `waits`, `freezes`, `jumps`, `late`, `late_max`, `subdelay` while a subtitle is shown). Batches go every 30 s and on pause, end, next episode and exit (`keepalive`). Off: `PLAYBACK_LOG = false` in `playbackLog.ts`, or localStorage `nfx-tv:playback-log` = `off` on the TV. Read with `scripts/playback-log.sh [days] [filter]` (e.g. `2 S02E09`).
 
 Subtitle events (all players, fields from `subsLog.ts` in `tv/webos/src/player/` and `web/src/features/watch/`, and
-`SubsLog.kt` in the Android TV app; the web player sends only these and `exit`, as client `web`). String values are made
+`SubsLog.kt` in the Android TV app; the web player sends these, `exit`, `pagehide` and its playback events, see
+docs/ARCHITECTURE.md, as client `web`; its `exit` has `why`: `back` (Back button), `escape`, `error` (Close on the
+error), `next` (next episode), `remount` (the player restarts on another source or a fresh resolve) or `unmount` (the
+page left the player, e.g. browser back); `pagehide` (`persisted`, `paused`) is sent at once and marks a page close or
+reload, which never logs `exit`). String values are made
 log-safe tokens (Turkish letters folded to ASCII, other characters `_`, at most 40 chars); fields are printed sorted:
 
 - `subs`: a subtitle was loaded, or a later answer changed it. `id` (8 hex chars of the FNV-1a hash of the whole id;
