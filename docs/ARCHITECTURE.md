@@ -967,10 +967,16 @@ source is linked through the source cache when it starts.
   keeps up (`tsSidegradeWorthy`), measured within 45 s (else it measures them in the background), and, when the
   playing source's last measurement kept up too, has ≥ 1.5× its rate / need (against an unmeasured, starving or dead
   source keeping up is enough); at most one per title every 2 minutes, never one in `avoid=` (such spares are
-  dropped). A spare that does not keep up is never offered, whatever the player reports: a switch reloads or
-  restarts the player (the TV once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a
-  starving source a spare of a lower resolution counts too when it keeps up (the playing resolution or higher is
-  preferred).
+  dropped). Whether the source may be left at all is `tsSideWhy`'s call: a keeps-up verdict taken over less than 3
+  minutes ago (`tsSideTrust`) is never overruled, whatever the player reports (`draining` / `critical` also come
+  from a paused or autoplay-blocked player): nothing is offered, measured or searched, logged `warm: no sidegrade
+  from <hash>: it kept up at x<ratio> <age> ago (draining=… critical=…)` at most every 30 s (an iPhone whose Safari
+  blocked autoplay left a TorBox file at x3.05 for another encode at x9.34 27 s after the pick: restart at 0:00,
+  subtitle timing lost). An older verdict gives way to a `draining=1` / `critical=1` poll (the source may have slowed
+  down since); without those flags a source that kept up stays. A sidegrade is logged with the reason and the
+  player's flags. A spare that does not keep up is never offered: a switch reloads or restarts the player (the TV
+  once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a starving source a spare of a lower
+  resolution counts too when it keeps up (the playing resolution or higher is preferred).
 - A draining player (`draining=1`, polled every 5-10 s while its buffer drains) keeps the spares alive;
   `critical=1` (under 6 s of buffer) also allows a lower resolution. When no spare is left to measure, it starts a
   background search (`searchSidegrade`, at most every 3 minutes per title): the title is resolved again capped at the
