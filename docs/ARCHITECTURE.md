@@ -1492,8 +1492,13 @@ that change at splits), simplified:
   track is timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and
   the cue tap and early reads stop for the file (another cut only). A text track is used while the check cannot
   tell (as before the check: music, noise or speech the server cannot read; such a file was never timed and read
-  again by every request), with no line refinement. Checked with every re-fit (one decide hook, done again from all
-  stretches when they grew by a third; not from a stand-in while the reference is read) and kept per file with its
+  again by every request), with no line refinement, unless its lines found no fit although the speech had the lines
+  for one (`NoFit`; The Mentalist S03E03 KONTRAST WEBRip: 6 stretches, its lines 0 to 4 s off by stretch, 35 % on
+  an onset at best, so every Turkish subtitle came out poor against it, peak 0.0): then the speech stands in as for
+  another cut, and the track's windows only time a subtitle the speech does not fit (or while there is too little
+  speech); its cue tap goes on, so more stretches may still decide. Checked with every re-fit (one decide hook, done
+  again from all stretches when they grew by a third; not from a stand-in while the reference is read) and kept per
+  file with its
   live windows (`synclive` `check`: state, tight, stretches), so a restart goes on from it. Each change re-fits the
   subtitles with other windows, so a decision stands against a check that does not decide and against another
   decision from fewer than a third more stretches, and a tight track stays tight down to 45 % (on at 55 %). Replayed
@@ -1502,7 +1507,8 @@ that change at splits), simplified:
   while all stretches at once say timed), 1 now (loose to tight at 56 %); every file ends as all its stretches at
   once say, except one never decided by them (kept timed from 4). Logged `subtitles: own track of <hash8>:<index>
   against the speech of <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech
-  start)` / `… but loose …: no line refinement` / `not timed to the file (another cut): timed from the speech only`.
+  start)` / `… but loose …: no line refinement` / `not timed to the file (another cut): timed from the speech only`
+  / `no fit (at best 35 % of 63 line starts on a speech start), not known yet: …`.
   On the snapshot
   (`TestSnapshotOwnCheck`): S03E02's PGS track timed and tight (+0.05 s, 76 %; from 2-3 stretches on), S03E01's
   another cut (26 %, from 8 stretches), S02E22's two caption tracks timed but loose (+0.17 s, 39 %), 8 own tracks
@@ -1582,6 +1588,18 @@ that change at splits), simplified:
   Mentalist S02E11 and S02E15 NF are both 2551.616 s, Gilmore Girls S01E06 / S01E08 0.043 s apart), but one subtitle
   names one episode, and such pairs in the snapshot match at lag 0-30 ms on every common live window (3 pairs, 14
   windows). The live windows themselves are not shared: one wrong match would make a wrong result final.
+  Because a fit can land on the first file after the switch (The Mentalist S03E03: 4 minutes later, its reference
+  read in parallel), every re-fit takes the copy again while the file's result is none, untimed (provisional and not
+  fitting, or pre-timed) or a copy, never over its own fits; the first file's fit landing re-fits the other files
+  (`sync_samecut.go`). The copy is also held when the two files' speech matches at offset 0 (`same_speech`: per
+  stretch of 30 s both read or played, 60 % of the speech onsets within 0.1 s of one of the other's, at least 40,
+  and no stretch with 10 under 40 %; S03E03 NF / KONTRAST 91 % of 118, other episodes and the same files 0.5 s
+  apart at most 14 %): speech windows alone may score the right fit under the gain bar (0.12 there), and a
+  pre-timed fit then shows once the new file plays. With that match, the new file's fits also use the first file's
+  read own-track windows when that track is timed to it and the new file's is not known to be (logged `<hash8>:<index>
+  is the same cut as …: its fits use the <n> own-track windows of …`): S03E03's KONTRAST speech alone fitted -1.05 s
+  where NF's track had -1.48 s; with them it serves NF's timing. The reference of the new file is still read: the
+  match needs its speech, and the two reads ran at the same time.
 - Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox
   proxy's first chunk and read-ahead) and need at least 8 windows, so files above about 10 Mbit/s (1080p WEB-DLs of
   The Mentalist S02E10 at 13.6 Mbit/s, every 4K file) read none and are timed from the played audio (the first

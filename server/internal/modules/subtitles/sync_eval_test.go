@@ -1134,6 +1134,9 @@ type syncFixture struct {
 	Live     []fixtureLive   `json:"live"`
 	Sub      [][2]float64    `json:"sub"`
 	Alt      [][2]float64    `json:"alt,omitempty"` // another subtitle of the language
+	// Speech read with the own-track windows of Subs; Other: a file of the same cut
+	Speech []fixtureWindow `json:"speech,omitempty"`
+	Other  *syncFixture    `json:"other,omitempty"`
 }
 
 // fixtureWindow is a read window as runs of frames [from, to) where a cue shows; the third

@@ -11,7 +11,6 @@ import (
 	"math"
 	"path"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -212,6 +211,8 @@ type syncMeta struct {
 	Pre bool `json:"pre,omitempty"`
 	// SameCut: the fit was taken from this file of the same cut (a switch during playback)
 	SameCut string `json:"same_cut,omitempty"`
+	// SameSpeech: the two files' speech matched at offset 0 (speechMatches)
+	SameSpeech bool `json:"same_speech,omitempty"`
 }
 
 // syncVersion is the version of the timing. A result of an older one is timed again when it is
@@ -240,6 +241,8 @@ type syncRef struct {
 	// could not be read is not tried again
 	Paired bool     `json:"paired,omitempty"`
 	Own    ownCheck `json:"-"` // the own-track check of a fit (checkOwnTrack)
+	// OwnAside: the speech stands in for the windows of an own track that found no fit to it (NoFit)
+	OwnAside bool `json:"-"`
 	// Busy: a stand-in (only the probe) while the file's reference is being read
 	Busy bool `json:"-"`
 }
@@ -614,67 +617,6 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 	return nil
 }
 
-// sameCut serves a subtitle first asked for this file with the fit it has on another file of the
-// same cut (probed length within 0.05 s, same frame rate) that was served recently: a step down or
-// sidegrade during playback then keeps the timing instead of starting from the subtitle as it is
-// (Gilmore Girls S01E07: two more minutes 2.7 s off after a step down, although the fit on the
-// first file was right). It is provisional; the file's own windows take over in the re-fits, and
-// it only stays while it fits them (copyFits); its frame rate is searched again. Equal lengths
-// alone do not make one cut (The Mentalist S02E11 and S02E15 NF are both 2551.616 s long), but one
-// subtitle names one episode: such pairs in the data lie within 30 ms of each other.
-func (y *syncer) sameCut(ctx context.Context, inner, hash string, index int, base []byte) {
-	key, err := syncKey(inner, hash, index)
-	if err != nil || y.meta(key) != nil {
-		return
-	}
-	fk := syncFileKey(hash, index)
-	var others []servedSub
-	y.mu.Lock()
-	for _, s := range y.served {
-		if s.inner == inner && s.fk != fk && time.Since(s.last) < liveServedFor {
-			others = append(others, *s)
-		}
-	}
-	y.mu.Unlock()
-	if len(others) == 0 {
-		return
-	}
-	sort.Slice(others, func(i, j int) bool { return others[i].last.After(others[j].last) })
-	p, err := y.probeFile(ctx, hash, index, torrFileURL(y.svc.cfg.TorrServerURL, hash, index))
-	if err != nil || p.Duration <= 0 || p.FPS <= 0 {
-		return
-	}
-	for _, o := range others {
-		m := y.meta(o.key)
-		if m == nil || m.stale() || !m.fits() && m.State != syncStateReplaced {
-			continue
-		}
-		op, ok := y.knownProbe(o.hash, o.index)
-		if !ok || math.Abs(op.Duration-p.Duration) > 0.05 || math.Abs(op.FPS-p.FPS) > 0.01 {
-			continue
-		}
-		a, ok := y.result(o.key, base)
-		if !ok {
-			continue
-		}
-		c := *m // a pre-timed fit stays so until played audio backs it
-		c.Live, c.LiveWindows, c.LiveSeconds, c.SameCut, c.RateWindows = true, 0, 0, o.fk, 0
-		var vtt []byte
-		if c.State != syncStateUnchanged {
-			vtt = a.VTT
-		}
-		mu := y.decideLock(key)
-		mu.Lock()
-		if y.meta(key) == nil {
-			log.Printf("subtitles: timing of %s on %s:%d: the fit on %s:%d (same cut: %.2f s, %.3f fps), provisional",
-				shortSubID(inner), hash[:8], index, o.hash[:8], o.index, p.Duration, p.FPS)
-			y.storeWatched(key, inner, hash, index, base, nil, c, vtt)
-		}
-		mu.Unlock()
-		return
-	}
-}
-
 // knownProbe is a file's probe from memory or its reference on disk, without probing it.
 func (y *syncer) knownProbe(hash string, index int) (mediaProbe, bool) {
 	fk := syncFileKey(hash, index)
@@ -726,12 +668,21 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		complete = f.complete
 		f.mu.Unlock()
 	}
+	own, ownLive := ref, live
 	ref, live = y.checkOwnTrack(hash, index, ref, live) // own-track windows only when timed to the file
+	own.Own = ref.Own
 	if f != nil {
 		y.saveLive(f) // the file has a timed subtitle: keep its live windows (and the own-track check)
 	}
-	if merged := mergeWindows(ref.Windows, live); !ref.Full &&
-		(windowSeconds(merged) < liveMinCover || (len(live) > 0 || ref.Skipped) && refLines(prepare(merged)) < liveMinLines) {
+	tooLittle := func(ref syncRef, live []refWindow) bool {
+		merged := mergeWindows(ref.Windows, live)
+		return !ref.Full && (windowSeconds(merged) < liveMinCover || (len(live) > 0 || ref.Skipped) && refLines(prepare(merged)) < liveMinLines)
+	}
+	if ref.OwnAside && tooLittle(ref, live) {
+		ref, live = own, ownLive // too little speech yet: the own track's windows, as before the check
+	}
+	ref = y.sameCutWindows(inner, hash, index, ref, live)
+	if tooLittle(ref, live) {
 		return false // too little to tell yet
 	}
 	served := y.meta(key)
@@ -740,6 +691,16 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		prev = nil // an older timing's result holds back nothing (rate, hysteresis)
 	}
 	m, vtt, ref := y.fitOne(ctx, hash, index, ref, live, base, read, prev, complete)
+	if ref.OwnAside && !m.fits() {
+		// The speech does not time it: the set-aside own track's windows may (as before the check)
+		if om, ovtt, oref := y.fitOne(ctx, hash, index, own, ownLive, base, false, prev, complete); om.fits() {
+			m, vtt, ref = om, ovtt, oref
+		}
+	}
+	provisional := !ref.Full && y.svc.cfg.LiveTiming && !complete
+	if provisional && !m.fits() && takesCopy(prev) && y.copySameCut(ctx, key, inner, hash, index, base, ref, live, liveSecs, served, prev, m) {
+		return true
+	}
 	if y.keepAccepted(key, base, prev, m, ref.Probe.Duration, complete) {
 		y.keepRates(key, prev, m)
 		logKept(inner, hash, index, m, len(live), liveSecs)
@@ -760,7 +721,6 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			return true
 		}
 	}
-	provisional := !ref.Full && y.svc.cfg.LiveTiming && !complete
 	// Timed before the file played (pre-timing): none of its audio was heard
 	pre := provisional && len(live) == 0 && !y.livePlaying(syncFileKey(hash, index))
 	if !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced)) {
@@ -828,6 +788,9 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	y.storeWatched(key, inner, hash, index, base, served, m, vtt)
 	if read || fitChanged(prev, m) {
 		logSync(inner, hash, index, m, time.Since(start))
+		if m.fits() && y.svc.cfg.LiveTiming {
+			y.offerSameCut(inner, syncFileKey(hash, index))
+		}
 	}
 	return true
 }
@@ -873,9 +836,10 @@ func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, compl
 
 // copyFits reports whether a fit taken from another file of the same cut (sameCut) fits this
 // file's own windows, the new fit's: its offsets beat chance there by the gain bar. The copy is
-// not held against them (another cut, or another episode of the same length).
+// not held against them (another cut, or another episode of the same length), unless the files'
+// speech matched (speech alone may miss the bar: The Mentalist S03E03, gain 0.12 for the right fit).
 func copyFits(prev *syncMeta, m syncMeta, base []byte, duration float64) bool {
-	if prev.SameCut == "" || len(m.Fit.windows) == 0 {
+	if prev.SameCut == "" || prev.SameSpeech || len(m.Fit.windows) == 0 {
 		return true
 	}
 	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
