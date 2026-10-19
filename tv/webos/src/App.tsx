@@ -5,7 +5,7 @@ import NetBanner from './components/NetBanner';
 import { getServer } from './lib/config';
 import { I18nContext, makeI18n } from './lib/i18n';
 import { playSting, takeIntro, whenOnScreen } from './lib/intro';
-import { profileLocale, setProfile, type Profile } from './lib/profile';
+import { getProfileId, profileLocale, setProfile, type Profile } from './lib/profile';
 import type { PlayRequest } from './lib/stream';
 import { exitApp } from './lib/webos';
 import { EntryProvider, RouterProvider, useRouter, type Entry } from './nav/router';
@@ -25,12 +25,19 @@ import TvShowsScreen from './screens/TvShowsScreen';
 
 const TABS = ['home', 'search', 'movies', 'tv', 'settings'];
 
-function Screen({ entry, onPickProfile }: { entry: Entry; onPickProfile: (p: Profile) => void }) {
+interface ScreenProps {
+  entry: Entry;
+  onPickProfile: (p: Profile) => void;
+  onProfileSaved: (p: Profile) => void;
+}
+
+function Screen({ entry, onPickProfile, onProfileSaved }: ScreenProps) {
   const r = entry.route;
   switch (r.name) {
     case 'setup': return <SetupScreen />;
     case 'profiles': return <ProfilesScreen onPick={onPickProfile} />;
     case 'addProfile': return <AddProfileScreen count={r.count} />;
+    case 'editProfile': return <AddProfileScreen count={0} edit={r.profile} onSaved={onProfileSaved} />;
     case 'home': return <HomeScreen />;
     case 'search': return <SearchScreen />;
     case 'movies': return <MoviesScreen />;
@@ -55,6 +62,13 @@ function Shell({ onLocale }: { onLocale: (p: Profile) => void }) {
     onLocale(p);
     router.reset({ name: 'home' });
   }, [router, onLocale]);
+
+  // The active profile edited: its new avatar and language show right away
+  const profileSaved = useCallback((p: Profile) => {
+    if (p.id !== getProfileId()) return;
+    setProfile(p);
+    onLocale(p);
+  }, [onLocale]);
 
   // Back on a screen: previous screen; on a tab: Home; on Home: the menu, then "Exit?"
   useEffect(() => {
@@ -91,7 +105,7 @@ function Shell({ onLocale }: { onLocale: (p: Profile) => void }) {
     <PlayerContext.Provider value={player}>
       <div className={`app ${play ? 'is-playing' : ''}`}>
         <EntryProvider key={top.key} value={top}>
-          <Screen entry={top} onPickProfile={pickProfile} />
+          <Screen entry={top} onPickProfile={pickProfile} onProfileSaved={profileSaved} />
         </EntryProvider>
       </div>
       {!play && top.route.name !== 'setup' && <NetBanner />}

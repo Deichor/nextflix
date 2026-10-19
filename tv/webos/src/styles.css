@@ -850,6 +850,7 @@ p {
 }
 
 .profile-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -913,12 +914,45 @@ p {
   margin-bottom: 2rem;
 }
 
-.profiles-settings {
+.profiles-actions {
+  display: flex;
   margin-top: 6rem;
 }
 
-.profiles-settings:focus {
+.profiles-actions .btn {
+  margin: 0 1rem;
+}
+
+.profiles-actions .btn:focus {
   transform: scale(1.06);
+}
+
+/* Manage mode: a pencil over the avatar (its box and border plus 0.1rem, so no colored edge shows) */
+.profile-edit {
+  position: absolute;
+  top: -0.1rem;
+  left: 50%;
+  width: 13.2rem;
+  height: 13.2rem;
+  margin-left: -6.95rem;
+  border: 0.35rem solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.profile-edit-icon {
+  width: 4.4rem;
+  height: 4.4rem;
+}
+
+.profile-tile:focus .profile-edit {
+  border-color: #ffffff;
+  transform: scale(1.08);
 }
 
 /* ---- Add profile ---- */
@@ -1485,6 +1519,12 @@ p {
   color: var(--muted);
 }
 
+.setting-avatar {
+  width: 3.6rem;
+  height: 3.6rem;
+  margin-right: 1.2rem;
+}
+
 .setting:focus {
   background: #ffffff;
   color: #000000;
@@ -1499,6 +1539,8 @@ p {
   font-size: 1.5rem;
   color: var(--dim);
   width: 80rem;
+  /* Space under the last line when it is scrolled in */
+  padding-bottom: 4rem;
 }
 
 .settings-info dt {

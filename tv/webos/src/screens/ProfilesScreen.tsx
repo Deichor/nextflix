@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Plus, Settings } from 'lucide-react';
+import { Pencil, Plus, Settings } from 'lucide-react';
 import Avatar from '../components/Avatar';
 import Spinner from '../components/Spinner';
 import { profiles as loadProfiles } from '../lib/catalog';
 import { useT } from '../lib/i18n';
 import { prefetchHome, prefetchProfile } from '../lib/homeQueries';
 import { MAX_PROFILES, getProfile, getProfileId, profileLocale, type Profile } from '../lib/profile';
-import { useFocusRestore, useRouter } from '../nav/router';
+import { useEntryState, useFocusRestore, useRouter } from '../nav/router';
 import { focusById, focusDefault } from '../nav/spatial';
 
 interface ProfilesScreenProps {
@@ -20,6 +20,8 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
   const [list, setList] = useState<Profile[] | null>(null);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
+  // Kept on the entry, so it is still on when the editor comes back
+  const [manage, setManage] = useEntryState('manage', false);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,13 +66,26 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
   return (
     <div className="screen profiles-screen">
       <div className="brand brand-corner">NEXTFLIX</div>
-      <h1 className="profiles-title">{t('profiles.whoIsWatching')}</h1>
+      <h1 className="profiles-title">{t(manage ? 'profiles.manageProfiles' : 'profiles.whoIsWatching')}</h1>
       {list === null && <Spinner />}
       {!!list && (list.length > 0 || canAdd) && (
         <div className="profiles-list" data-nav-group="profiles">
           {list.map(p => (
-            <button key={p.id} type="button" className="profile-tile" data-nav data-nav-id={`profile-${p.id}`} onFocus={() => prefetchProfile(p)} onClick={() => onPick(p)}>
+            <button
+              key={p.id}
+              type="button"
+              className="profile-tile"
+              data-nav
+              data-nav-id={`profile-${p.id}`}
+              onFocus={() => { if (!manage) prefetchProfile(p); }}
+              onClick={() => (manage ? router.push({ name: 'editProfile', profile: p }) : onPick(p))}
+            >
               <Avatar profile={p} className="profile-avatar" />
+              {manage && (
+                <div className="profile-edit">
+                  <Pencil className="profile-edit-icon" />
+                </div>
+              )}
               <span className="profile-name">{p.name}</span>
             </button>
           ))}
@@ -98,9 +113,16 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
           </button>
         </div>
       )}
-      <button type="button" className="btn btn-ghost profiles-settings" data-nav data-nav-id="profiles-server" onClick={() => router.push({ name: 'setup' })}>
-        <Settings className="btn-icon" /> {t('settings.changeServer')}
-      </button>
+      <div className="profiles-actions">
+        {!!list && list.length > 0 && (
+          <button type="button" className="btn btn-ghost" data-nav data-nav-id="profiles-manage" onClick={() => setManage(!manage)}>
+            {manage ? t('common.done') : <><Pencil className="btn-icon" /> {t('profiles.manageProfiles')}</>}
+          </button>
+        )}
+        <button type="button" className="btn btn-ghost" data-nav data-nav-id="profiles-server" onClick={() => router.push({ name: 'setup' })}>
+          <Settings className="btn-icon" /> {t('settings.changeServer')}
+        </button>
+      </div>
     </div>
   );
 }

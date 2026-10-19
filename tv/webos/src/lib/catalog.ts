@@ -97,6 +97,10 @@ export function createProfile(input: ProfileInput): Promise<Profile> {
   return getJson<Profile>('/api/profiles', { method: 'POST', body: input });
 }
 
+export function updateProfile(id: number, input: Partial<ProfileInput>): Promise<Profile> {
+  return getJson<Profile>(`/api/profiles/${id}`, { method: 'PUT', body: input });
+}
+
 export interface HomeFeeds {
   trendingMovies: Title[];
   trendingWeekMovies: Title[];

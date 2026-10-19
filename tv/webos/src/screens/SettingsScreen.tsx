@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
+import Avatar from '../components/Avatar';
 import SideNav from '../components/SideNav';
 import { getServer } from '../lib/config';
 import { useT, type MessageKey } from '../lib/i18n';
 import { readIntroPrefs, writeIntroPrefs, type IntroPrefs } from '../lib/intro';
-import { getProfileId } from '../lib/profile';
+import { getProfile } from '../lib/profile';
 import {
   DEFAULT_SUB_STYLE, SUB_STYLE_OPTIONS, cycleSubtitleStyle, subStyleValueLabel, useSubtitleStyle, writeSubtitleStyle,
 } from '../lib/subtitleStyle';
@@ -18,7 +19,8 @@ const HDR_LABEL: Record<HdrMode, MessageKey> = { auto: 'settings.hdrAuto', on: '
 export default function SettingsScreen() {
   const t = useT();
   const router = useRouter();
-  const pid = getProfileId();
+  const profile = getProfile();
+  const pid = profile ? profile.id : null;
   const [hdr, setHdr] = useState(getHdrMode());
   const [autoplay, setAutoplay] = useState(readPlayerPrefs(pid).autoplayNext !== false);
   const [intro, setIntro] = useState(readIntroPrefs());
@@ -28,7 +30,7 @@ export default function SettingsScreen() {
   const [subFocus, setSubFocus] = useState(false);
   const caps = playbackCaps();
   useEffect(() => { deviceInfo().then(setDevice); }, []);
-  useFocusRestore(true, 'settings-server');
+  useFocusRestore(true, profile ? 'settings-profile' : 'settings-server');
 
   const cycleHdr = () => {
     const next = HDR_MODES[(HDR_MODES.indexOf(hdr) + 1) % HDR_MODES.length];
@@ -51,6 +53,13 @@ export default function SettingsScreen() {
         <div data-scroll-content>
           <h1 className="page-title">{t('settings.title')}</h1>
           <div className="settings-list" data-nav-group="settings" onFocus={e => setSubFocus((e.target as HTMLElement).hasAttribute('data-sub-style'))}>
+            {!!profile && (
+              <button type="button" className="setting" data-nav data-nav-id="settings-profile" onClick={() => router.push({ name: 'editProfile', profile })}>
+                <span className="setting-name">{t('settings.profile')}</span>
+                <Avatar profile={profile} className="setting-avatar" />
+                <span className="setting-value">{profile.name}</span>
+              </button>
+            )}
             <button type="button" className="setting" data-nav data-nav-id="settings-server" onClick={() => router.push({ name: 'setup' })}>
               <span className="setting-name">{t('settings.server')}</span>
               <span className="setting-value">{getServer()}</span>

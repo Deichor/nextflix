@@ -101,6 +101,12 @@ function scrollAxis(el: HTMLElement, container: HTMLElement, axis: 'x' | 'y', sm
   if (mode === 'start') target = pos - pad;
   else if (rel < pad) target = pos - pad;
   else if (rel + size > view - pad) target = off + Math.min(rel + size - view + pad, rel - pad);
+  // The first and last focusable elements also bring in the text above / below them (as far as they stay in view)
+  if (mode === 'edge' && !x) {
+    const navs = content.querySelectorAll('[data-nav]');
+    if (navs.length && navs[0].contains(el)) target = Math.min(target, pos + size - view + pad);
+    if (navs.length && navs[navs.length - 1].contains(el)) target = Math.max(target, pos - pad);
+  }
   // Content extent as native scrolling had it: the content box or its last child's far edge
   const last = content.lastElementChild as HTMLElement | null;
   let extent = x ? content.offsetWidth : content.offsetHeight;

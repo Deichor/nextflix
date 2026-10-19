@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { MediaType } from '../lib/catalog';
+import type { Profile } from '../lib/profile';
 import { focusById, focusDefault, onFocusChange } from './spatial';
 
 export type Tab = 'home' | 'search' | 'movies' | 'tv' | 'settings';
@@ -8,6 +9,7 @@ export type Route =
   | { name: 'setup' }
   | { name: 'profiles' }
   | { name: 'addProfile'; count: number }
+  | { name: 'editProfile'; profile: Profile }
   | { name: 'surprise' }
   | { name: Tab }
   | { name: 'detail'; id: number; type: MediaType; autoplay?: boolean };

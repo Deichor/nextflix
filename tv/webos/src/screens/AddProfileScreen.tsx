@@ -2,25 +2,33 @@ import { useRef, useState } from 'react';
 import { Check } from 'lucide-react';
 import Avatar, { AVATAR_KEYS, PROFILE_COLORS } from '../components/Avatar';
 import Keyboard from '../components/Keyboard';
-import { createProfile } from '../lib/catalog';
+import { createProfile, updateProfile } from '../lib/catalog';
 import { useI18n, type Locale } from '../lib/i18n';
-import { MAX_PROFILE_NAME } from '../lib/profile';
+import { MAX_PROFILE_NAME, profileLocale, type Profile } from '../lib/profile';
 import { useFocusRestore, useRouter } from '../nav/router';
 
 const LANGUAGES: Locale[] = ['en', 'tr'];
 
-// Netflix "Add Profile": name on the on-screen keyboard, avatar, color and language
-export default function AddProfileScreen({ count }: { count: number }) {
+interface AddProfileScreenProps {
+  count: number;
+  /** Edit this profile instead of adding one */
+  edit?: Profile;
+  onSaved?: (p: Profile) => void;
+}
+
+// Netflix "Add Profile" / "Edit Profile": name on the on-screen keyboard, avatar, color and language
+export default function AddProfileScreen({ count, edit, onSaved }: AddProfileScreenProps) {
   const { t, locale } = useI18n();
   const router = useRouter();
-  const [name, setName] = useState('');
-  const [avatar, setAvatar] = useState(AVATAR_KEYS[count % AVATAR_KEYS.length]);
-  const [color, setColor] = useState(PROFILE_COLORS[count % PROFILE_COLORS.length]);
-  const [language, setLanguage] = useState<Locale>(locale);
+  const [name, setName] = useState(edit ? edit.name : '');
+  const [avatar, setAvatar] = useState(edit ? edit.avatar : AVATAR_KEYS[count % AVATAR_KEYS.length]);
+  const [color, setColor] = useState(edit ? edit.color : PROFILE_COLORS[count % PROFILE_COLORS.length]);
+  const [language, setLanguage] = useState<Locale>(edit ? profileLocale(edit) : locale);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const savingRef = useRef(false);
-  useFocusRestore(true, 'kbd-a');
+  // Editing usually means a new avatar: start on the current one
+  useFocusRestore(true, edit ? `avatar-${edit.avatar}` : 'kbd-a');
 
   const trimmed = name.trim();
 
@@ -30,10 +38,12 @@ export default function AddProfileScreen({ count }: { count: number }) {
     setSaving(true);
     setError('');
     try {
-      const p = await createProfile({ name: trimmed.slice(0, MAX_PROFILE_NAME), avatar, color, language });
+      const input = { name: trimmed.slice(0, MAX_PROFILE_NAME), avatar, color, language };
+      const p = edit ? await updateProfile(edit.id, input) : await createProfile(input);
+      if (onSaved) onSaved(p);
       // The profiles screen below focuses the new tile when it comes back
       const below = router.stack[router.stack.length - 2];
-      if (below) below.focusId = `profile-${p.id}`;
+      if (below && !edit) below.focusId = `profile-${p.id}`;
       if (!router.back()) router.reset({ name: 'profiles' });
     } catch (e) {
       setError(e instanceof Error && e.message ? e.message : t('profiles.couldNotSave'));
@@ -45,8 +55,8 @@ export default function AddProfileScreen({ count }: { count: number }) {
   return (
     <div className="screen add-profile-screen">
       <div className="brand brand-corner">NEXTFLIX</div>
-      <h1 className="add-profile-title">{t('profiles.addProfile')}</h1>
-      <p className="add-profile-hint">{t('profiles.addProfileHint')}</p>
+      <h1 className="add-profile-title">{t(edit ? 'profiles.editProfile' : 'profiles.addProfile')}</h1>
+      <p className="add-profile-hint">{t(edit ? 'profiles.editProfileHint' : 'profiles.addProfileHint')}</p>
       <div className="add-profile-body">
         <div className="add-profile-left">
           <div className="add-profile-name">
