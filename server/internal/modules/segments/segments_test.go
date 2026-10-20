@@ -79,10 +79,10 @@ func TestCommunityFallbackAndShare(t *testing.T) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/the"):
 			theCalls.Add(1)
-			if r.URL.Query().Get("duration_ms") != "2900000" {
-				t.Errorf("duration_ms = %q", r.URL.Query().Get("duration_ms"))
+			if q := r.URL.Query(); q.Get("tmdb_id") != "1396" || q.Get("duration_ms") != "2900000" {
+				t.Errorf("query = %q", r.URL.RawQuery)
 			}
-			w.Write([]byte(`{"tmdb_id":1396,"type":"tv","season":1,"episode":2,"intro":[{"start_ms":314360,"end_ms":330461}]}`))
+			w.Write([]byte(`{"tvdb_id":81189,"type":"tv","season":1,"episode":2,"intro":[{"start_ms":314360,"end_ms":330461}]}`))
 		default:
 			introCalls.Add(1)
 			w.Write([]byte(`{"intro":{"start_ms":314500,"end_ms":331000},"outro":{"start_ms":2843000,"end_ms":2901000}}`))
@@ -90,6 +90,9 @@ func TestCommunityFallbackAndShare(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := NewService(nil, Config{IMDb: func(int) (string, error) { return "tt0903747", nil }})
+	if s.theIntroDBURL != "https://api.theintrodb.org/v4/media" {
+		t.Fatalf("TheIntroDB URL = %q, v2/v3 are deprecated", s.theIntroDBURL)
+	}
 	s.theIntroDBURL, s.introDBURL = srv.URL+"/the", srv.URL+"/intro"
 
 	r := s.Get(context.Background(), Query{TmdbID: 1396, Season: 1, Episode: 2, Duration: 2900})

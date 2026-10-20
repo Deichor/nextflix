@@ -11,11 +11,12 @@ import (
 )
 
 // Community timestamp databases (free reads, no key):
-//   - TheIntroDB (theintrodb.org): keyed by TMDB id, ?duration_ms= picks the release version.
+//   - TheIntroDB (theintrodb.org): asked by TMDB id (v4 resolves it and the TMDB episode numbers to
+//     TVDB server-side), ?duration_ms= picks the release version.
 //     500 reads a day per IP without a key.
 //   - IntroDB (introdb.app): keyed by the show's IMDb id.
 const (
-	theIntroDBURL = "https://api.theintrodb.org/v3/media"
+	theIntroDBURL = "https://api.theintrodb.org/v4/media"
 	introDBURL    = "https://api.introdb.app/segments"
 )
 

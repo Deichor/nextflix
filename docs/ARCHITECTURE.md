@@ -1809,7 +1809,7 @@ tells both players where an episode's intro and end credits are. Sources, first 
    (`fileChapters` in `main.go`). Only whole names count (`Intro`, `Opening`, `OP - <song>`, `Opening Credits`,
    `Credits`, `End Credits`, `Ending`, `ED`, `Outro`, a few Turkish / German / French / Spanish / Italian ones);
    generic chapters (`Chapter 3`, `Opening Scene`) are ignored.
-2. Community timestamps: [TheIntroDB](https://theintrodb.org/docs) (`/v3/media?tmdb_id=&season=&episode=&duration_ms=`,
+2. Community timestamps: [TheIntroDB](https://theintrodb.org/docs) (`/v4/media?tmdb_id=&season=&episode=&duration_ms=`,
    TMDB id of the show, the file length picks the release version; 500 reads a day per IP without a key), then
    [IntroDB](https://introdb.app/docs) (`/segments?imdb_id=&season=&episode=`, IMDb id via TMDB external ids) for
    what the first one lacks. The answer is stored per episode and file length (±5 s) in `skip_segments`: found 30
