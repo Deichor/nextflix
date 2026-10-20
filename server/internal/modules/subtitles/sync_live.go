@@ -87,7 +87,7 @@ type liveFile struct {
 	tapAt    float64
 	viewer   float64
 	viewerAt time.Time
-	wake    chan struct{} // the re-fit loop's wait is computed again
+	wake     chan struct{} // the re-fit loop's wait is computed again
 }
 
 // liveWin is a finished window: its speech frames (own-track windows: frames a cue shows), one
