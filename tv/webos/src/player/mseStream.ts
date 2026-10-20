@@ -498,8 +498,9 @@ export class MseStream {
       this.alignDone = true;
       const start = v.buffered.start(0);
       if (this.split) {
-        // Split streams start on the keyframe before the asked position: play from that position
-        const at = this.startAt > start && this.startAt < v.buffered.end(v.buffered.length - 1) ? this.startAt : start;
+        // Split streams start on the keyframe before the asked position: play from that position, also when
+        // the first appends do not reach it yet (the element waits there for the data)
+        const at = this.startAt > start ? this.startAt : start;
         if (Math.abs(v.currentTime - at) > 0.05) {
           markSeek('align-split');
           v.currentTime = at;
