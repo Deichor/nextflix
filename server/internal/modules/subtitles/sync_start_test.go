@@ -474,15 +474,212 @@ func TestCutStartReadGoesOnNextTime(t *testing.T) {
 	if len(*starts) != 1 || svc.sync.recentlyFailed(key) {
 		t.Fatalf("cut: read at %v, failed %v", *starts, svc.sync.recentlyFailed(key))
 	}
+	plan := savedRef(t, svc).StartAt
+	if len(plan) != 3 || (*starts)[0] != plan[0] {
+		t.Fatalf("plan %v, read at %v", plan, *starts)
+	}
+	// The next pre-timing is another subtitle's, whose lines would place them 40 s later: the
+	// places of the first pass hold, so no more than 3 windows are read in all
 	room.set(4 << 20)
 	svc.sync.read = truth
+	other := cacheProviderSub(t, svc, "1|cut2|2|8|1", subtitleFor(file, 1, func(float64) float64 { return -40 }))
+	otherKey, _ := syncKey(other, syncHash, 1)
+	svc.PreTime(ctx, wrapSyncID(other, syncHash, 1))
+	waitFlight(t, svc, "sync|"+otherKey)
+	if !slices.Equal(*starts, plan) {
+		t.Fatalf("next time: read at %v, plan %v", *starts, plan)
+	}
+	if r := savedRef(t, svc); !r.Start || len(r.Windows) != 3 {
+		t.Fatalf("reference: start %v, %d windows", r.Start, len(r.Windows))
+	}
+}
+
+// savedRef is the file's saved reference.
+func savedRef(t *testing.T, svc *Service) syncRef {
+	t.Helper()
+	fk := syncFileKey(syncHash, 1)
+	st, release := svc.sync.refState(fk)
+	defer release()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !svc.sync.loadRef(fk, st) {
+		t.Fatal("no reference")
+	}
+	return *st.ref
+}
+
+// Start reads that all fail (no peers, timeouts) are tried again by the next pre-timings, up to
+// syncStartTries passes; then the file is left to its played audio.
+func TestFailedStartReadsAreTriedAgain(t *testing.T) {
+	file := bigStartFile(107)
+	svc, _, _ := newBigPreTest(t, file)
+	reads := 0
+	svc.sync.read = func(context.Context, string, mediaProbe, float64, float64) (refWindow, error) {
+		reads++
+		return refWindow{}, errors.New("no peers")
+	}
+	inner := cacheProviderSub(t, svc, "1|fail|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	for pass := 1; pass <= syncStartTries+1; pass++ {
+		svc.PreTime(context.Background(), id)
+		waitFlight(t, svc, "sync|"+key)
+		want := 3 * min(pass, syncStartTries)
+		if r := savedRef(t, svc); reads != want || r.Start != (pass >= syncStartTries) {
+			t.Fatalf("pass %d: %d reads (want %d), start %v", pass, reads, want, r.Start)
+		}
+	}
+}
+
+// A running start read ends as soon as the file plays (it would read up to a window's bytes
+// beside the new stream), and the file is left to its tap.
+func TestRunningStartReadEndsWhenTheFilePlays(t *testing.T) {
+	file := bigStartFile(109)
+	svc, _, _ := newBigPreTest(t, file)
+	svc.sync.playPoll = 10 * time.Millisecond
+	reading := make(chan struct{}, 4)
+	ended := make(chan time.Duration, 4)
+	svc.sync.read = func(ctx context.Context, _ string, _ mediaProbe, _, _ float64) (refWindow, error) {
+		reading <- struct{}{}
+		began := time.Now()
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+		ended <- time.Since(began)
+		return refWindow{}, errors.New("cut")
+	}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|run|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	svc.PreTime(ctx, id)
+	<-reading
+	svc.FileFor(ctx, id, 0)
+	if d := <-ended; d > time.Second {
+		t.Fatalf("the read went on %s after the file played", d)
+	}
+	waitFlight(t, svc, "sync|"+key)
+	if len(reading) != 0 {
+		t.Fatal("another window was read")
+	}
+	if r := savedRef(t, svc); !r.Start || len(r.Windows) != 0 {
+		t.Fatalf("reference: start %v, %d windows", r.Start, len(r.Windows))
+	}
+}
+
+// A subtitle whose lines are too sparse to place the start windows leaves them to the next
+// pre-timing, whose subtitle places them.
+func TestSparseSubtitleLeavesTheStartToTheNext(t *testing.T) {
+	file := bigStartFile(113)
+	svc, _, starts := newBigPreTest(t, file)
+	ctx := context.Background()
+	var sparse []span
+	for s := 100.0; s < episode-100; s += 30 {
+		sparse = append(sparse, span{s, s + 2})
+	}
+	first := cacheProviderSub(t, svc, "1|sparse|2|8|1", sparse)
+	key, _ := syncKey(first, syncHash, 1)
+	svc.PreTime(ctx, wrapSyncID(first, syncHash, 1))
+	waitFlight(t, svc, "sync|"+key)
+	if r := savedRef(t, svc); len(*starts) != 0 || r.Start {
+		t.Fatalf("sparse: read at %v, start %v", *starts, r.Start)
+	}
+	next := cacheProviderSub(t, svc, "1|dense|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	key, _ = syncKey(next, syncHash, 1)
+	svc.PreTime(ctx, wrapSyncID(next, syncHash, 1))
+	waitFlight(t, svc, "sync|"+key)
+	if r := savedRef(t, svc); len(*starts) != 3 || !r.Start {
+		t.Fatalf("dense: read at %v, start %v", *starts, r.Start)
+	}
+}
+
+// A file that the byte budget allows no start windows is done at once (nothing to read).
+func TestNoStartWindowsForAVeryBigFile(t *testing.T) {
+	file := bigStartFile(127)
+	svc, _, starts := newBigPreTest(t, file)
+	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, Bitrate: 8 << 20}, nil
+	}
+	inner := cacheProviderSub(t, svc, "1|huge|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	svc.PreTime(context.Background(), wrapSyncID(inner, syncHash, 1))
+	waitFlight(t, svc, "sync|"+key)
+	if r := savedRef(t, svc); len(*starts) != 0 || !r.Start {
+		t.Fatalf("read at %v, start %v", *starts, r.Start)
+	}
+}
+
+// The once-per-file early own-track read at the play position still runs for a file that has
+// start windows (a viewing resumed mid-episode needs it there).
+func TestEarlyOwnTrackReadBesideStartWindows(t *testing.T) {
+	file := bigStartFile(131)
+	svc, _, starts := newBigPreTest(t, file)
+	y := svc.sync
+	var mu sync.Mutex
+	var early []float64
+	y.readSubs = func(_ context.Context, _ string, _ mediaProbe, start, _ float64) (refWindow, error) {
+		mu.Lock()
+		early = append(early, start)
+		mu.Unlock()
+		return truthWindows(file, []float64{start}, 0, 0, 1)[0], nil
+	}
+	inner := cacheProviderSub(t, svc, "1|early|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	svc.PreTime(context.Background(), wrapSyncID(inner, syncHash, 1))
+	waitFlight(t, svc, "sync|"+key)
+	if len(*starts) != 3 {
+		t.Fatalf("start read at %v", *starts)
+	}
+	grown := make(chan struct{}, 4)
+	y.onGrow = func(*liveFile) { grown <- struct{}{} }
+	tap := y.openSpeech(syncHash, 1, 1500)
+	defer tap.Close()
+	select {
+	case <-grown:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no early read")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(early, []float64{1500, 1560}) || len(savedRef(t, svc).Windows) != 5 {
+		t.Fatalf("early read at %v, %d windows", early, len(savedRef(t, svc).Windows))
+	}
+}
+
+// A viewing resumed mid-episode is not timed by the start windows: 3 minutes of them would
+// outweigh its first played window and serve the start's offset where the subtitle has another
+// one. The played audio there times it, as without them.
+func TestResumedViewingIsNotTimedByTheStart(t *testing.T) {
+	file := bigStartFile(137)
+	svc, _, _ := newBigPreTest(t, file)
+	ctx := context.Background()
+	shift := func(u float64) float64 {
+		if u < 1000 {
+			return 0.8
+		}
+		return 3.5 // an act break cut differently
+	}
+	inner := cacheProviderSub(t, svc, "1|resume|2|8|1", subtitleFor(file, 1, shift))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
 	svc.PreTime(ctx, id)
 	waitFlight(t, svc, "sync|"+key)
-	if len(*starts) != 3 || (*starts)[1] == (*starts)[0] || (*starts)[2] == (*starts)[0] {
-		t.Fatalf("next time: read at %v", *starts)
+	if m := svc.sync.meta(key); m == nil || !m.Pre || math.Abs(m.Fit.mapTime(200)-200.8) > 0.15 {
+		t.Fatalf("pre-timed: %v", m != nil && m.Pre)
 	}
-	if m := svc.sync.meta(key); m == nil || !m.fits() || !m.Pre {
-		t.Fatalf("not pre-timed: %+v", m)
+	svc.FileFor(ctx, id, 1500)
+	f := svc.sync.liveFile(syncHash, 1)
+	injectLive(f, file, []int{25})
+	svc.sync.refitFile(f)
+	if a, _ := svc.FileFor(ctx, id, 1510); a.Sync != syncStatePending {
+		t.Fatalf("one window at 1500 s: %q, %s", a.Sync, segText(svc.sync.meta(key).Fit))
+	}
+	injectLive(f, file, []int{26, 27})
+	svc.sync.refitFile(f)
+	m := svc.sync.meta(key)
+	if a, _ := svc.FileFor(ctx, id, 1620); a.Sync != syncStateLive || m.Pre || math.Abs(m.Fit.mapTime(1500)-1503.5) > 0.15 {
+		t.Fatalf("three windows at 1500 s: %q, pre %v, %s", a.Sync, m.Pre, segText(m.Fit))
 	}
 }
 
