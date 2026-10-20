@@ -17,10 +17,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** What the controller needs from the app (a fake in tests). */
 internal interface SubtitleBackend {
@@ -87,9 +89,9 @@ private class CoreBackend(private val core: Core) : SubtitleBackend {
  *   panel) and keeps it per file (SubtitleTimingStore).
  *
  * The player calls [start] once the playing file (hash / index) is known (every fresh open of a source),
- * [onPosition] about once a second (with whether it plays), [restart] when it splices another file in seamlessly
- * (the old subtitle stays until the new list picks one), and [stop] when it closes. [events] asks for the subalt
- * lookup and announces late subtitles; [log] receives the `subs` / `subs-none` / `subdelay` playback log events.
+ * [onPosition] about once a second (with whether it plays), [onSeek] on the viewer's seeks, [restart] when it splices
+ * another file in seamlessly (the old subtitle stays until the new list picks one), and [stop] when it closes.
+ * [events] asks for the subalt lookup and announces late subtitles; [log] receives the `subs` / `subs-none` / `subdelay` playback log events.
  * All methods are meant for the main thread.
  */
 class SubtitleController internal constructor(
@@ -116,6 +118,8 @@ class SubtitleController internal constructor(
     private var audioLang: String? = null
     private var position = 0.0
     private var playing = true
+    /** Counts the viewer's seeks; a cue poll waiting for its next turn asks at once on a new one. */
+    private val seeks = MutableStateFlow(0)
 
     // Everything of the playing file: list, retries, late checks, cue polling
     private var session: Job? = null
@@ -205,6 +209,12 @@ class SubtitleController internal constructor(
         if (playing != null) this.playing = playing
     }
 
+    /** The viewer jumped to [seconds]: cues that are not final yet are asked for there at once. */
+    fun onSeek(seconds: Double) {
+        onPosition(seconds)
+        seeks.value++
+    }
+
     /** The audio track changed (the default pick may change). */
     fun onAudioLanguage(lang: String?) {
         if (Languages.norm(lang) == Languages.norm(audioLang)) return
@@ -220,9 +230,9 @@ class SubtitleController internal constructor(
      * The next episode plays [query]'s file: its list is asked and the subtitle the open would pick there (the
      * playing audio's language taken for it) is timed by the server before it opens (webOS player/pretime.ts).
      */
-    fun pretime(query: SubtitleQuery): Job = root.launch {
+    suspend fun pretime(query: SubtitleQuery) {
         val items = backend.list(query, refresh = false)
-        val id = SubtitleRules.pick(items, profileLanguage(query), backend.choice(), audioLang) ?: return@launch
+        val id = SubtitleRules.pick(items, profileLanguage(query), backend.choice(), audioLang) ?: return
         backend.pretime(id)
     }
 
@@ -320,7 +330,13 @@ class SubtitleController internal constructor(
         val id = SubtitleRules.pick(items, profileLanguage(q), pref, audioLang)
         val why = if (picked) SubsLog.Why.Auto else SubsLog.Why.Open
         picked = true
-        if (if (rep) id != _state.value.selectedId else id != null) apply(id, why)
+        if (rep && id != null && id == _state.value.selectedId) {
+            // The same subtitle again (the file after the background): its cues stay and are polled again
+            cueJob?.cancel()
+            cueJob = launchInSession { loadCues(id, SubsLog.Why.Auto) }
+        } else if (if (rep) id != _state.value.selectedId else id != null) {
+            apply(id, why)
+        }
         if (id == null && why == SubsLog.Why.Open) {
             noteNone("open", buildMap {
                 if (pref == SubtitleChoice.Off) put("pref", "off")
@@ -391,6 +407,7 @@ class SubtitleController internal constructor(
         // Untimed answers are asked for sooner in the first minutes after it was put on
         val shownAt = clock()
         while (true) {
+            val seen = seeks.value
             val f = backend.cues(id, position)
             if (_state.value.selectedId != id) return
             when (SubtitleRules.cueAnswer(f.cues.size, f.partial, loads)) {
@@ -437,7 +454,8 @@ class SubtitleController internal constructor(
                 )
             }
             val wait = SubtitleRules.pollMs(f.partial, f.sync, f.translating, clock() - shownAt) ?: return
-            delay(wait)
+            // A seek asks at once (also one made while this answer was on its way)
+            withTimeoutOrNull(wait) { seeks.first { it != seen } }
             // Timing that may still change: asked again once the viewer watches
             if (!f.partial) while (!playing) delay(SubtitleRepository.PROVISIONAL_CUES_POLL_MS)
         }
