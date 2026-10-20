@@ -1382,15 +1382,19 @@ that change at splits), simplified:
   Havens S01E02 (WEB-DL subtitle on the WEB-DL file, one true offset): the played audio's speech starts 0.23 s after
   the lines of the file's own track, a step the 0.4 s rule forbids, so one live window went +11 to +14 s to get from
   one to the other and minutes of cues were served 10-14 s off. With windows of both kinds (own track and speech) the
-  speech lag is fitted as well (0 to 0.4 s in 0.1 s steps), so they agree. That lag is the own track's style, not
+  speech lag is fitted as well (0 to 0.4 s in 0.1 s steps; the own track's windows are taken that much later, onto
+  the speech), so they agree. That lag is the own track's style, not
   the detector's: on 23 audio windows of 9 files (read like the window reads, against their own tracks; stereo
   downmixes and centre channels) the detected onsets lie at the acoustic ones (the first frame 8 dB above the quiet
   before it) within 0.02 s, while the tracks' lines lead the speech by +0.03 to +0.12 s on most files and +0.35 s on
   Gilmore Girls MONOLITH and The Mentalist S02E09. So speech alone times lines to the speech; a band-pass
   (300-3400 Hz) and onset backtracking did not help (mean |lag| 0.14 s either way), nor did a constant correction
-  (validated leaving each file out: 0.16 s), so neither is used. The own track's style comes in through the fitted
-  lag wherever own-track windows exist: read windows, or the 2 early windows of a file above the byte budget (see
-  `readEarly`; Gilmore MONOLITH replayed: 0.53 s late from the audio only, 0.12 s with 2 own windows). A change is
+  (validated leaving each file out: 0.16 s), so neither is used. The own track's style is not served: subtitles are
+  timed to the speech (the ASR truth of `scripts/subtitle-truth`). The Mentalist S03E09 (NF HHWEB) starts its lines
+  0.53 s before their speech (by stretch 0.45 to 0.87 s), and while its lines set the timeline (the lag moved the
+  speech onto them, at most 0.4 s) the Turkish subtitle was served 0.45-0.87 s early for most of the episode, up to
+  1.07 s at 1416-1988 s. Own-track windows now go onto the speech: by the offsets of the own-track check (below) and
+  by the fitted lag (Gilmore MONOLITH: the subtitle 0.4 s later than its own track, where the speech is). A change is
   placed in the subtitle pause that fits the windows around it best (the longest among equals); windows next to it
   that prefer their side by fewer than 2 matched lines are searched too (The Mentalist S03E02: two minutes before an ad
   break leaned either way by under a line, and the change went 110 s early into another long pause, cues 1.8 s late
@@ -1399,7 +1403,9 @@ that change at splits), simplified:
   drift and matches a few more lines with more, smaller changes (S03E02's Turkish subtitle, made for the file's rate,
   was served at 24/23.976 from 6 read and 4 played windows, where the file's rate had peaked at a chance offset: a
   sawtooth of −0.2 to +0.5 s and two stretches 2 s late). Up to 2 rounds
-  add windows between neighbours with different offsets more than 150 s apart (12 windows at most). A result fits
+  add windows between neighbours with different offsets more than 150 s apart (12 windows at most; a start the
+  reference already has a window at is not read again, and a stretch counts once: two timings of S03E09 read the
+  window at 312.5 s twice and every fit counted its lines twice). A result fits
   when its score beats chance (the mean over all offsets) by 0.15 and the best offset away from the chosen ones by
   0.08 (matched lines per reference line), and the timed subtitle ends before the video does (+60 s) and covers 40 %
   of it.
@@ -1450,7 +1456,9 @@ that change at splits), simplified:
   every 5 s (its alternatives, up to 3 at every frame rate, are fitted at most every 15 s of those; what is served
   stays meanwhile), and the viewing's first request re-fits at once when the file was heard before: the TV's split stream
   hears ~15× real time at first (server log: 153 s ahead after 11 s), so the 30 s / 15 s steps, not the audio, set
-  when the first fit came (`sync_first_eval_test.go`, below). A decide costs 21 ms (median, p95 35 ms; with read
+  when the first fit came (`sync_first_eval_test.go`, below). The same 10 s / 5 s steps hold while a play stream
+  hears less than 60 s ahead of the player's last position (within 2 minutes; a muxed 4K stream plays at its pace):
+  Westworld S01E01 took a mid-file offset change about 48 s late. A decide costs 21 ms (median, p95 35 ms; with read
   windows 39 / 137 ms) on the snapshot's starts. The live windows of a file with a timed
   subtitle are kept on disk (`/app/data/subtitles/synclive`, one bit per frame). Once 85 % of the file's windows
   were heard live timing ends for the file (no more tap) and the result is final. Fits with live windows are held to
@@ -1503,18 +1511,30 @@ that change at splits), simplified:
   -0.5..+0.6 s (the lines lead the speech by 0 to 0.4 s) makes it timed to the file, offsets elsewhere another
   cut's, and so does, from 8 stretches on, a track that does not fit and whose line starts lie no nearer to speech
   onsets (speech after a pause) than by chance (within 0.2 s of one for under 30 % of those with one within 1 s; a
-  fifth by chance). A timed track is tight with one offset and 55 % of its line starts on an onset. Until a PGS
+  fifth by chance). A fit that missed only the peak bar is timed too when its one offset lies within that range,
+  beats chance by the gain bar and 55 % of the line starts lie on an onset there (Westworld S01E06, DEMAND: its PGS
+  track at +0.05..+0.09 s with 71-81 %, peak 0.10-0.11 under the 0.12 of fewer than 8 stretches, while the speech
+  alone, gain 0.10-0.14, fitted nothing: the viewing was served untimed, 1 s late; now from 6 stretches, its
+  windows set aside from 5). A timed track is tight with one offset and 55 % of its line starts on an onset. A
+  timed track's windows time subtitles moved by the offsets found (`onSpeech`; a loose track's by its own offset
+  per stretch, the median of the stretches within 150 s, within 0.4 s of the check's: S03E09's lead changes by act),
+  so a fit lands on the speech whatever the check says later (S03E09's track went timed at +0.49 s, another cut at
+  38 stretches with +0.87 s after 1897 s). Until a PGS
   track is timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and
   the cue tap and early reads stop for the file (another cut only). A text track is used while the check cannot
   tell (as before the check: music, noise or speech the server cannot read; such a file was never timed and read
   again by every request), with no line refinement, unless its lines found no fit although the speech had the lines
   for one (`NoFit`; The Mentalist S03E03 KONTRAST WEBRip: 6 stretches, its lines 0 to 4 s off by stretch, 35 % on
   an onset at best, so every Turkish subtitle came out poor against it, peak 0.0): then the speech stands in as for
-  another cut, and the track's windows only time a subtitle the speech does not fit (or while there is too little
-  speech); its cue tap goes on, so more stretches may still decide. Checked with every re-fit (one decide hook, done
-  again from all stretches when they grew by a third; not from a stand-in while the reference is read) and kept per
-  file with its
-  live windows (`synclive` `check`: state, tight, stretches), so a restart goes on from it. Each change re-fits the
+  another cut, and the track's windows (a PGS track's too) only time a subtitle or an alternative tried in its
+  place that the speech does not fit (or while there is too little speech), moved by the track's best offset when
+  it lies within the range and more line starts than by chance are on an onset there (S03E10, the same NF release
+  as S03E09, was served from its track as it is in this fallback); its cue tap goes on, so more stretches may still
+  decide. Checked with every re-fit (one
+  decide hook, done again from all stretches when they grew by a third; not from a stand-in while the reference is
+  read) and kept per file with its live windows (`synclive` `check`: state, tight, stretches, offsets, `NoFit`), so
+  a restart or a live reference dropped from memory goes on from it (a `NoFit` was not kept, and the stand-in of a
+  reference being read trusted the track again). Each change re-fits the
   subtitles with other windows, so a decision stands against a check that does not decide and against another
   decision from fewer than a third more stretches, and a tight track stays tight down to 45 % (on at 55 %). Replayed
   as the stretches came (`TestSnapshotOwnCheckSequence`, 34 files): 6 changed a decided state or tightness before
@@ -1529,7 +1549,9 @@ that change at splits), simplified:
   another cut (26 %, from 8 stretches), S02E22's two caption tracks timed but loose (+0.17 s, 39 %), 8 own tracks
   of other files tight (60-83 %), 10 loose (38-52 %: the season 2 NF WEB-DL captions, Gilmore Girls MONOLITH), the
   rest too few stretches to tell (S02E16 "Code Red" and the ViSUM AMZN S02E16 both fit the speech best at +9.15 s
-  in act 4, not clearly enough yet).
+  in act 4, not clearly enough yet). On the snapshot of 2026-10-20 (48 files) the peak-bar rule changed one verdict
+  (Westworld S01E06: timed and tight) and decided 3 tracks a few stretches earlier; every track another cut's stays
+  so.
 - Line refinement (`sync_refine.go`): fan subtitles start single lines up to a second early or late (The Mentalist
   S02E18's HDTV pack around 12:00: four lines 1.0 s early, then 0.5 s early, then 0.6-0.75 s late), and another
   cut's subtitle has stretches of a minute 2-3 s off (S02E17's HDTV pack: +2 s around 2:00, −3 s around 5:30) that
@@ -1553,7 +1575,8 @@ that change at splits), simplified:
   they put it on; a timing ready within 2.5 s is answered directly) and
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
   disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues. Every result
-  carries the version of the timing that made it (`syncVersion`): an older one is served as it is (partial) while it
+  carries the version of the timing that made it (`syncVersion`, 2 since own-track windows go onto the speech): an
+  older one is served as it is (partial) while it
   is timed again from the stored windows, else final results would keep a fixed bug for good; for the ranking and
   the AI translation's source it counts as unknown (one it found poor is not ranked down, so it gets served and timed
   again). While live
@@ -1606,13 +1629,19 @@ that change at splits), simplified:
   Because a fit can land on the first file after the switch (The Mentalist S03E03: 4 minutes later, its reference
   read in parallel), every re-fit takes the copy again while the file's result is none, untimed (provisional and not
   fitting, or pre-timed) or a copy, never over its own fits; the first file's fit landing re-fits the other files
-  (`sync_samecut.go`). The copy is also held when the two files' speech matches at offset 0 (`same_speech`: per
-  stretch of 30 s both read or played, 60 % of the speech onsets within 0.1 s of one of the other's, at least 40,
-  and no stretch with 10 under 40 %; S03E03 NF / KONTRAST 91 % of 118, other episodes and the same files 0.5 s
-  apart at most 14 %): speech windows alone may score the right fit under the gain bar (0.12 there), and a
-  pre-timed fit then shows once the new file plays. With that match, the new file's fits also use the first file's
+  (`sync_samecut.go`). Only a file's own fits are lent (not a copy, which was not timed to the file it is served
+  for), and each file of the same cut whose fit fits is tried, last served first (one that had replaced the
+  subtitle used to end the search). The copy is also held when the two files' speech matches at offset 0
+  (`same_speech`: per stretch of 30 s both read or played, 60 % of the speech onsets within 0.1 s of one of the
+  other's, at least 40, each onset counted once where the other file's windows overlap, and no stretch with 10
+  under 40 %; S03E03 NF / KONTRAST 91 % of 118, other episodes and the same files 0.5 s apart at most 14 %): speech
+  windows alone may score the right fit under the gain bar (0.12 there), and a pre-timed fit then shows once the new
+  file plays. The match is checked again with every re-fit that does not fit (once per decide and file, from the
+  file's speech as read and played); once it fails, the copy is held against the file's windows like any other. With
+  that match, the new file's fits also use the first file's
   read own-track windows when that track is timed to it and the new file's is not known to be (logged `<hash8>:<index>
-  is the same cut as …: its fits use the <n> own-track windows of …`): S03E03's KONTRAST speech alone fitted -1.05 s
+  is the same cut as …: its fits use the <n> own-track windows of …`; moved onto the speech by that file's check):
+  S03E03's KONTRAST speech alone fitted -1.05 s
   where NF's track had -1.48 s; with them it serves NF's timing. Every fit builds its windows so (`fitRef`: the
   own-track check, then these), the first timing's after it read more windows too. The reference of the new file is still read: the
   match needs its speech, and the two reads ran at the same time.
@@ -1721,7 +1750,18 @@ tried only when ±1 s finds nothing); a 0.5 s gate (1 % worse against the fit). 
 fitted at the file's rate to the files with own-track windows (692 pairs, mostly not accepted, which are never
 refined): 1.6 % of their cues move, against 2.9 % of this episode's subtitles' at that rate.
 `sync_robust_test.go` keeps the Avatar case as a compact fixture (`testdata/sync/avatar_s01e02.json`: cue times and
-speech bits, no text).
+speech bits, no text), and Westworld S01E06 (`westworld_s01e06.json`: 8 played minutes with the cue tap's PGS windows).
+Since own-track windows go onto the speech, these evaluations (truth: the own track) show the track's lead where
+own windows time a subtitle (Avatar read: 0.00 → 0.30 s, the speech's place; with the audio alone it was already
+0.29 s; Gilmore MONOLITH 0.4 s), and nothing else changed (fits, false segments and every replay without own windows
+the same). Against the ASR truth, The Mentalist S03E09's Turkish subtitle replayed a minute at a time (what the
+viewer watches): with the read windows (own track timed, +0.49 s) median −0.56 → −0.01 s, within 0.3 s 6 % → 88 %,
+0.5 s 36 % → 98 %; from the played audio alone (the check without a fit until 24 stretches) within 0.3 s 53 % →
+87 %, at the end 3 % → 93 % (the old fit −0.61 s median). Westworld S01E06: untimed (1 s late) for the 8 minutes →
+−0.90 s from 300 s heard (−0.99 s on its PGS lines, which lead the speech by 0.05-0.09 s). Tried and not taken:
+23.976 ↔ 23.98 fps among the rates (Westworld S01E05 drifts 0.17 s per 1000 s against its own track, as that ratio
+predicts, but the ratio does not beat the file's rate by the 0.05 a near rate needs; two offsets, −0.92 / −1.18 s
+from 1801 s, keep it within about 0.15 s).
 A PGS own track (`sync_pgs_eval_test.go`, NFX_GT; The Mentalist S03E02 d3g, no text track, its English PGS track as
 the tap and the reads give it, 970 lines; each line scored against the PGS line starts): the subf2m subtitles were
 served from the speech, TR at x1.0010 with 7 offsets (48 % of 576 lines within 0.15 s, 76 % within 0.3 s, p90
