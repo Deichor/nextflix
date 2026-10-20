@@ -1638,9 +1638,18 @@ that change at splits), simplified:
   minute; a title or credit line before it does not count), where an episode opened at 0 or past its intro needs
   its first cues. Only the audio: an own track's windows would wait for its check against the speech. They are
   fitted by the live rules (contiguous, like the early own-track windows below) and the fit is pre-timed as above,
-  shown once the first played window (20 s heard) backs it. The reads stop once the file plays (its tap hears that
-  stretch then, and a read beside a playing stream of such a file would take its line); a timing that is not a
-  pre-timing still reads nothing of such a file. Replayed on the snapshot (`TestSnapshotBigStart`: the files above
+  shown once the first played window (20 s heard) backs it. The reads stop once the file plays, a running one too
+  (checked every second: its tap hears that stretch then, and a read beside a playing stream of such a file would
+  take its line); a timing that is not a pre-timing still reads nothing of such a file. The first pass that places
+  the windows keeps their places (`start_at`), so a later pass (another subtitle's pre-timing, after one cut by the
+  playing streams or with failed reads) reads only what is missing there, never more than the 3 windows. The file
+  is done (`start`) once all are read, it plays, or a pass that ran through has 2 of them (else after 3 such
+  passes); a file the budget allows none of at once; a subtitle whose lines are too sparse to place them leaves it
+  to the next pre-timing. Start windows count only while the played audio lies within 5 minutes of them: a viewing
+  resumed mid-episode would otherwise be timed by the start's offset (3 minutes of them outweigh its first played
+  window: a subtitle +0.8 s at the start and +3.5 s after an act break was served at +0.8 s at 1500 s), so it is
+  timed from the audio played there, as before. The early own-track read at the play position (below) still runs
+  beside them. Replayed on the snapshot (`TestSnapshotBigStart`: the files above
   the budget played from their start point, the tap 30 s ahead of the picture, a re-fit every 10 s of audio, the
   start windows taken from the played audio of the same stretch; truth: the fit over every played window): S01E05
   first timed at 220 s → 120 s of the picture (dialogue from 107 s: 113 s untimed → 13 s), its Turkish subtitle's
@@ -1648,7 +1657,9 @@ that change at splits), simplified:
   all 26 pairs within 0.3 s 57 % → 75 %, dialogue untimed median 118 s → 13 s. Of 355 subtitles that fit no file
   over the whole of it, none is shown on another episode's lines either way; 5 (2 before) are shown on this
   episode's (Westworld S01E01's Turkish subtitles made for a shorter cut, right at the start within 0.05 s of its
-  English one). Tried and not taken: an earlier first live fit (below 120 s of
+  English one). Resumed at 30:00 (16 pairs), the pre-timed files are timed exactly as those without start windows
+  (before the 5-minute rule E05's English subtitle showed the start's fit at once, right only because its offset
+  is the same all through). Tried and not taken: an earlier first live fit (below 120 s of
   audio other episodes' subtitles fit, see Live timing) and showing an untimed subtitle moved by the previous
   episode's offset (a prior; the teaser and act breaks of another episode differ, and the real cases changed
   subtitle source between episodes).
