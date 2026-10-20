@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
   getDebridSettings,
@@ -48,6 +48,9 @@ export default function DebridCard() {
     },
     [t, f],
   );
+  // A ref keeps checkStored (and the load effect) stable, so a language change does not reload and reset the form
+  const planTextRef = useRef(planText);
+  useEffect(() => { planTextRef.current = planText; }, [planText]);
 
   // Asks TorBox with the stored key so the badge shows the real state and the plan
   const checkStored = useCallback(
@@ -61,14 +64,14 @@ export default function DebridCard() {
       testDebrid('')
         .then((r) => {
           setConnection(r.success && r.active !== false ? 'connected' : 'error');
-          setConnectionNote(r.success ? planText(r) : r.message);
+          setConnectionNote(r.success ? planTextRef.current(r) : r.message);
         })
         .catch((e: unknown) => {
           setConnection('error');
           setConnectionNote((e as Error)?.message || '');
         });
     },
-    [planText],
+    [],
   );
 
   const reset = useCallback((s: DebridSettings) => {

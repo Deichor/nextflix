@@ -550,6 +550,8 @@ export const tr: Messages = {
 
   'search.didYouMean': 'Bunu mu demek istediniz: {title}?',
   'search.suggestions': 'Öneriler',
+  'search.failed': 'Arama şu anda kullanılamıyor.',
+  'search.failedHint': 'Bağlantını kontrol edip tekrar dene.',
 
   'cinema.watchAnyway': 'Sinema kaydını yine de izle',
   'cinema.confirm': 'Sinema kayıtlarının görüntü ve ses kalitesi düşüktür.',

@@ -14,13 +14,13 @@ export interface Profile {
 
 export type ProfileLanguage = 'en' | 'tr';
 
-const KEY = 'hfx-profile';
+export const PROFILE_KEY = 'hfx-profile';
 export const PROFILE_EVENT = 'hfx-profile-change';
 
 export function getActiveProfile(): Profile | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(KEY);
+    const raw = window.localStorage.getItem(PROFILE_KEY);
     return raw ? (JSON.parse(raw) as Profile) : null;
   } catch {
     return null;
@@ -34,8 +34,8 @@ export function getActiveProfileId(): number | null {
 export function setActiveProfile(profile: Profile | null) {
   if (typeof window === 'undefined') return;
   try {
-    if (profile) window.localStorage.setItem(KEY, JSON.stringify(profile));
-    else window.localStorage.removeItem(KEY);
+    if (profile) window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    else window.localStorage.removeItem(PROFILE_KEY);
   } catch {
     /* storage unavailable */
   }
@@ -69,7 +69,7 @@ let snapshot: Profile | null = null;
 function profileSnapshot(): Profile | null {
   let raw: string | null = null;
   try {
-    raw = window.localStorage.getItem(KEY);
+    raw = window.localStorage.getItem(PROFILE_KEY);
   } catch {
     /* storage unavailable */
   }

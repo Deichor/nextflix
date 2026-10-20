@@ -567,6 +567,8 @@ export const en = {
   // Search corrections and completions
   'search.didYouMean': 'Did you mean {title}?',
   'search.suggestions': 'Suggestions',
+  'search.failed': 'Search is not available right now.',
+  'search.failedHint': 'Check your connection and try again.',
 
   'cinema.watchAnyway': 'Watch the cinema recording anyway',
   'cinema.confirm': 'Cinema recordings have low picture and sound quality.',
