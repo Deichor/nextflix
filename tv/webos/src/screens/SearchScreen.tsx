@@ -94,7 +94,8 @@ export default function SearchScreen() {
       moreRef.current = false;
     }
     if (!q && !filtered) { setResults(null); setDidYouMean(''); setLoading(false); return; }
-    if (wanted === resultsFor && results) return;
+    // Back to the shown results: a request aborted on the way never cleared the spinner
+    if (wanted === resultsFor && results) { setLoading(false); return; }
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       setLoading(true);
