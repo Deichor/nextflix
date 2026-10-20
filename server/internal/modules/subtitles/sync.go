@@ -681,13 +681,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	if prev.stale() {
 		prev = nil // an older timing's result holds back nothing (rate, hysteresis)
 	}
-	m, vtt, r := y.fitOne(ctx, inner, hash, index, r, base, read, prev, complete)
-	if r.ref.OwnAside && !m.fits() {
-		// The speech does not time it: the set-aside own track's windows may (as before the check)
-		if om, ovtt, or := y.fitOne(ctx, inner, hash, index, r.aside(), base, false, prev, complete); om.fits() {
-			m, vtt, r = om, ovtt, or
-		}
-	}
+	m, vtt, r := y.fitAside(ctx, inner, hash, index, r, base, read, prev, complete)
 	ref, live = r.ref, r.live
 	provisional := !ref.Full && y.svc.cfg.LiveTiming && !complete
 	if provisional && !m.fits() && takesCopy(prev) {
@@ -759,7 +753,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			}
 			if am == nil {
 				var a syncMeta
-				a, altVTT, r = y.fitOne(ctx, inner, hash, index, r, altBase, read, altPrev, complete)
+				a, altVTT, r = y.fitAside(ctx, inner, hash, index, r, altBase, read, altPrev, complete)
 				ref, live = r.ref, r.live
 				if y.keepAccepted(altKey, altBase, altPrev, a, ref.Probe.Duration, complete) {
 					y.keepRates(altKey, altPrev, a)
@@ -1049,6 +1043,19 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	}
 	m.State = syncStateSynced
 	return m, renderVTT(served, false), r
+}
+
+// fitAside is fitOne and, when the speech does not time the subtitle, a fit to the windows of an
+// own track set aside (OwnAside: no fit to the speech; as before the check), for the subtitle and
+// each alternative alike. It returns the windows of the fit with the speech.
+func (y *syncer) fitAside(ctx context.Context, inner, hash string, index int, r fitRefs, vtt []byte, read bool, prev *syncMeta, final bool) (syncMeta, []byte, fitRefs) {
+	m, out, r := y.fitOne(ctx, inner, hash, index, r, vtt, read, prev, final)
+	if r.ref.OwnAside && !m.fits() {
+		if om, ovtt, _ := y.fitOne(ctx, inner, hash, index, r.aside(), vtt, false, prev, final); om.fits() {
+			return om, ovtt, r
+		}
+	}
+	return m, out, r
 }
 
 // lengthFits rejects a subtitle that runs past the end of the video or covers too little of it

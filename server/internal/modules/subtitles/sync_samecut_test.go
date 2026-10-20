@@ -105,6 +105,34 @@ func TestOwnTrackAsideTimesWhatTheSpeechDoesNot(t *testing.T) {
 	}
 }
 
+// An alternative gets the windows of a set-aside track too: the subtitle served fits nothing, the
+// next one of its language only the own track (review: alternatives were fitted to the speech
+// alone).
+func TestOwnTrackAsideTimesAnAlternative(t *testing.T) {
+	svc := newLiveTest(t, 1500)
+	y := svc.sync
+	file := dialogue(72, 1500)
+	starts := windowStarts(1500, syncWindowLen, 6)
+	noise := speechWindows(dialogue(91, 1500), starts, 0.15, 0.08, 0.1, 3)
+	for i := range noise {
+		noise[i].Kind = "audio"
+	}
+	ref := syncRef{Probe: mediaProbe{Duration: 1500, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"},
+		Windows: truthWindows(file, starts, 0, 0, 1), Speech: noise, Paired: true}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|asidemain|2|7|1", dialogue(93, 1500))
+	alt := cacheProviderSub(t, svc, "1|asidealt|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	y.listed([]Sub{{ID: inner, Source: SourceTurkceAltyazi, Language: "tr"}, {ID: alt, Source: SourceTurkceAltyazi, Language: "tr"}}, nil, syncHash, 1)
+	base, _ := svc.File(ctx, inner)
+	key, _ := syncKey(inner, syncHash, 1)
+	if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
+		t.Fatal("too little to tell")
+	}
+	if m := y.meta(key); m == nil || m.State != syncStateReplaced || m.ReplacedBy != alt {
+		t.Fatalf("%+v", m)
+	}
+}
+
 // The first timing reads more windows where the offset changes; the fit after that read builds its
 // windows as every fit does (fitRef), so the windows of a set-aside own track (lines 0 to 3 s off
 // by stretch, like KONTRAST's) do not come back with the windows read.
