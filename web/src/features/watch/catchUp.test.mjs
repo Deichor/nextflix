@@ -1,7 +1,7 @@
 // Run in a node:22 container: node --experimental-strip-types --test src/features/watch/catchUp.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { catchUpStep, catchUpTime } from './catchUp.ts';
+import { catchUpStep, catchUpTime, playPress } from './catchUp.ts';
 
 const ranges = (...r) => ({ length: r.length, start: i => r[i][0], end: i => r[i][1] });
 
@@ -28,4 +28,17 @@ test('a buffer the feed stops filling is stepped through', () => {
   assert.deepEqual(catchUpStep(11.5, 0, ranges([0, 10.2])), { to: 9.2, last: false });
   assert.equal(catchUpStep(11.5, 9.2, ranges([0, 10.2])), null);
   assert.deepEqual(catchUpStep(11.5, 9.2, ranges([0, 12])), { to: 11.5, last: true });
+});
+
+test('Play during a catch-up holds the element until it is past the frames before the position', () => {
+  // Paused by the viewer (or a restart that kept the pause), and Play during the start buffer
+  assert.equal(playPress(null, true, true), 'hold');
+  assert.equal(playPress('start', true, true), 'hold');
+  // Without a catch-up they play at once
+  assert.equal(playPress(null, false, true), 'play');
+  assert.equal(playPress('start', false, true), 'play');
+  // Pause during a stall hold (a catch-up's too) stays paused; a playing element pauses
+  assert.equal(playPress('stall', true, true), 'release');
+  assert.equal(playPress('stall', false, true), 'release');
+  assert.equal(playPress(null, false, false), 'pause');
 });

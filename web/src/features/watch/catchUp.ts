@@ -1,3 +1,5 @@
+import type { HoldKind } from '@/features/watch/startBuffer';
+
 // Safari restarts the playing element for a switch or recovery. Copied video starts on the keyframe
 // before the position (up to ~10 s earlier), so the element seeks forward inside the new stream,
 // hidden, before anything shows: the viewer never sees those seconds again. Pure logic.
@@ -14,6 +16,17 @@ interface Ranges {
   length: number;
   start(i: number): number;
   end(i: number): number;
+}
+
+/**
+ * What Play / Pause does. release: a stall hold ends and stays paused; play: plays now (a start hold
+ * ends); hold: during a catch-up the element is held until it is past the frames before the position
+ * (it would play them hidden, sound over black); pause: pauses.
+ */
+export function playPress(hold: HoldKind | null, catchingUp: boolean, paused: boolean): 'release' | 'play' | 'hold' | 'pause' {
+  if (hold === 'stall') return 'release';
+  if (hold === 'start' || paused) return catchingUp ? 'hold' : 'play';
+  return 'pause';
 }
 
 /** Element time that shows file time `target` in a stream that starts at file time `start`; 0 when nothing to skip */
