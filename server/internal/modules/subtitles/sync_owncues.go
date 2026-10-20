@@ -140,11 +140,9 @@ func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWi
 		picture = picture || f.ownPic
 		f.mu.Unlock()
 	}
-	pairs := ownPairsOf(ref, f)
-	c := checkOwnCached(f, pairs, !ref.Busy, hash, index)
+	c := checkOwnCached(f, ownPairsOf(ref, f), !ref.Busy, hash, index)
 	ref.Own = c
 	if c.State == ownTimed {
-		c.local = localOffsets(pairs, c)
 		ref.Windows = c.onSpeech(ref.Windows)
 		return ref, c.onSpeech(live)
 	}
@@ -175,19 +173,23 @@ func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWi
 // checkOwnCached is checkOwn, kept per file (and on disk with its live windows): done again
 // when the stretches grew (by a third once it found something), only from all of them (full:
 // ref is the file's reference, not a stand-in while it is read). Each change of the result
-// re-fits the subtitles with other windows, so a decision stands (settleOwn).
+// re-fits the subtitles with other windows, so a decision stands (settleOwn). A loose track's
+// offsets per stretch are kept with it (withLocal).
 func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index int) ownCheck {
-	if f == nil {
-		return checkOwn(pairs)
-	}
 	pairs = distinctPairs(pairs)
+	if f == nil {
+		c := checkOwn(pairs)
+		c.local, c.localN = localOffsets(pairs, c), len(pairs)
+		return c
+	}
 	f.mu.Lock()
 	prev, n := f.check, f.checkN
 	f.mu.Unlock()
 	if !full || len(pairs) == n || prev.State != "" && len(pairs) < n+max(1, n/3) {
-		return prev
+		return f.withLocal(prev, n, pairs)
 	}
 	c := settleOwn(prev, checkOwn(pairs))
+	c.local, c.localN = localOffsets(pairs, c), len(pairs)
 	f.mu.Lock()
 	if !sameSaved(c.saved(), f.check.saved()) {
 		f.dirty = true
@@ -197,6 +199,21 @@ func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index 
 	if c.State != prev.State || c.Tight != prev.Tight || c.NoFit != prev.NoFit {
 		logOwnCheck(hash, index, c)
 	}
+	return c
+}
+
+// withLocal is the file's check c (from n pairs) with a loose track's offsets per stretch of
+// these pairs, kept with the check until the pairs change.
+func (f *liveFile) withLocal(c ownCheck, n int, pairs []ownPair) ownCheck {
+	if c.State != ownTimed || c.Tight || c.localN == len(pairs) {
+		return c
+	}
+	c.local, c.localN = localOffsets(pairs, c), len(pairs)
+	f.mu.Lock()
+	if f.checkN == n {
+		f.check.local, f.check.localN = c.local, c.localN
+	}
+	f.mu.Unlock()
 	return c
 }
 
@@ -365,12 +382,13 @@ func (s *ownSink) Heard(t float64) {
 		return
 	}
 	f := s.f
+	viewer := s.y.fileViewer(f.fk)
 	f.mu.Lock()
 	n := f.readOwn(s.pos, b)
 	s.pos = b
 	f.ownGrown += float64(n) / syncRate
 	f.checkComplete()
-	grown := f.ownGrown >= f.growStep()
+	grown := f.ownGrown >= f.growStep(viewer)
 	if grown {
 		f.ownGrown = 0
 	}

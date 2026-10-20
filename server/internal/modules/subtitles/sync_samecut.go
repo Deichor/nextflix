@@ -156,7 +156,10 @@ func (y *syncer) copySameCut(ctx context.Context, key, inner, hash string, index
 	liveSecs float64, served, prev *syncMeta, m syncMeta) (copied, unmatched bool) {
 	ref, live := r.ref, r.live
 	for _, c := range y.sameCutFits(ctx, inner, hash, index, base, ref.Probe, true, false) {
-		other, _ := y.knownRef(c.from.hash, c.from.index)
+		other, _, busy := y.knownRef(c.from.hash, c.from.index)
+		if busy {
+			continue // its speech cannot be compared now (a read runs): no verdict
+		}
 		same := y.sameSpeech(r, hash, index, c.from, other)
 		if !same && prev != nil && prev.SameCut == c.from.fk {
 			unmatched = true
@@ -181,14 +184,14 @@ func (y *syncer) copySameCut(ctx context.Context, key, inner, hash string, index
 }
 
 // sameSpeech reports whether the file's speech, as read and played (r.own: before the windows of
-// another file replace some, sameCutWindows), matches the speech of o at offset 0; once per
-// decide and file (r.same).
+// another file replace some, sameCutWindows), matches the speech of o at offset 0; a match is
+// kept for the decide (r.same), no match is compared again (more windows may be read).
 func (y *syncer) sameSpeech(r fitRefs, hash string, index int, o servedSub, other syncRef) bool {
-	if v, ok := r.same[o.fk]; ok {
-		return v
+	if r.same[o.fk] {
+		return true
 	}
 	v := speechMatches(y.speechOf(hash, index, r.own), y.speechOf(o.hash, o.index, other))
-	if r.same != nil {
+	if v && r.same != nil {
 		r.same[o.fk] = v
 	}
 	return v
@@ -204,7 +207,7 @@ func (y *syncer) sameCutWindows(inner, hash string, index int, r fitRefs) syncRe
 		return ref
 	}
 	for _, o := range y.servedElsewhere(inner, syncFileKey(hash, index)) {
-		other, ok := y.knownRef(o.hash, o.index)
+		other, ok, _ := y.knownRef(o.hash, o.index)
 		if !ok || !sameLength(ref.Probe, other.Probe) || !hasOwnWindows(other.Windows) {
 			continue
 		}
@@ -250,19 +253,19 @@ func (y *syncer) offerSameCut(inner, fk string) {
 	}
 }
 
-// knownRef is a file's read reference, unless it is being read or there is none.
-func (y *syncer) knownRef(hash string, index int) (syncRef, bool) {
+// knownRef is a file's read reference, unless it is being read (busy) or there is none.
+func (y *syncer) knownRef(hash string, index int) (r syncRef, ok, busy bool) {
 	fk := syncFileKey(hash, index)
 	st, release := y.refState(fk)
 	defer release()
 	if !st.mu.TryLock() {
-		return syncRef{}, false
+		return syncRef{}, false, true
 	}
 	defer st.mu.Unlock()
 	if !y.loadRef(fk, st) {
-		return syncRef{}, false
+		return syncRef{}, false, false
 	}
-	return *st.ref, true
+	return *st.ref, true, false
 }
 
 // speechOf is a file's speech as known now: of its reference ref and its played windows.

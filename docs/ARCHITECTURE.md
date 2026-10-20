@@ -1466,8 +1466,10 @@ that change at splits), simplified:
   hears ~15× real time at first (server log: 153 s ahead after 11 s), so the 30 s / 15 s steps, not the audio, set
   when the first fit came (`sync_first_eval_test.go`, below). The same 10 s / 5 s steps hold while a play stream
   hears less than 60 s ahead of the player's last position (within 2 minutes; a muxed 4K stream plays at its pace):
-  Westworld S01E01 took a mid-file offset change about 48 s late. A decide costs 21 ms (median, p95 35 ms; with read
-  windows 39 / 137 ms) on the snapshot's starts. The live windows of a file with a timed
+  Westworld S01E01 took a mid-file offset change about 48 s late. The position is the one the player's subtitle
+  requests sent (as for the move log below), and each play stream keeps how far it heard, so with two streams the
+  nearest one counts (one position per file flipped with whichever stream sent audio last). A decide costs 21 ms
+  (median, p95 35 ms; with read windows 39 / 137 ms) on the snapshot's starts. The live windows of a file with a timed
   subtitle are kept on disk (`/app/data/subtitles/synclive`, one bit per frame). Once 85 % of the file's windows
   were heard live timing ends for the file (no more tap) and the result is final. Fits with live windows are held to
   stricter rules: on generated episodes, few or contiguous windows let another episode's subtitle pass through the
@@ -1525,7 +1527,8 @@ that change at splits), simplified:
   alone, gain 0.10-0.14, fitted nothing: the viewing was served untimed, 1 s late; now from 6 stretches, its
   windows set aside from 5). A timed track is tight with one offset and 55 % of its line starts on an onset. A
   timed track's windows time subtitles moved by the offsets found (`onSpeech`; a loose track's by its own offset
-  per stretch, the median of the stretches within 150 s, within 0.4 s of the check's: S03E09's lead changes by act),
+  per stretch, the median of the stretches within 150 s, within 0.4 s of the check's: S03E09's lead changes by act,
+  0.45 to 0.87 s; kept with the file's check, so another file of the same cut moves them so too),
   so a fit lands on the speech whatever the check says later (S03E09's track went timed at +0.49 s, another cut at
   38 stretches with +0.87 s after 1897 s). Until a PGS
   track is timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and
@@ -1542,7 +1545,9 @@ that change at splits), simplified:
   decide hook, done again from all stretches when they grew by a third; not from a stand-in while the reference is
   read) and kept per file with its live windows (`synclive` `check`: state, tight, stretches, offsets, `NoFit`), so
   a restart or a live reference dropped from memory goes on from it (a `NoFit` was not kept, and the stand-in of a
-  reference being read trusted the track again). Each change re-fits the
+  reference being read trusted the track again). A timed check kept before its offsets were is checked again with
+  the next fit (`TestSnapshotKeptChecks`: on the snapshot of 2026-10-20 all 12 kept timed checks had none, so their
+  windows were not moved onto the speech; all 12 get them from their stretches). Each change re-fits the
   subtitles with other windows, so a decision stands against a check that does not decide and against another
   decision from fewer than a third more stretches, and a tight track stays tight down to 45 % (on at 55 %). Replayed
   as the stretches came (`TestSnapshotOwnCheckSequence`, 34 files): 6 changed a decided state or tightness before
@@ -1644,9 +1649,10 @@ that change at splits), simplified:
   other's, at least 40, each onset counted once where the other file's windows overlap, and no stretch with 10
   under 40 %; S03E03 NF / KONTRAST 91 % of 118, other episodes and the same files 0.5 s apart at most 14 %): speech
   windows alone may score the right fit under the gain bar (0.12 there), and a pre-timed fit then shows once the new
-  file plays. The match is checked again with every re-fit that does not fit (once per decide and file, from the
-  file's speech as read and played); once it fails, the copy is held against the file's windows like any other. With
-  that match, the new file's fits also use the first file's
+  file plays. The match is checked again with every re-fit that does not fit (from the file's speech as read and
+  played; a match once per decide and file, no match again after more windows were read; not while the other file's
+  reference is being read, which leaves the copy as it is); once it fails, the copy is held against the file's
+  windows like any other. With that match, the new file's fits also use the first file's
   read own-track windows when that track is timed to it and the new file's is not known to be (logged `<hash8>:<index>
   is the same cut as …: its fits use the <n> own-track windows of …`; moved onto the speech by that file's check):
   S03E03's KONTRAST speech alone fitted -1.05 s

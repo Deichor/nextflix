@@ -242,13 +242,12 @@ func TestOwnTrackLeadIsNotServed(t *testing.T) {
 	}
 }
 
-// A loose track's lead changes by stretch (S03E09: 0.45 to 0.87 s); its windows move by their
-// own offsets to the speech of the same stretch, a tight track's by the check's.
-func TestLooseTrackStretchOffsets(t *testing.T) {
+// looseTrack is a loose own track leading its speech by 0.4 s, by 0.65 s from 900 s, with its
+// grid starts and pairs.
+func looseTrack() (own []span, starts []float64, pairs []ownPair) {
 	file := dialogue(76, 1500)
-	starts := gridStarts(0, 1500)
+	starts = gridStarts(0, 1500)
 	rng := rand.New(rand.NewSource(8))
-	var own []span
 	for _, c := range file {
 		d := 0.4 + (rng.Float64()*2-1)*0.4 // loose
 		if c.start >= 900 {
@@ -256,12 +255,12 @@ func TestLooseTrackStretchOffsets(t *testing.T) {
 		}
 		own = append(own, span{c.start - d, c.end - d})
 	}
-	pairs := checkPairs(own, file, starts, 0, 0.05, 6)
-	c := checkOwn(pairs)
-	if c.State != ownTimed || c.Tight {
-		t.Fatalf("check %s tight=%v near %.2f: %s", c.State, c.Tight, c.Near, describeFit(c.Fit))
-	}
-	c.local = localOffsets(pairs, c)
+	return own, starts, checkPairs(own, file, starts, 0, 0.05, 6)
+}
+
+// checkStretchMoves checks that c moves looseTrack's windows by their lead.
+func checkStretchMoves(t *testing.T, c ownCheck, own []span, starts []float64) {
+	t.Helper()
 	var early, late []float64
 	for _, w := range c.onSpeech(ownWindows(own, starts)) {
 		if _, n := w.lineStarts(); n < ownMinStarts {
@@ -280,6 +279,18 @@ func TestLooseTrackStretchOffsets(t *testing.T) {
 	if m := median(late); math.Abs(m-0.65) > 0.12 {
 		t.Errorf("after 900 s: moved %.2f s (median), want 0.65", m)
 	}
+}
+
+// A loose track's lead changes by stretch (S03E09: 0.45 to 0.87 s); its windows move by their
+// own offsets to the speech of the same stretch, a tight track's by the check's.
+func TestLooseTrackStretchOffsets(t *testing.T) {
+	own, starts, pairs := looseTrack()
+	c := checkOwn(pairs)
+	if c.State != ownTimed || c.Tight {
+		t.Fatalf("check %s tight=%v near %.2f: %s", c.State, c.Tight, c.Near, describeFit(c.Fit))
+	}
+	c.local = localOffsets(pairs, c)
+	checkStretchMoves(t, c, own, starts)
 	c.Tight = true
 	if l := localOffsets(pairs, c); l != nil {
 		t.Errorf("a tight track: %v", l)
@@ -314,5 +325,90 @@ func TestOwnCheckNoFitKept(t *testing.T) {
 	g := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync.liveFile(syncHash, 1)
 	if c := g.ownChecked(); c.State != ownTimed || len(c.Fit.Segments) != 1 || c.Fit.Segments[0].Offset != 0.42 || c.NoFit {
 		t.Fatalf("timed reloaded %+v", c)
+	}
+}
+
+// A loose track's offsets per stretch are kept with the file's check, so every use of the check
+// (sameCutWindows reads another file's) moves its windows by them; after a restart they are
+// found again from the stretches.
+func TestLooseTrackStretchOffsetsKept(t *testing.T) {
+	own, starts, pairs := looseTrack()
+	svc := newLiveTest(t, 1500)
+	y := svc.sync
+	f := y.liveFile(syncHash, 1)
+	if c := checkOwnCached(f, pairs, true, syncHash, 1); c.State != ownTimed || c.Tight {
+		t.Fatalf("check %s tight=%v", c.State, c.Tight)
+	}
+	checkStretchMoves(t, f.ownChecked(), own, starts)
+	y.saveLive(f)
+	g := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync.liveFile(syncHash, 1)
+	if c := checkOwnCached(g, pairs, true, syncHash, 1); c.State != ownTimed || g.checkN != len(distinctPairs(pairs)) {
+		t.Fatalf("reloaded %s (n %d)", c.State, g.checkN)
+	}
+	checkStretchMoves(t, g.ownChecked(), own, starts)
+}
+
+// A timed check kept before its offsets were (PR #16) is checked again with the next fit: the
+// track's windows then go onto the speech (The Mentalist S03E09's lines lead it by 0.5 s), and
+// the offsets are kept.
+func TestOwnCheckWithoutOffsetsCheckedAgain(t *testing.T) {
+	file := dialogue(74, 1500)
+	starts := windowStarts(1500, syncWindowLen, 8)
+	speech := speechWindows(file, starts, 0, 0.05, 0.1, 4)
+	for i := range speech {
+		speech[i].Kind = "audio"
+	}
+	ref := syncRef{Probe: mediaProbe{Duration: 1500, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"},
+		Windows: truthWindows(shiftSpans(file, -0.5), starts, 0, 0, 1), Speech: speech, Paired: true}
+	sub := subtitleFor(file, 1, func(float64) float64 { return 2 })
+	svc := newLiveTest(t, 1500)
+	y := svc.sync
+	old := []byte(`{"windows":{},"check":{"state":"timed","pairs":8}}`)
+	if err := svc.files.write("synclive", syncFileKey(syncHash, 1), ".json", old); err != nil {
+		t.Fatal(err)
+	}
+	f := y.liveFile(syncHash, 1)
+	if c := f.ownChecked(); c.State != ownTimed || len(c.Fit.Segments) != 0 || f.checkN != 0 {
+		t.Fatalf("restored %+v (n %d)", c, f.checkN)
+	}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|oldcheck|2|9|1", sub)
+	base, _ := svc.File(ctx, inner)
+	key, _ := syncKey(inner, syncHash, 1)
+	if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
+		t.Fatal("too little to tell")
+	}
+	if m := y.meta(key); m == nil || !m.fits() || len(m.Fit.Segments) != 1 || math.Abs(m.Fit.Segments[0].Offset-2) > 0.1 {
+		t.Fatalf("fit %+v, want +2 s (the lines' lead not served)", m)
+	}
+	if c := f.ownChecked(); c.State != ownTimed || len(c.Fit.Segments) == 0 || math.Abs(c.Fit.Segments[0].Offset-0.5) > 0.1 {
+		t.Fatalf("checked again: %+v", c)
+	}
+	g := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync.liveFile(syncHash, 1)
+	if c := g.ownChecked(); len(c.Fit.Segments) == 0 || g.checkN != c.Pairs {
+		t.Fatalf("not kept: %+v (n %d)", c, g.checkN)
+	}
+}
+
+// A fit that missed moves the set-aside windows by its offset only when more line starts than by
+// chance lie on an onset at that offset (review: the best share at any lag was tested).
+func TestNoFitLag(t *testing.T) {
+	file := dialogue(77, 600)
+	pairs := checkPairs(file, file, gridStarts(0, 600), 0.3, 0, 9)
+	at := func(off float64) syncFit { return syncFit{Segments: []syncSegment{{Offset: off}}} }
+	if near, _ := nearShare(pairs, 0.3); near < ownChanceShare {
+		t.Fatalf("at the lag %.2f", near)
+	}
+	if near, _ := nearShare(pairs, -0.4); near >= ownChanceShare {
+		t.Fatalf("away from the lag %.2f", near)
+	}
+	if l := noFitLag(pairs, at(0.3)); math.Abs(l-0.3) > 1e-9 {
+		t.Errorf("on the lag: %.2f", l)
+	}
+	if l := noFitLag(pairs, at(-0.4)); l != 0 {
+		t.Errorf("chance at its offset: %.2f", l)
+	}
+	if l := noFitLag(pairs, at(0.9)); l != 0 {
+		t.Errorf("outside the lag: %.2f", l)
 	}
 }
