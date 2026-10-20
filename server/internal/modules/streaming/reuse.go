@@ -316,17 +316,20 @@ func (s *Service) recentSwarm(hash string, index int) (tsSwarmSeen, bool) {
 // fine hours ago may have lost its swarm (The Mentalist S02E10: the cached 52d6688e opened
 // with no data for 11.6 s, then the player searched again). A file TorBox plays, or whose
 // swarm was measured within tsCachedFresh, is not measured. at is the start position
-// (seconds, 0 = unknown). "" when the source may play (res.Health is then the new
-// measurement), else why not.
-func (s *Service) verifyCached(ctx context.Context, q tsResolveQuery, res *tsResolveResult, at float64, w *tsWarm) string {
+// (seconds, 0 = unknown). why is "" when the source may play (res.Health is then the latest
+// measurement, taken at measuredAt; zero when that is unknown: the stored health of a
+// TorBox file or an unmeasured swarm), else why not.
+func (s *Service) verifyCached(ctx context.Context, q tsResolveQuery, res *tsResolveResult, at float64, w *tsWarm) (why string, measuredAt time.Time) {
 	if res.Debrid && s.debrid.usable() {
-		return ""
+		return "", time.Time{}
 	}
 	short := fmt.Sprintf("%s:%d", tsShortHash(res.Hash), res.Index)
 	if seen, ok := s.recentSwarm(res.Hash, res.Index); ok {
 		log.Printf("resolve %q: the cached %s was measured %s ago: %s", q.title, short,
 			time.Since(seen.at).Round(time.Second), &seen.health)
-		return ""
+		h := seen.health
+		res.Health = &h
+		return "", seen.at
 	}
 	started := time.Now()
 	s.trackTorrent(w, res.Hash)
@@ -340,10 +343,10 @@ func (s *Service) verifyCached(ctx context.Context, q tsResolveQuery, res *tsRes
 	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
-			return "cancelled"
+			return "cancelled", time.Time{}
 		}
 		s.dropFrom(w, res.Hash)
-		return "no torrent metadata: " + err.Error()
+		return "no torrent metadata: " + err.Error(), time.Time{}
 	}
 	size := res.Size
 	for _, f := range st.FileStats {
@@ -360,7 +363,7 @@ func (s *Service) verifyCached(ctx context.Context, q tsResolveQuery, res *tsRes
 		need = res.Health.Need
 	}
 	if need <= 0 {
-		return ""
+		return "", time.Time{}
 	}
 	// The header the player reads next, while the swarm is measured
 	go func() {
@@ -376,18 +379,19 @@ func (s *Service) verifyCached(ctx context.Context, q tsResolveQuery, res *tsRes
 	}
 	h := s.swarmHealthAt(ctx, res.Hash, res.Index, off, size, need)
 	if ctx.Err() != nil {
-		return "cancelled"
+		return "cancelled", time.Time{}
 	}
 	took := time.Since(started).Round(time.Millisecond)
 	if h == nil || h.KeepsUp {
+		var measured time.Time
 		if h != nil {
-			res.Health = h
+			res.Health, measured = h, time.Now()
 		}
 		log.Printf("resolve %q: the cached %s was measured again: %s, playing it (%s)", q.title, short, h, took)
-		return ""
+		return "", measured
 	}
 	s.dropFrom(w, res.Hash)
-	return fmt.Sprintf("its swarm does not keep up: %s (%s)", h, took)
+	return fmt.Sprintf("its swarm does not keep up: %s (%s)", h, took), time.Time{}
 }
 
 // tsReuseTorrentFile finds the saved file among TorrServer's files: by TorrServer's id, or
@@ -427,7 +431,7 @@ func (s *Service) reuseOffset(sv tsSaved, size int64, runtimeMin int) int64 {
 		return 0
 	}
 	dur := float64(runtimeMin * 60)
-	if p, ok := s.probeCache.Load(fmt.Sprintf("%s:%d", sv.hash, sv.index)); ok {
+	if p, ok := s.probeCache.Load(s.probeKey(sv.hash, sv.index)); ok {
 		if d := p.(*tsProbe).duration(); d > 0 {
 			dur = d
 		}

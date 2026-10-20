@@ -200,6 +200,12 @@ func TestRoomToRead(t *testing.T) {
 	if r := s.RoomToRead("aa"); !near(r, 1) {
 		t.Fatalf("%.2f MB/s on a swarm delivering 3.9 MB/s", r/mbps)
 	}
+	// A TorBox CDN rate says nothing about the swarm the file falls back to
+	s.warms["show:1:1"].healthCDN = true
+	if s.RoomToRead("aa") != 0 {
+		t.Fatal("room on a TorBox rate")
+	}
+	s.warms["show:1:1"].healthCDN = false
 	q := &tsProbe{}
 	q.Format.BitRate = "4194304" // 0.5 MB/s
 	s.playing["bb"] = 1

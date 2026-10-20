@@ -82,6 +82,12 @@ func (h *tsHealth) ratio() float64 {
 	return float64(h.Rate) / float64(h.Need)
 }
 
+// below: the source delivers under share of its need by a verdict, or by a live health over
+// tsMeasuredSpan (a few samples before the verdict say nothing yet).
+func (h *tsHealth) below(share float64) bool {
+	return h != nil && (!h.partial || h.sampled >= tsMeasuredSpan) && h.ratio() < share
+}
+
 func (h *tsHealth) String() string {
 	if h == nil {
 		return "not measured"

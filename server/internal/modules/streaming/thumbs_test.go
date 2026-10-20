@@ -188,7 +188,7 @@ func TestThumbCachesOnDiskOnGrid(t *testing.T) {
 	if strings.Contains(args, "tonemap") {
 		t.Errorf("SDR source tone-mapped: %s", args)
 	}
-	if _, err := os.Stat(filepath.Join(th.dir, thumbHashA, "1", "120_320.jpg")); err != nil {
+	if _, err := os.Stat(filepath.Join(th.dir, thumbHashA, "ts1", "120_320.jpg")); err != nil {
 		t.Fatalf("not on disk: %v", err)
 	}
 	// Same grid point (and a width that rounds to 320): served from the disk cache
@@ -196,8 +196,16 @@ func TestThumbCachesOnDiskOnGrid(t *testing.T) {
 	if w.Code != http.StatusOK || w.Header().Get("X-Cache") != "HIT" || f.count() != 1 {
 		t.Fatalf("second: %d %s, runs %d", w.Code, w.Header().Get("X-Cache"), f.count())
 	}
-	if !strings.Contains(w.Header().Get("Cache-Control"), "immutable") {
-		t.Fatalf("cache-control %q", w.Header().Get("Cache-Control"))
+	if w.Header().Get("Cache-Control") != "no-cache" || w.Header().Get("ETag") != `"ts-120-320"` {
+		t.Fatalf("cache-control %q, etag %q", w.Header().Get("Cache-Control"), w.Header().Get("ETag"))
+	}
+	// The browser asks again with its ETag: 304 while the frame is the same
+	req := httptest.NewRequest(http.MethodGet, "/api/torrent-stream/thumb?hash="+thumbHashA+"&index=1&t=120&w=320", nil)
+	req.Header.Set("If-None-Match", `"ts-120-320"`)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotModified || f.count() != 1 {
+		t.Fatalf("revalidation: %d, runs %d", w.Code, f.count())
 	}
 	// t=0 does not seek
 	thumbGet(r, "hash="+thumbHashA+"&index=1&t=3")
@@ -512,5 +520,31 @@ func TestThumbStateIsPruned(t *testing.T) {
 	th.mu.Unlock()
 	if fo || !fn || no || !nn {
 		t.Fatalf("failed old %v new %v, newest old %v new %v", fo, fn, no, nn)
+	}
+}
+
+// A torrent's files are numbered by TorBox's list while it is a TorBox source and by
+// TorrServer's ids once it falls back to its swarm: the same number can be another episode, so
+// probes, frames on disk and their ETags never cross the two.
+func TestThumbAndProbeKeysNameTheNumbering(t *testing.T) {
+	s := NewService(nil, Config{TorrServerURL: "http://127.0.0.1:1"})
+	if got := s.probeKey(thumbHashA, 3); got != thumbHashA+":3" {
+		t.Fatalf("swarm probe key %q", got)
+	}
+	s.debrid.register(tsDebridSource{hash: thumbHashA, index: 3, path: "Show/S01E04.mkv", size: 1 << 30})
+	if got := s.probeKey(thumbHashA, 3); got != thumbHashA+":3:tb" {
+		t.Fatalf("TorBox probe key %q", got)
+	}
+	// TorBox off: another file of the torrent is read by TorrServer's id
+	if got := s.probeKey(thumbHashA, 4); got != thumbHashA+":4" {
+		t.Fatalf("unregistered file with TorBox off: %q", got)
+	}
+	s.debrid.unregisterHash(thumbHashA)
+	if got := s.probeKey(thumbHashA, 3); got != thumbHashA+":3" {
+		t.Fatalf("after the fallback: %q", got)
+	}
+	ts, tb := thumbKey{hash: thumbHashA, index: 3, t: 10, w: 320}, thumbKey{hash: thumbHashA, index: 3, t: 10, w: 320, tb: true}
+	if ts.path("/c") == tb.path("/c") || ts.id() == tb.id() || ts.etag() == tb.etag() {
+		t.Fatalf("keys cross: %s %s %s / %s %s %s", ts.path("/c"), ts.id(), ts.etag(), tb.path("/c"), tb.id(), tb.etag())
 	}
 }
