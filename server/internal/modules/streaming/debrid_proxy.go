@@ -638,6 +638,7 @@ func (b tsCancelBody) Close() error {
 const (
 	tsDebridBrokenFor = 2 * time.Minute  // a file whose CDN reads gave up plays from TorrServer this long
 	tsDebridWarmEvery = 20 * time.Second // keep-alive reads of a paused player's file at most this often
+	tsDebridWarmRead  = 64 << 10         // most a keep-alive read takes of the body
 )
 
 // markBroken: TorBox could not deliver a part of the file (after its retries). Until
@@ -700,7 +701,8 @@ func (d *tsDebrid) keepWarm(hash string, index int) {
 		if err != nil {
 			return
 		}
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// A CDN that ignores the range answers 200 with the whole file: read only a little of it
+		_, _ = io.CopyN(io.Discard, resp.Body, tsDebridWarmRead)
 		resp.Body.Close()
 	}()
 }

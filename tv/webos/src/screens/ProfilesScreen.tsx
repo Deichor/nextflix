@@ -6,8 +6,9 @@ import { profiles as loadProfiles } from '../lib/catalog';
 import { useT } from '../lib/i18n';
 import { prefetchHome, prefetchProfile } from '../lib/homeQueries';
 import { MAX_PROFILES, getProfile, getProfileId, profileLocale, type Profile } from '../lib/profile';
+import { isBack } from '../lib/webos';
 import { useEntryState, useFocusRestore, useRouter } from '../nav/router';
-import { focusById, focusDefault } from '../nav/spatial';
+import { focusById, focusDefault, focusedId, pushKeyHandler } from '../nav/spatial';
 
 interface ProfilesScreenProps {
   onPick: (p: Profile) => void;
@@ -63,6 +64,27 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
     return () => cancelAnimationFrame(raf);
   }, [list, fallback]);
 
+  const toggleManage = () => {
+    const onDone = focusedId() === 'profiles-manage';
+    setManage(!manage);
+    // Without profiles (load failed) the button goes away with Manage: Retry takes the focus
+    if (manage && onDone && !(list && list.length)) {
+      requestAnimationFrame(() => { if (!focusById(fallback)) focusDefault(); });
+    }
+  };
+  const toggleRef = useRef(toggleManage);
+  toggleRef.current = toggleManage;
+
+  // Back ends Manage (the picker is the root, so Back would otherwise ask to exit)
+  useEffect(() => {
+    if (!manage) return;
+    return pushKeyHandler(e => {
+      if (!isBack(e)) return false;
+      toggleRef.current();
+      return true;
+    });
+  }, [manage]);
+
   return (
     <div className="screen profiles-screen">
       <div className="brand brand-corner">NEXTFLIX</div>
@@ -114,8 +136,8 @@ export default function ProfilesScreen({ onPick }: ProfilesScreenProps) {
         </div>
       )}
       <div className="profiles-actions">
-        {!!list && list.length > 0 && (
-          <button type="button" className="btn btn-ghost" data-nav data-nav-id="profiles-manage" onClick={() => setManage(!manage)}>
+        {(manage || (!!list && list.length > 0)) && (
+          <button type="button" className="btn btn-ghost" data-nav data-nav-id="profiles-manage" onClick={toggleManage}>
             {manage ? t('common.done') : <><Pencil className="btn-icon" /> {t('profiles.manageProfiles')}</>}
           </button>
         )}

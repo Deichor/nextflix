@@ -52,6 +52,9 @@ function SearchContent() {
   // Failed "load more" pages in a row; a few are retried, then a Retry button shows
   const [moreFails, setMoreFails] = useState(0);
   const [moreAttempt, setMoreAttempt] = useState(0);
+  // The first page failed (network/server): old results stay with a Retry button
+  const [failed, setFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [suggestions, setSuggestions] = useState<NfTitle[]>([]);
   const [didYouMean, setDidYouMean] = useState('');
   const [completions, setCompletions] = useState<Completion[]>([]);
@@ -80,6 +83,7 @@ function SearchContent() {
       setResults([]);
       setDidYouMean('');
       setSearched(false);
+      setFailed(false);
     }
   }
   // Too short to complete: close the list
@@ -125,20 +129,18 @@ function SearchContent() {
     let cancelled = false;
     const timer = setTimeout(async () => {
       setLoading(true);
-      let items: NfTitle[] = [];
-      let pages = 1;
-      let corrected = '';
-      if (filtered) {
-        const res = await discover(filters, q, 1);
-        items = fromTmdbList(res?.results);
-        pages = res?.totalPages || 1;
-        corrected = res?.didYouMean || '';
-      } else {
-        const res = await searchTitles(q);
-        items = fromTmdbList(res?.results);
-        corrected = res?.didYouMean || '';
-      }
+      const res = filtered
+        ? await discover(filters, q, 1)
+        : await searchTitles(q).then(r => r && { ...r, totalPages: 1 });
       if (cancelled) return;
+      if (!res) {
+        setFailed(true);
+        setLoading(false);
+        return;
+      }
+      const items = fromTmdbList(res.results);
+      const pages = res.totalPages || 1;
+      const corrected = res.didYouMean;
       // Pages loaded before this first page landed belong to the old list
       searchId.current += 1;
       loadingMore.current = false;
@@ -147,11 +149,12 @@ function SearchContent() {
       setPage(1);
       setTotalPages(pages);
       setMoreFails(0);
+      setFailed(false);
       setSearched(true);
       setLoading(false);
     }, q ? 300 : 0);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [q, filters, filtered]);
+  }, [q, filters, filtered, retry]);
 
   // Title completions while typing (server typo index, debounced 150 ms)
   useEffect(() => {
@@ -194,7 +197,8 @@ function SearchContent() {
   const moreGaveUp = moreFails > 0 && loadMoreRetryDelay(moreFails) === null;
   useEffect(() => {
     const el = sentinelRef.current;
-    if (!el || !browsing || !searched || page >= totalPages || moreGaveUp) return;
+    // After a failed first page the shown list belongs to the old filters
+    if (!el || !browsing || !searched || failed || page >= totalPages || moreGaveUp) return;
     const io = new IntersectionObserver(async entries => {
       if (!entries.some(e => e.isIntersecting) || loadingMore.current) return;
       loadingMore.current = true;
@@ -217,7 +221,7 @@ function SearchContent() {
     }, { rootMargin: '800px 0px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [browsing, searched, page, totalPages, filters, moreGaveUp, moreAttempt]);
+  }, [browsing, searched, failed, page, totalPages, filters, moreGaveUp, moreAttempt]);
 
   // A new observer reports a visible sentinel right away, which retries the page
   useEffect(() => {
@@ -244,6 +248,16 @@ function SearchContent() {
       .map(g => ({ id: g.id, label: localGenre(t, g.id) || String(g.id) }))
       .sort((a, b) => a.label.localeCompare(b.label)),
     [t, filters.type],
+  );
+
+  const retryButton = (
+    <button
+      onClick={() => setRetry(r => r + 1)}
+      disabled={loading}
+      className="rounded border border-white/30 px-5 py-2 text-sm font-semibold text-white hover:border-white disabled:opacity-50"
+    >
+      {t('common.retry')}
+    </button>
   );
 
   return (
@@ -357,6 +371,12 @@ function SearchContent() {
           <div className="px-4 md:px-12"><TitleGrid items={[]} loading /></div>
         ) : results.length > 0 ? (
           <div className={`px-4 transition-opacity md:px-12 ${loading ? 'opacity-60' : ''}`}>
+            {failed && (
+              <div className="mb-4 flex flex-wrap items-center gap-3 text-[#b3b3b3]" role="alert">
+                <span>{t('search.failed')}</span>
+                {retryButton}
+              </div>
+            )}
             {!!q && !!didYouMean && (
               <p className="mb-4 text-lg text-[#b3b3b3]">
                 {t.rich('search.didYouMean', {
@@ -374,7 +394,7 @@ function SearchContent() {
               </p>
             )}
             <TitleGrid items={results} />
-            {browsing && page < totalPages && (moreGaveUp ? (
+            {browsing && !failed && page < totalPages && (moreGaveUp ? (
               <div className="py-8 text-center">
                 <button
                   onClick={() => setMoreFails(0)}
@@ -387,6 +407,8 @@ function SearchContent() {
               <div ref={sentinelRef} className="py-8 text-center text-sm text-[#808080]">{t('search.loadingMore')}</div>
             ))}
           </div>
+        ) : failed ? (
+          <EmptyState title={t('search.failed')} text={t('search.failedHint')} action={retryButton} />
         ) : searched ? (
           q ? (
             <EmptyState

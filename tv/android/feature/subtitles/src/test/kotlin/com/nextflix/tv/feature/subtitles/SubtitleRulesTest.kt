@@ -115,6 +115,18 @@ class SubtitleRulesTest {
         assertEquals(SubtitleRules.CueAnswer.Fallback, SubtitleRules.cueAnswer(0, false, 0))
         assertEquals(SubtitleRules.CueAnswer.Retry, SubtitleRules.cueAnswer(0, false, 1))
         assertEquals(SubtitleRules.CueAnswer.Retry, SubtitleRules.cueAnswer(0, false, 7))
+        // After earlier answers: 429, 5xx and network errors ask again, another 4xx stops
+        assertEquals(SubtitleRules.CueAnswer.Retry, SubtitleRules.cueAnswer(0, false, 1, status = 429))
+        assertEquals(SubtitleRules.CueAnswer.Retry, SubtitleRules.cueAnswer(0, false, 1, status = 503))
+        assertEquals(SubtitleRules.CueAnswer.Retry, SubtitleRules.cueAnswer(0, false, 1, status = 0))
+        assertEquals(SubtitleRules.CueAnswer.Stop, SubtitleRules.cueAnswer(0, false, 1, status = 404))
+        assertEquals(SubtitleRules.CueAnswer.Fallback, SubtitleRules.cueAnswer(0, false, 0, status = 404))
+        // An unusable AI translation, before or after earlier answers
+        assertEquals(SubtitleRules.CueAnswer.AiOff, SubtitleRules.cueAnswer(0, false, 0, status = 502, ai = true))
+        assertEquals(SubtitleRules.CueAnswer.AiOff, SubtitleRules.cueAnswer(0, false, 3, status = 502, ai = true))
+        assertEquals(5000L, SubtitleRules.retryWaitMs(failed = true, status = 503, n = 1))
+        assertEquals(10000L, SubtitleRules.retryWaitMs(failed = false, status = 429, n = 2))
+        assertEquals(SubtitleRepository.LIVE_CUES_POLL_MS, SubtitleRules.retryWaitMs(failed = false, status = 200, n = 1))
     }
 
     @Test

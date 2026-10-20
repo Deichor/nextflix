@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -62,7 +63,7 @@ func (ts *TorrentSearcher) SearchJackettRaw(ctx context.Context, query string, c
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := jackettClient.Do(req)
 	if err != nil {
 		// Drop the request URL from the error, it contains the API key
 		var ue *url.Error
@@ -77,7 +78,7 @@ func (ts *TorrentSearcher) SearchJackettRaw(ctx context.Context, query string, c
 	}
 
 	var jackettResp JackettResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jackettResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, jackettMaxBody)).Decode(&jackettResp); err != nil {
 		return nil, err
 	}
 	return jackettResp.Results, nil

@@ -18,7 +18,7 @@ func get(c *gin.Context, s *Service) {
 		n, _ := strconv.Atoi(c.Query(k))
 		return n
 	}
-	q := Query{TmdbID: num("tmdb_id"), Season: num("season"), Episode: num("episode"), Index: num("index")}
+	q := Query{TmdbID: num("tmdb_id"), Season: num("season"), Episode: num("episode"), Index: num("index"), Client: c.RemoteIP()}
 	if h := strings.ToLower(c.Query("hash")); hashPattern.MatchString(h) && q.Index >= 0 {
 		q.Hash = h
 	}

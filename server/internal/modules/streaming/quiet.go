@@ -309,7 +309,7 @@ const (
 // Resolve's measurement no longer counts once the source's stream got healthy.
 func (s *Service) rescueCtx(w *tsWarm, what string) context.Context {
 	s.warmMu.Lock()
-	measured := w.health != nil && w.health.ratio() < tsRescueRatio
+	measured := w.health.below(tsRescueRatio)
 	if measured && w.source != "" {
 		s.startingLocked(w.source, time.Now())
 		if r := s.playRuns[w.source]; r != nil && r.healthy {

@@ -2,7 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from 'react';
 import { contentLang, getApiUrl } from '@/shared/lib/api';
-import { getActiveProfileId, profileHeaders, PROFILE_EVENT } from '@/shared/lib/profile';
+import { getActiveProfileId, profileHeaders, PROFILE_EVENT, PROFILE_KEY } from '@/shared/lib/profile';
 import type {
   Notification,
   NotificationCountResponse,
@@ -218,6 +218,11 @@ function onProfileChange() {
   if (hadList) void refreshNotifications(true);
 }
 
+// Another tab switched profiles (tabs share localStorage)
+function onStorage(e: StorageEvent) {
+  if (e.key === PROFILE_KEY || e.key === null) onProfileChange();
+}
+
 function startPolling() {
   if (pollTimer || typeof window === 'undefined') return;
   pollTimer = setInterval(() => {
@@ -225,6 +230,7 @@ function startPolling() {
   }, REFRESH_MS);
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener(PROFILE_EVENT, onProfileChange);
+  window.addEventListener('storage', onStorage);
 }
 
 function stopPolling() {
@@ -233,6 +239,7 @@ function stopPolling() {
   pollTimer = null;
   document.removeEventListener('visibilitychange', onVisible);
   window.removeEventListener(PROFILE_EVENT, onProfileChange);
+  window.removeEventListener('storage', onStorage);
 }
 
 function subscribe(fn: () => void) {

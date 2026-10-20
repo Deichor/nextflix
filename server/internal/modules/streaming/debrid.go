@@ -408,6 +408,23 @@ func (d *tsDebrid) registered(hash string, index int) (tsDebridSource, bool) {
 	return src, ok
 }
 
+// listIndexed reports whether hash:index names a file by its place in TorBox's list rather than
+// TorrServer's file id (debridURL's rule): a registered file, or any file of a registered
+// torrent while TorBox is enabled.
+func (d *tsDebrid) listIndexed(hash string, index int) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	t := d.sources[strings.ToLower(hash)]
+	reg := false
+	if t != nil {
+		_, reg = t.files[index]
+	}
+	d.mu.Unlock()
+	return reg || (t != nil && d.enabled())
+}
+
 // hashSource reports whether hash is a debrid source (any file) while TorBox is enabled.
 func (d *tsDebrid) hashSource(hash string) (tsDebridSource, bool) {
 	if d == nil {

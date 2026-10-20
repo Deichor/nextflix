@@ -562,8 +562,9 @@ export function nextWarmDue(position: number, duration: number): boolean {
 // Warms a source on intent (detail page opened, Play, next episode near the end) so Play
 // starts instantly. Fire-and-forget, deduplicated until the title is released.
 // `next` passes the current episode's position for the server's next-episode window.
-export function prefetchResolve(params: ResolveParams, opts: { next?: { position: number; duration: number } } = {}): void {
-  if (typeof window === 'undefined' || !params.title?.trim()) return;
+// True when it asked the server (false: deduplicated, or nothing to ask).
+export function prefetchResolve(params: ResolveParams, opts: { next?: { position: number; duration: number } } = {}): boolean {
+  if (typeof window === 'undefined' || !params.title?.trim()) return false;
   const q = addCaps(resolveQuery({ ...params, title: params.title.trim() }));
   if (opts.next) {
     q.set('next_pos', String(Math.round(opts.next.position)));
@@ -572,7 +573,7 @@ export function prefetchResolve(params: ResolveParams, opts: { next?: { position
   const key = `${titleKey(params)}|${params.maxq ?? ''}`;
   const now = Date.now();
   const last = prefetched.get(key);
-  if (last && now - last < PREFETCH_TTL_MS) return;
+  if (last && now - last < PREFETCH_TTL_MS) return false;
   prefetched.set(key, now);
   fetch(`${getApiUrl()}/api/torrent-stream/prefetch?${q.toString()}`, { method: 'POST' })
     .then(res => (res.ok ? res.json() : null))
@@ -581,6 +582,7 @@ export function prefetchResolve(params: ResolveParams, opts: { next?: { position
       if (data?.status === 'busy' || data?.status === 'early' || data?.status === 'deferred') prefetched.delete(key);
     })
     .catch(() => {});
+  return true;
 }
 
 function beacon(url: string): void {

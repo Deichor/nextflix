@@ -253,6 +253,11 @@ func TestCueTracks(t *testing.T) {
 	if (*tsProbe)(nil).cueTracks() != nil {
 		t.Fatal("nil probe")
 	}
+	// MPEG-TS: a PGS segment per packet, so only text tracks
+	p.Format.FormatName = "mpegts"
+	if got := p.cueTracks(); fmt.Sprint(got) != fmt.Sprint([]CueTrack{want[1], want[2]}) {
+		t.Fatalf("mpegts: got %+v", got)
+	}
 }
 
 // pumpFile runs the cue pump over a recorded framecrc output.
@@ -344,5 +349,35 @@ func TestPumpCuesPGSUpdates(t *testing.T) {
 	}
 	if last := sink.heard[len(sink.heard)-1]; math.Abs(last-130.008) > 1e-6 { // the last audio packet's end
 		t.Fatalf("heard %v", sink.heard)
+	}
+}
+
+// A palette-only set starts no cue unless a clear came before it: not at the start of the
+// read, not after a cue held open too long. A cue the read ends within min seconds is none.
+func TestPumpCuesPGSNoFalseStarts(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("#tb 0: 1/1000\n#tb 1: 1/1000\n")
+	audio := 0
+	audioTo := func(ms int) {
+		for ; audio < ms; audio += 32 {
+			fmt.Fprintf(&b, "1, %d, %d, 32, 1024, 0x0\n", audio, audio)
+		}
+	}
+	sub := func(ms, size int) {
+		audioTo(ms)
+		fmt.Fprintf(&b, "0, %d, %d, 0, %d, 0x0\n", ms, ms, size)
+	}
+	sub(500, 300) // a fade of a line showing since before the read
+	sub(1000, 30)
+	sub(1500, 900) // a small picture after a clear
+	sub(2500, 30)
+	sub(3000, 5000) // a line whose clear is lost
+	sub(19000, 300) // a fade step after it was held for tsCueOpenMax
+	sub(19500, 6000)
+	audioTo(19600) // the stream ends 0.1 s into that line
+	sink := pumpFile(t, b.String(), 100, tsPGSRule)
+	want := []cueRec{{101.5, 102.5}, {103, 103 + tsCueOpenMax}}
+	if fmt.Sprint(sink.cues) != fmt.Sprint(want) {
+		t.Fatalf("cues %v, want %v", sink.cues, want)
 	}
 }

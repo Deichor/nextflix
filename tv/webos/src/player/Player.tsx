@@ -280,7 +280,7 @@ export default function Player({ req, onClose }: { req: PlayRequest; onClose: ()
   }, [idlePaused]);
 
   const engine = engineRef.current;
-  const subtitleTime = useCallback(() => engineRef.current?.subtitleTime() ?? 0, []);
+  const subtitleTime = useCallback(() => engineRef.current?.overlayTime() ?? 0, []);
   if (!s) {
     return (
       <div className="player" ref={rootRef} data-nav-layer="player">

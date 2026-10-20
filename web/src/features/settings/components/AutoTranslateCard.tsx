@@ -20,12 +20,13 @@ import {
   Toggle,
   type Status,
 } from '@/features/settings/components/ui';
-import { useT } from '@/shared/i18n';
+import { intlLocale, useLocale, useT } from '@/shared/i18n';
 
 const PROFILE = 'profile';
 
 export default function AutoTranslateCard() {
   const t = useT();
+  const locale = useLocale();
   const [settings, setSettings] = useState<AITranslateSettings | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [keyCleared, setKeyCleared] = useState(false);
@@ -90,8 +91,11 @@ export default function AutoTranslateCard() {
     setStatus(null);
     try {
       // An empty key falls back to the stored one on the server
-      const r = await testAITranslate(keyCleared ? '' : apiKey.trim());
+      const typed = keyCleared ? '' : apiKey.trim();
+      const r = await testAITranslate(typed);
       setStatus({ kind: r.success ? 'ok' : 'error', text: r.success ? t('settings.aiKeyOk') : r.message });
+      // A passing test of the stored key ends the pause on the server
+      if (r.success && !typed) setSettings((s) => (s ? { ...s, error: undefined, error_kind: undefined, error_at: undefined } : s));
     } catch (err) {
       setStatus({ kind: 'error', text: (err as Error)?.message || t('settings.couldNotReach') });
     } finally {
@@ -100,6 +104,15 @@ export default function AutoTranslateCard() {
   };
 
   const usage = settings?.usage;
+  const errorReason =
+    settings?.error_kind === 'credit'
+      ? t('settings.aiErrorCredit')
+      : settings?.error_kind === 'key'
+        ? t('settings.aiErrorKey')
+        : settings?.error || '';
+  const errorTime = settings?.error_at
+    ? new Date(settings.error_at).toLocaleTimeString(intlLocale(locale), { hour: '2-digit', minute: '2-digit' })
+    : '';
 
   return (
     <SettingsCard
@@ -174,6 +187,9 @@ export default function AutoTranslateCard() {
             <p className="text-xs text-[#8c8c8c]">
               {t('settings.aiUsage', { lines: usage.lines, cost: usage.cost_usd.toFixed(usage.cost_usd < 1 ? 4 : 2) })}
             </p>
+          )}
+          {settings.error && (
+            <p className="text-sm text-[#e87c03]">{t('settings.aiError', { time: errorTime, reason: errorReason })}</p>
           )}
 
           <div className="flex flex-wrap gap-3 pt-1">

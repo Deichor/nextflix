@@ -87,7 +87,7 @@ func (s *Service) receive(c *gin.Context) {
 	if s.files != nil {
 		// The full batch goes to the file; stdout only gets the header line
 		log.Printf("playback: %s", lines[0])
-		s.files.write(s.now(), lines)
+		s.files.write(s.now(), ip, lines)
 	} else {
 		for _, line := range lines {
 			log.Printf("playback: %s", line)

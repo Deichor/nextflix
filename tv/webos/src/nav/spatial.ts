@@ -44,11 +44,18 @@ function activeLayer(): Element {
 }
 
 const rendered = (el: Element) => el.getClientRects().length > 0;
+const focusable = (el: Element) => !(el as HTMLButtonElement).disabled && rendered(el);
 
 function focusables(root: Element): HTMLElement[] {
-  return Array.prototype.slice
-    .call(root.querySelectorAll('[data-nav]'))
-    .filter((el: HTMLElement) => !(el as HTMLButtonElement).disabled && rendered(el));
+  return Array.prototype.slice.call(root.querySelectorAll('[data-nav]')).filter(focusable);
+}
+
+/** The first (step 1) or last (step -1) focusable of `list`, checking only up to it */
+function edgeFocusable(list: NodeListOf<Element>, step: 1 | -1): Element | null {
+  for (let i = step > 0 ? 0 : list.length - 1; i >= 0 && i < list.length; i += step) {
+    if (focusable(list[i])) return list[i];
+  }
+  return null;
 }
 
 // The root font scales with the viewport width: measured once, again after a resize
@@ -101,11 +108,16 @@ function scrollAxis(el: HTMLElement, container: HTMLElement, axis: 'x' | 'y', sm
   if (mode === 'start') target = pos - pad;
   else if (rel < pad) target = pos - pad;
   else if (rel + size > view - pad) target = off + Math.min(rel + size - view + pad, rel - pad);
-  // The first and last focusable elements also bring in the text above / below them (as far as they stay in view)
+  // The first and last focusable elements also bring in the text above / below them (as far as they stay in view);
+  // a single one is the first (the heading above it stays)
   if (mode === 'edge' && !x) {
     const navs = content.querySelectorAll('[data-nav]');
-    if (navs.length && navs[0].contains(el)) target = Math.min(target, pos + size - view + pad);
-    if (navs.length && navs[navs.length - 1].contains(el)) target = Math.max(target, pos - pad);
+    const first = edgeFocusable(navs, 1);
+    if (first && first.contains(el)) target = Math.min(target, pos + size - view + pad);
+    else {
+      const end = edgeFocusable(navs, -1);
+      if (end && end.contains(el)) target = Math.max(target, pos - pad);
+    }
   }
   // Content extent as native scrolling had it: the content box or its last child's far edge
   const last = content.lastElementChild as HTMLElement | null;

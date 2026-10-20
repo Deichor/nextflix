@@ -890,9 +890,13 @@ so Play starts from the CDN at once (`instant.go`, `POST /api/torrent-stream/ins
   play stream. No `-skip_frame nokey`: H.264 counts only IDR frames as key, and on Night of the Living Dead (Matroska,
   I-frame keyframes) that read 9-34 MB per frame instead of about 0.5 MB.
 - Times snap down to a 10 s grid (clients ask coarser steps as multiples); widths to 160 / 240 / 320 / 480 / 640.
-  Frames are cached on disk in `/app/data/thumbs/<hash>/<index>/<t>_<w>.jpg` (`THUMB_CACHE_DIR`), written through a
-  temp file, capped at 500 MB: the least recently used (mtime, refreshed at most hourly on a hit) go first, down to
-  90 %. A frame ffmpeg could not make is remembered for 1 minute (404).
+  Frames are cached on disk in `/app/data/thumbs/<hash>/<ts|tb><index>/<t>_<w>.jpg` (`THUMB_CACHE_DIR`), written
+  through a temp file, capped at 500 MB: the least recently used (mtime, refreshed at most hourly on a hit) go first,
+  down to 90 %. A frame ffmpeg could not make is remembered for 1 minute (404).
+- `index` is TorBox's list position for a TorBox source and TorrServer's file id otherwise; a torrent that falls
+  back from TorBox to its swarm can name another episode by the same number. So frames on disk (`ts` / `tb`), their
+  `ETag` and the probe cache (`probeKey`: `hash:index`, `hash:index:tb`) keep the two apart, and browsers revalidate
+  frames (`Cache-Control: no-cache`, 304 while the `ETag` matches) instead of keeping them immutable.
 - Limits: concurrent requests for one frame share one job; one ffmpeg per torrent and 2 server-wide. A request waits
   up to 6 s (then 504); a job whose request timed out finishes anyway (up to 15 s) so the retry is a hit. A job
   whose viewers all aborted their requests is cancelled only when the viewer's latest request is more than 2 grid
@@ -973,7 +977,11 @@ source is linked through the source cache when it starts.
   from <hash>: it kept up at x<ratio> <age> ago (draining=… critical=…)` at most every 30 s (an iPhone whose Safari
   blocked autoplay left a TorBox file at x3.05 for another encode at x9.34 27 s after the pick: restart at 0:00,
   subtitle timing lost). An older verdict gives way to a `draining=1` / `critical=1` poll (the source may have slowed
-  down since); without those flags a source that kept up stays. A sidegrade is logged with the reason and the
+  down since); without those flags a source that kept up stays. The age is the measurement's own: a cached source
+  played on a swarm verdict of the last 3 minutes takes that verdict and its time, and the stored health of a cached
+  TorBox source has no time, so it never counts as recent. A pick answered at the cap before its verdict starves only
+  when it delivered under its need over ≥ 2 s (a lower resolution only with `critical=1`); otherwise only a `draining=1` /
+  `critical=1` poll leaves it, for a spare faster than it was so far. A sidegrade is logged with the reason and the
   player's flags. A spare that does not keep up is never offered: a switch reloads or restarts the player (the TV
   once left a 2160p pack measured at 17.83 MB/s for a 1080p at 0.51 MB/s). For a starving source a spare of a lower
   resolution counts too when it keeps up (the playing resolution or higher is preferred).
@@ -1849,12 +1857,13 @@ tells both players where an episode's intro and end credits are. Sources, first 
    (`fileChapters` in `main.go`). Only whole names count (`Intro`, `Opening`, `OP - <song>`, `Opening Credits`,
    `Credits`, `End Credits`, `Ending`, `ED`, `Outro`, a few Turkish / German / French / Spanish / Italian ones);
    generic chapters (`Chapter 3`, `Opening Scene`) are ignored.
-2. Community timestamps: [TheIntroDB](https://theintrodb.org/docs) (`/v3/media?tmdb_id=&season=&episode=&duration_ms=`,
+2. Community timestamps: [TheIntroDB](https://theintrodb.org/docs) (`/v4/media?tmdb_id=&season=&episode=&duration_ms=`,
    TMDB id of the show, the file length picks the release version; 500 reads a day per IP without a key), then
    [IntroDB](https://introdb.app/docs) (`/segments?imdb_id=&season=&episode=`, IMDb id via TMDB external ids) for
-   what the first one lacks. The answer is stored per episode and file length (±5 s) in `skip_segments`: found 30
-   days, not found (or a segment missing because a database failed) 3 days; failures that found nothing are not
-   stored and pause lookups for 10 min (an hour after a 429).
+   what the first one lacks. The answer is stored per episode and file length (rounded to 10 s, shared ±5 s) in
+   `skip_segments`: found 30 days, not found (or a segment missing because a database failed) 3 days; failures that
+   found nothing are not stored and pause lookups for 10 min (an hour after a 429). Only lengths of 1 min to 4 h are
+   looked up, and each client IP starts at most 10 new lookups, then one per 6 min.
 
 Audio fingerprinting (Jellyfin Intro Skipper style: chromaprint of several episodes of a season, black frames for
 credits) was left out: it needs the decoded audio of many episodes, i.e. gigabytes read from swarms while one plays.

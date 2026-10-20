@@ -705,7 +705,7 @@ func tsVideoQuality(width, height int) int {
 
 // probedQuality is the resolution of a file's probed video (0 when it was not probed yet).
 func (s *Service) probedQuality(hash string, index int) int {
-	v, ok := s.probeCache.Load(fmt.Sprintf("%s:%d", hash, index))
+	v, ok := s.probeCache.Load(s.probeKey(hash, index))
 	if !ok {
 		return 0
 	}

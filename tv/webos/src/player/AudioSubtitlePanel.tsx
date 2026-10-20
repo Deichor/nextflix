@@ -207,7 +207,7 @@ export default function AudioSubtitlePanel({ audioTracks, audio, onAudio, origin
                         data-nav
                         data-nav-id={`sub-${code}`}
                         data-nav-default={isActive ? '' : undefined}
-                        onClick={() => onSubtitle(s.id)}
+                        onClick={() => onSubtitle(isActive && active ? active.id : s.id)}
                       >
                         <span className="panel-check">{isActive && <Check className="panel-check-icon" />}</span>
                         <span className="panel-label">

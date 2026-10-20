@@ -67,9 +67,19 @@ func tsInputGuard() []string {
 	return []string{"-protocol_whitelist", tsProtocolWhitelist, "-format_whitelist", tsFormatWhitelist}
 }
 
-// probeFile runs ffprobe on a torrent file through TorrServer (cached per hash:index).
+// probeFile runs ffprobe on a torrent file through TorrServer (cached per probeKey).
 func (s *Service) probeFile(ctx context.Context, hash string, index int) (*tsProbe, error) {
 	return s.probeFileTimeout(ctx, hash, index, 90*time.Second)
+}
+
+// probeKey is the probe cache key of a file: "hash:index", with ":tb" when index is the file's
+// place in TorBox's list. A torrent that falls back from TorBox to its swarm is read by
+// TorrServer's file ids, and the same number can be another episode there.
+func (s *Service) probeKey(hash string, index int) string {
+	if s.debrid.listIndexed(hash, index) {
+		return fmt.Sprintf("%s:%d:tb", hash, index)
+	}
+	return fmt.Sprintf("%s:%d", hash, index)
 }
 
 // tsProbeCall is a running ffprobe of one file; later callers wait for it instead of
@@ -85,7 +95,7 @@ type tsProbeCall struct {
 // runs its own with the time it has left. Background work waits in the quiet gate before it
 // registers its probe, so a player never joins a probe that is put off.
 func (s *Service) probeFileTimeout(ctx context.Context, hash string, index int, timeout time.Duration) (*tsProbe, error) {
-	key := fmt.Sprintf("%s:%d", hash, index)
+	key := s.probeKey(hash, index)
 	deadline := time.Now().Add(timeout)
 	quiet := false
 	for tries := 0; ; tries++ {

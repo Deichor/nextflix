@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CUE_CHECK_MAX_MS, cueCheckDelay, nextCueChange } from './cueTiming.ts';
+import { CUE_CHECK_MAX_MS, activeCues, cueCheckDelay, nextCueChange } from './cueTiming.ts';
 
 const cues = [
   { start: 10, end: 12 },
@@ -28,4 +28,26 @@ test('cueCheckDelay: right after the boundary, never longer than the old poll', 
   assert.equal(cueCheckDelay(cues, 31), CUE_CHECK_MAX_MS);
   // At the boundary itself: a few ms, never 0 or negative
   assert.ok(cueCheckDelay(cues, 10) >= 4);
+});
+
+test('activeCues: every cue showing at t in start order, a long cue under many short ones too', () => {
+  const list = [{ start: 0, end: 100, text: 'sign' }];
+  for (let i = 1; i <= 40; i++) list.push({ start: i, end: i + 0.5, text: `line ${i}` });
+  assert.deepEqual(activeCues(list, 30.2).map(c => c.text), ['sign', 'line 30']);
+  assert.deepEqual(activeCues(list, 30.7).map(c => c.text), ['sign']);
+  assert.deepEqual(activeCues(list, 100), []);
+  // The long cue's end counts for the next change too
+  near(nextCueChange(list, 45), 55);
+});
+
+test('activeCues: overlaps, boundaries and empty lists', () => {
+  assert.deepEqual(activeCues(cues, 11.5), [cues[0], cues[1]]);
+  assert.deepEqual(activeCues(cues, 12), [cues[1]]); // an end is exclusive
+  assert.deepEqual(activeCues(cues, 15), [cues[1], cues[2]]); // a start is inclusive
+  assert.deepEqual(activeCues(cues, 9.99), []);
+  assert.deepEqual(activeCues(cues, 31), []);
+  assert.deepEqual(activeCues([], 5), []);
+  // Hidden overlay (an unknown stream start): nothing shows, the next check is the regular poll
+  assert.deepEqual(activeCues(cues, -Infinity), []);
+  assert.equal(cueCheckDelay(cues, -Infinity), CUE_CHECK_MAX_MS);
 });

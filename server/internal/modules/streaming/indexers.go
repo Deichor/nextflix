@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -70,7 +71,7 @@ func (ts *TorrentSearcher) Indexers(ctx context.Context) ([]tsIndexer, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := jackettClient.Do(req)
 	if err != nil {
 		return nil, tsStripURL(err)
 	}
@@ -91,7 +92,7 @@ func (ts *TorrentSearcher) Indexers(ctx context.Context) ([]tsIndexer, error) {
 			} `xml:"caps>searching>movie-search"`
 		} `xml:"indexer"`
 	}
-	if err := xml.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, jackettMaxBody)).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("jackett indexer list: %w", err)
 	}
 	var out []tsIndexer
@@ -131,7 +132,7 @@ func (ts *TorrentSearcher) SearchIndexer(ctx context.Context, indexer, query str
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := jackettClient.Do(req)
 	if err != nil {
 		return nil, tsStripURL(err)
 	}
@@ -140,7 +141,7 @@ func (ts *TorrentSearcher) SearchIndexer(ctx context.Context, indexer, query str
 		return nil, fmt.Errorf("jackett returned status %d", resp.StatusCode)
 	}
 	var jr JackettResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jr); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, jackettMaxBody)).Decode(&jr); err != nil {
 		return nil, err
 	}
 	return jr.Results, nil

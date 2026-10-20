@@ -82,15 +82,17 @@ type tsCueRule struct {
 var tsPGSRule = tsCueRule{empty: 64, picture: true, update: 1500, min: 0.25}
 
 // cueTracks lists the subtitle tracks of a probed file whose packets give cue times (text and
-// PGS; never VobSub or DVB).
+// PGS; never VobSub or DVB). MPEG-TS carries each PGS segment as its own packet with its own
+// time, so display sets cannot be told apart there: no picture tracks.
 func (p *tsProbe) cueTracks() []CueTrack {
 	if p == nil {
 		return nil
 	}
+	pictures := !strings.Contains(p.Format.FormatName, "mpegts")
 	var out []CueTrack
 	for i := range p.Streams {
 		st := &p.Streams[i]
-		if st.CodecType != "subtitle" || !tsSubTextCodecs[st.CodecName] && !tsSubPictureCodecs[st.CodecName] {
+		if st.CodecType != "subtitle" || !tsSubTextCodecs[st.CodecName] && !(pictures && tsSubPictureCodecs[st.CodecName]) {
 			continue
 		}
 		out = append(out, CueTrack{Stream: i, Lang: tsTag(st, "language"), Title: tsTag(st, "title"),
@@ -208,7 +210,7 @@ func tsPumpCues(r io.ReadCloser, sink CueSink, offset float64, rule tsCueRule, l
 				// end showed until there
 				if pic != nil {
 					pic.endSet(cue)
-					if heard > pic.open {
+					if heard-pic.open >= rule.min {
 						cue(pic.open, heard)
 					}
 				}
@@ -269,6 +271,7 @@ type tsPictureCues struct {
 	rule      tsCueRule
 	open, set float64 // start of the cue showing, time of the display set being read (+Inf none)
 	size      int     // bytes of that display set so far
+	cleared   bool    // the last set cleared the screen
 }
 
 // packet takes a packet of the track; cue gets the cues that ended.
@@ -281,7 +284,8 @@ func (c *tsPictureCues) packet(at float64, size int, cue func(start, end float64
 }
 
 // endSet applies the rule to the display set read: it clears the screen, changes the cue
-// showing or starts one.
+// showing or starts one. A set below update bytes starts a cue only after a clear: otherwise
+// it may update a line showing since before the read (or since a cue held open too long).
 func (c *tsPictureCues) endSet(cue func(start, end float64)) {
 	if math.IsInf(c.set, 1) {
 		return
@@ -292,8 +296,11 @@ func (c *tsPictureCues) endSet(cue func(start, end float64)) {
 		}
 		c.open = math.Inf(1)
 	}
-	if c.size > c.rule.empty && math.IsInf(c.open, 1) {
-		c.open = c.set
+	switch {
+	case c.size <= c.rule.empty:
+		c.cleared = true
+	case math.IsInf(c.open, 1) && (c.size >= c.rule.update || c.cleared):
+		c.open, c.cleared = c.set, false
 	}
 	c.set, c.size = math.Inf(1), 0
 }

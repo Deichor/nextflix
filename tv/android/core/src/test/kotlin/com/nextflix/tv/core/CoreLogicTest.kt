@@ -1,5 +1,6 @@
 package com.nextflix.tv.core
 
+import com.nextflix.tv.core.data.HomeSnapshotStore
 import com.nextflix.tv.core.data.favoritesOf
 import com.nextflix.tv.core.data.feedsOf
 import com.nextflix.tv.core.data.isOldServer
@@ -9,6 +10,7 @@ import com.nextflix.tv.core.data.toFavoriteJson
 import com.nextflix.tv.core.data.toHomeData
 import com.nextflix.tv.core.data.toJson
 import com.nextflix.tv.core.data.top10Of
+import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.model.HomeData
 import com.nextflix.tv.core.model.HomeGenres
 import com.nextflix.tv.core.model.MediaType
@@ -29,12 +31,18 @@ import com.nextflix.tv.core.prefs.SubtitleStyle
 import com.nextflix.tv.core.session.ServerAddress
 import com.nextflix.tv.core.stream.PlaybackCaps
 import com.nextflix.tv.core.stream.ResolveParams
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 
 class CoreLogicTest {
     private val server = "http://192.168.1.221:8252"
@@ -217,5 +225,24 @@ class CoreLogicTest {
         val favs = favoritesOf(json("""[{"tmdb_id": 3, "media_type": "tv", "title": "S", "backdrop_path": "/b.jpg"}]"""))
         assertEquals(listOf("tv-3"), favs.map { it.key })
         assertEquals(favs, favoritesOf(JsonArray(favs.map { it.toFavoriteJson() })))
+    }
+
+    @Test
+    fun snapshotWritesDropFilesTooOldToRead(): Unit = runBlocking {
+        val dir = Files.createTempDirectory("home").toFile()
+        try {
+            val old = File(dir, "home-old-en.json").apply { writeText("{}") }
+            old.setLastModified(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(8))
+            val recent = File(dir, "home-recent-en.json").apply { writeText("{}") }
+            val job = Job()
+            HomeSnapshotStore(dir, NextflixJson, CoroutineScope(job)).writeHome(server, AppLanguage.En, json("""{"version": 1}""").toHomeData())
+            job.children.forEach { it.join() }
+            assertFalse(old.exists())
+            assertTrue(recent.exists())
+            // The new snapshot next to the recent one
+            assertEquals(2, dir.listFiles()!!.size)
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

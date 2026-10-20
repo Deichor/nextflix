@@ -197,3 +197,76 @@ func TestAvoidKeepsTheNewest(t *testing.T) {
 		t.Fatalf("avoid %v", q.avoid)
 	}
 }
+
+// cachedWarm is the warm state cachedResolve's request held.
+func cachedWarm(t *testing.T, s *Service) *tsWarm {
+	t.Helper()
+	q, _, _ := parseQueryOf(s, "type=movie&title=Movie&year=2020&runtime=100&hevc=1&t=1646")
+	s.warmMu.Lock()
+	defer s.warmMu.Unlock()
+	w := s.warms[tsResolveKey(q)]
+	if w == nil {
+		t.Fatal("no warm state")
+	}
+	return w
+}
+
+// A cached source played on a recent swarm verdict takes that verdict and its time, not the
+// stored health with the time of the request (it would look like a fresh keeps-up verdict).
+func TestResolveCachedRecentVerdictKeepsItsTime(t *testing.T) {
+	f := newFakeTorBox(t)
+	cached := strings.Repeat("5", 40)
+	var hits atomic.Int32
+	ts := reuseTorrServer(t, cached, 600_000_000, 40_000, &hits)
+	s := reuseSetup(t, f, ts.URL, false)
+	seen := time.Now().Add(-2 * time.Minute)
+	s.swarmSeen.Store(cached+":1", tsSwarmSeen{at: seen, health: *newHealth(40_000, 100_000, 1, 1)})
+	got, _, searched := cachedResolve(t, s, cachedTorrent(cached, 600_000_000), strings.Repeat("6", 40))
+	if got.Hash != cached || searched || got.Health == nil || got.Health.Rate != 40_000 {
+		t.Fatalf("answer %s %v, searched %v; want the cached source with the recent verdict", got.Hash, got.Health, searched)
+	}
+	w := cachedWarm(t, s)
+	s.warmMu.Lock()
+	defer s.warmMu.Unlock()
+	if w.health == nil || w.health.Rate != 40_000 || !w.healthAt.Equal(seen) {
+		t.Fatalf("warm health %v at %v, want the verdict of %v", w.health, w.healthAt, seen)
+	}
+}
+
+// The stored health of a cached TorBox source is of unknown age: tsSideTrust never applies.
+func TestResolveCachedTorBoxHealthHasNoTime(t *testing.T) {
+	f := newFakeTorBox(t)
+	var hits atomic.Int32
+	ts := reuseTorrServer(t, tbHash, 3<<20, 40_000, &hits)
+	s := reuseSetup(t, f, ts.URL, true)
+	registerVideo(t, s)
+	res := cachedTorrent(tbHash, 3<<20)
+	res.Debrid, res.Source = true, tsSourceTorBox
+	cachedResolve(t, s, res, strings.Repeat("6", 40))
+	w := cachedWarm(t, s)
+	s.warmMu.Lock()
+	defer s.warmMu.Unlock()
+	if w.health == nil || !w.healthAt.IsZero() || !w.healthCDN {
+		t.Fatalf("warm health %v at %v (cdn %v), want the stored one without a time", w.health, w.healthAt, w.healthCDN)
+	}
+}
+
+// A pick answered before its verdict (the answer cap) is no swarm verdict for a later play.
+func TestResolvePartialPickIsNoSwarmVerdict(t *testing.T) {
+	s, _ := newWarmService(t)
+	q := tsResolveQuery{mediaType: "movie", title: "Detour", year: 1945}
+	key := tsResolveKey(q)
+	h := newHealth(2*tsMB, tsMB, 3, 2)
+	h.partial, h.KeepsUp, h.sampled = true, false, 5*time.Second
+	s.findFn = func(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
+		return &tsResolveResult{Hash: hx('a'), Index: 1, Quality: "1080p", Health: h}, nil, nil
+	}
+	f, _ := s.startResolve(key, q)
+	<-f.done
+	if f.err != nil {
+		t.Fatal(f.err)
+	}
+	if _, ok := s.recentSwarm(hx('a'), 1); ok {
+		t.Fatal("a health before its verdict was noted as a swarm verdict")
+	}
+}

@@ -181,9 +181,7 @@ func (s *Service) Start(ctx context.Context) {
 func (s *Service) EnsureSettings() error { return s.settings.ensure() }
 
 func (s *Service) Settings() SettingsView {
-	v := s.settings.get().view()
-	v.AI.Usage = s.ai.usage()
-	return v
+	return s.aiView(s.settings.get().view())
 }
 
 func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
@@ -209,9 +207,16 @@ func (s *Service) UpdateSettings(in SettingsInput) (SettingsView, error) {
 	if before.AnthropicAPIKey != st.AnthropicAPIKey {
 		s.ai.resetKeyErrors()
 	}
-	v := st.view()
+	return s.aiView(st.view()), nil
+}
+
+// aiView adds the AI translation's usage and account error to v.
+func (s *Service) aiView(v SettingsView) SettingsView {
 	v.AI.Usage = s.ai.usage()
-	return v, nil
+	if e, at := s.ai.accountError(); e != nil {
+		v.AI.Error, v.AI.ErrorKind, v.AI.ErrorAt = e.Msg, e.Kind, at.UTC().Format(time.RFC3339)
+	}
+	return v
 }
 
 // providerResult is what one source delivered.

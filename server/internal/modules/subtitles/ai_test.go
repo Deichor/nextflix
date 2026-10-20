@@ -228,7 +228,7 @@ func TestAIKeyErrorStopsTheJob(t *testing.T) {
 	tr := newAITranslator(nil, t.TempDir())
 	tr.call = func(context.Context, string, string, string) (string, aiTokens, error) {
 		calls.Add(1)
-		return "", aiTokens{}, AIKeyError{"bad key"}
+		return "", aiTokens{}, AIKeyError{"bad key", aiErrKey}
 	}
 	lang, _ := aiLanguage("tr")
 	j := tr.job("k|tr", lang, func() string { return "" })

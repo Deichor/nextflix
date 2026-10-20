@@ -287,11 +287,25 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
               </div>
             )}
             <div className="detail-actions" data-nav-group="detail-actions">
-              {unavailable ? (
-                <button type="button" className="btn btn-disabled" data-nav data-nav-id="detail-play" onFocus={() => setCaption('')}>
-                  <CalendarClock className="btn-icon" /> {unavailable}
-                </button>
-              ) : null}
+              {/* One element either way, so it keeps the focus when the availability answer arrives */}
+              <button
+                type="button"
+                className={`btn ${unavailable ? 'btn-disabled' : 'btn-primary'}`}
+                data-nav
+                data-nav-id="detail-play"
+                onFocus={() => setCaption('')}
+                onClick={unavailable ? undefined : playMain}
+              >
+                {unavailable ? (
+                  <><CalendarClock className="btn-icon" /> {unavailable}</>
+                ) : (
+                  <>
+                    <Play className="btn-icon btn-icon-fill" />
+                    {t(resume ? 'player.resume' : 'player.play')}
+                    {!!(resumeLabel || nextLabel) && <span className="btn-detail">{resumeLabel || nextLabel}</span>}
+                  </>
+                )}
+              </button>
               {d.type === 'movie' && availability?.status === 'in_theaters' && (
                 <button
                   type="button"
@@ -311,20 +325,6 @@ export default function DetailScreen({ id, type, autoplay }: Props) {
                   }}
                 >
                   <Clapperboard className="btn-icon" /> {t(cinemaAsk ? 'cinema.play' : 'cinema.watchAnyway')}
-                </button>
-              )}
-              {!unavailable && (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  data-nav
-                  data-nav-id="detail-play"
-                  onFocus={() => setCaption('')}
-                  onClick={playMain}
-                >
-                  <Play className="btn-icon btn-icon-fill" />
-                  {t(resume ? 'player.resume' : 'player.play')}
-                  {!!(resumeLabel || nextLabel) && <span className="btn-detail">{resumeLabel || nextLabel}</span>}
                 </button>
               )}
               {actions.map(a => (

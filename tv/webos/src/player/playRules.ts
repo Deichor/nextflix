@@ -18,12 +18,21 @@ export function openStart(startAt: number, duration: number, firstResume: boolea
 /**
  * An answer of a subtitle file. Empty: another subtitle only when this one never answered (a quota or
  * broken file); a live track that already answered asks again (a network error or 5xx while polling).
- * `loads`: earlier answers that got through.
+ * `loads`: earlier answers that got through. 'ai-off': the AI translation cannot be used now (`failed` 'ai':
+ * no credit, a bad key), another subtitle like after a quota, else the same one after AI_OFF_RETRY_MS.
  */
-export function cueAnswer(cues: number, partial: boolean, loads: number): 'show' | 'fallback' | 'retry' {
+export function cueAnswer(cues: number, partial: boolean, loads: number, failed?: 'error' | 'ai'): 'show' | 'fallback' | 'retry' | 'ai-off' {
   if (cues > 0 || partial) return 'show';
+  if (failed === 'ai') return 'ai-off';
   return loads === 0 ? 'fallback' : 'retry';
 }
+
+/** The AI note shows only while a shown answer says its lines are being translated (any failed or empty answer ends it). */
+export function cueTranslating(answer: ReturnType<typeof cueAnswer>, translating?: boolean): boolean {
+  return answer === 'show' && !!translating;
+}
+
+export const AI_OFF_RETRY_MS = 5 * 60 * 1000;
 
 // A subtitle file is asked again this often while partial (a live track grows, the timing runs)...
 export const LIVE_CUES_POLL_MS = 15000;

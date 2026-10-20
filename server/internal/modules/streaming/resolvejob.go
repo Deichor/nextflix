@@ -124,7 +124,7 @@ func (s *Service) startResolve(key string, q tsResolveQuery) (*tsFlight, bool) {
 		s.failedAt.Delete(key)
 		s.storeSource(key, *res)
 		// Measured just now: a play soon after opens it without measuring it again
-		if res.Health != nil && !res.Health.cached && !res.Debrid {
+		if res.Health != nil && !res.Health.cached && !res.Health.partial && !res.Debrid {
 			s.noteSwarm(res.Hash, res.Index, res.Health)
 		}
 		// After the store, so a quick upgrade is never overwritten by this pick
@@ -263,12 +263,12 @@ func (h handler) resolve(c *gin.Context) {
 		if !(at > 0 && at < 86400) {
 			at = 0
 		}
-		why := s.verifyCached(c.Request.Context(), q, res, at, w)
+		why, measuredAt := s.verifyCached(c.Request.Context(), q, res, at, w)
 		if c.Request.Context().Err() != nil {
 			return
 		}
 		if why == "" {
-			s.useSource(w, res)
+			s.useSourceAt(w, res, measuredAt)
 			res.Cached = true
 			c.JSON(http.StatusOK, res)
 			return

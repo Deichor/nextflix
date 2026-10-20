@@ -16,15 +16,17 @@ import {
 import { pretimeNext } from './pretime';
 import { BufferMonitor, bufferedEnd, type BufferVerdict } from './bufferHealth';
 import { healthRatio, holdDone, needsStartHold, type HoldKind } from './startBuffer';
-import { lengthsMatch, timeScale } from './switchLength';
+import { lengthsMatch, switchStart, timeScale } from './switchLength';
 import { MseStream, mseAvailable, type MseFailure, type StreamUrls } from './mseStream';
 import { PlaybackLog, markSeek, type LogContext } from './playbackLog';
-import { DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addSample, leadOf, leadSample, loadSamples, saveSamples } from './clockLead';
+import {
+  DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addKindSample, eventTime, leadFor, leadSample, loadSamples, saveSamples, type LeadKind,
+} from './clockLead';
 import { isWebOS } from '../lib/webos';
 import { checkNet, type NetState } from '../lib/netStatus';
 import {
-  LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs, handoverPlan, keepsLowerCap, lowerCap, openStart, progressToSave,
-  subtitleRetryMs,
+  AI_OFF_RETRY_MS, LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs, cueTranslating, handoverPlan, keepsLowerCap,
+  lowerCap, openStart, progressToSave, subtitleRetryMs,
 } from './playRules';
 import {
   DELAY_SETTLE_MS, DelayLog, idHash, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
@@ -254,7 +256,9 @@ export class PlayerEngine {
   private hash = '';
   private index = 0;
   private offset = 0;
+  // exact: the stream's start is settled (/seekpoint answered or gave up); offsetSure: it is known exactly
   private exact = true;
+  private offsetSure = true;
   private seekSeq = 0;
   private seekCtrl: AbortController | null = null;
   private mse: MseStream | null = null;
@@ -283,6 +287,8 @@ export class PlayerEngine {
   private stallArmed = false;
   // The viewer's pause (0 = none), its keep-alive timer, and the last Play after a long pause
   private pausedAt = 0;
+  // The player paused the element itself (stopStream): its pause event is not the viewer's
+  private selfPause = false;
   private keepAliveTimer?: ReturnType<typeof setInterval>;
   private resumedAt = 0;
   private stallResetTimer?: Timer;
@@ -297,6 +303,8 @@ export class PlayerEngine {
   private subAltSource: StreamSource | null = null;
   private wantSubLang = '';
   private cueTimer?: Timer;
+  // Counts applySubtitle calls: only the latest one's answers are shown
+  private subGen = 0;
   private subDecided = false;
   private subUserPicked = false;
   // A spliced-in file: its list picks the subtitle again (the old file's may be timed for the other release)
@@ -320,8 +328,8 @@ export class PlayerEngine {
   private delayTimer?: Timer;
   // How far currentTime runs ahead of picture and sound, measured after seeks (clockLead.ts)
   private leadSamples = loadSamples();
-  private clockLead = leadOf(this.leadSamples, isWebOS() ? DEFAULT_LEAD_S : 0);
-  private leadProbe: { target: number; t0: number } | null = null;
+  private clockLead = leadFor(this.leadSamples, 'muxed', isWebOS() ? DEFAULT_LEAD_S : 0);
+  private leadProbe: { target: number; t0: number; kind: LeadKind } | null = null;
   private leadTimer?: Timer;
 
   constructor(video: HTMLVideoElement, req: PlayRequest, locale: Locale) {
@@ -421,6 +429,11 @@ export class PlayerEngine {
   /** File time the subtitle overlay shows. */
   subtitleTime(): number {
     return this.positionNow() - this.clockLead - this.state.subDelay;
+  }
+
+  /** subtitleTime for the overlay; -Infinity (no cue) while a muxed stream's start is still asked for */
+  overlayTime(): number {
+    return this.exact ? this.subtitleTime() : -Infinity;
   }
 
   /** Subtitle timing (seconds, + shows them later); kept for the playing file like on the web */
@@ -657,6 +670,7 @@ export class PlayerEngine {
     // Sent first: queued events belong to the previous source's context
     this.plog?.flush();
     this.plog?.note('open', { why: reason, origin, to: `${src.hash.slice(0, 8)}:${src.index}`, at: startAt, debrid: !!src.debrid });
+    if (prev) this.dropDeferredUpgrade(src.hash);
     this.stopStream();
     const session = ++this.session;
     // Counted from the open: a slow probe (the header from a weak swarm) counts too
@@ -713,18 +727,18 @@ export class PlayerEngine {
     const duration = Number(probe?.duration) || 0;
     const tracks: TrackInfo[] = Array.isArray(probe?.audio_tracks) ? probe.audio_tracks : [];
     this.serverSplit = probe?.split === true;
-    // Another cut of the title (a WEB-DL vs a BluRay): the same moment, mapped by the lengths
-    if (reason !== 'open' && reason !== 'revert' && prev && prev.duration > 0 && duration > 0 && lengthsMatch(prev.duration, duration)) {
-      startAt *= timeScale(prev.duration, duration);
-    }
-    // A switch never starts over: a file that does not reach the position (a pack's wrong file, another
-    // cut) sends the player back to the source it came from (its torrent is kept 60 s after its stream)
-    if (reason !== 'open' && reason !== 'revert' && prev && startAt > 30 && duration > 0 &&
-        (startAt >= duration - 10 || (prev.duration > 0 && Math.abs(duration - prev.duration) > 60))) {
-      console.info(`[restart] guard: ${h.slice(0, 8)}:${src.index} lasts ${duration.toFixed(0)} s (was ${prev.duration.toFixed(0)}), position ${startAt.toFixed(0)}: back to ${prev.src.hash.slice(0, 8)}`);
-      releaseTorrents([h]);
-      this.openSource(prev.src, startAt, prev.origin, 'revert');
-      return;
+    // Another release of the title (a WEB-DL vs a BluRay): the same moment, mapped by the lengths. A switch
+    // never starts over: a file that does not reach the position (a pack's wrong file, another cut) sends
+    // the player back to the source it came from (its torrent is kept 60 s after its stream)
+    if (reason !== 'open' && reason !== 'revert' && prev) {
+      const at = switchStart(prev.duration, duration, startAt);
+      if (at === null) {
+        console.info(`[restart] guard: ${h.slice(0, 8)}:${src.index} lasts ${duration.toFixed(0)} s (was ${prev.duration.toFixed(0)}), position ${startAt.toFixed(0)}: back to ${prev.src.hash.slice(0, 8)}`);
+        releaseTorrents([h]);
+        this.openSource(prev.src, startAt, prev.origin, 'revert');
+        return;
+      }
+      startAt = at;
     }
     // Resumes (Continue Watching) carry no original language; the default track needs it
     if (!this.meta.original_language && tracks.length > 1) {
@@ -859,9 +873,14 @@ export class PlayerEngine {
     this.plog?.note('restart', { why: reason, at: target, mode: split ? 'split' : this.noMse ? 'src' : 'muxed', recoveries: this.recoveries });
     // Split streams carry the file's timestamps: position = currentTime
     this.splitMode = split;
+    this.updateLead();
+    // A new stream's clock starts at 0 (or where its first seek moves it): sampled for its mode
+    clearTimeout(this.leadTimer);
+    this.leadProbe = this.noMse ? null : { target: 0, t0: 0, kind: split ? 'split' : 'muxed' };
     this.offset = split ? 0 : target;
     this.startPos = target;
     this.exact = split || target <= 0;
+    this.offsetSure = this.exact;
     this.hasPlayed = false;
     this.set({ buffering: true, ended: false, position: target });
     if (this.noMse) {
@@ -903,24 +922,27 @@ export class PlayerEngine {
     // instead of keeping the requested time as the offset for the whole stream. The answer is the file time
     // of the stream's time 0: the first decode time, up to two frames before the keyframe shows, so at
     // t=0 too it is slightly negative (positions ran ~80 ms ahead of the picture without it).
+    // An answer without exact (an MPEG-TS source) is the best estimate there is: used, but no splice relies on it.
+    // Meanwhile the subtitles wait (overlayTime).
     const q = `hash=${this.hash}&index=${this.index}&t=${target.toFixed(3)}&audio=${this.state.audio}${capsQuery()}`;
     const ask = (attempt: number) => {
       const ctrl = new AbortController();
       this.seekCtrl = ctrl;
       const timer = setTimeout(() => ctrl.abort(), 15000);
       getJson(`/api/torrent-stream/seekpoint?${q}`, { signal: ctrl.signal })
-        .then(data => (typeof data?.t === 'number' && data.t >= -1 && data.t <= target + 1 && data.exact !== false ? data.t : NaN))
-        .catch(() => NaN)
-        .then(t => {
+        .then(data => (typeof data?.t === 'number' && data.t >= -1 && data.t <= target + 1 ? { t: data.t as number, sure: data.exact !== false } : null))
+        .catch(() => null)
+        .then(a => {
           clearTimeout(timer);
           if (seq !== this.seekSeq || this.destroyed) return;
-          if (isNaN(t) && attempt < SEEKPOINT_RETRY_MS.length) {
+          if (!a && attempt < SEEKPOINT_RETRY_MS.length) {
             this.seekRetry = setTimeout(() => { if (seq === this.seekSeq && !this.destroyed) ask(attempt + 1); }, SEEKPOINT_RETRY_MS[attempt]);
             return;
           }
-          if (isNaN(t)) console.info(`[restart] no seek point for t=${target.toFixed(1)}: positions may be off by a keyframe interval`);
-          this.plog?.note('seekpoint', { at: target, fix: isNaN(t) ? 'none' : t - target, attempt });
-          this.offset = isNaN(t) ? target : t;
+          if (!a || !a.sure) console.info(`[restart] ${a ? 'no exact' : 'no'} seek point for t=${target.toFixed(1)}: positions may be off by a keyframe interval`);
+          this.plog?.note('seekpoint', { at: target, fix: a ? a.t - target : 'none', exact: a ? a.sure : undefined, attempt });
+          this.offset = a ? a.t : target;
+          this.offsetSure = !!a && a.sure;
           this.exact = true;
         });
     };
@@ -949,6 +971,8 @@ export class PlayerEngine {
       releaseTorrents([this.pendingSide.hash.toLowerCase()]);
       this.pendingSide = null;
     }
+    // Not the viewer's pause: no keep-alive, and no long-pause stall rules for the next stream
+    if (!this.video.paused) this.selfPause = true;
     this.video.pause();
     this.detach();
   }
@@ -985,17 +1009,18 @@ export class PlayerEngine {
 
   // ---- video events ----
 
-  private videoListeners: [string, () => void][] = [];
+  private videoListeners: [string, (e: Event) => void][] = [];
 
   /** Video events; none runs after destroy() (stopStream and React's unmount pause the element later) */
   private bindVideo() {
     const v = this.video;
-    const on = (type: string, fn: () => void) => {
-      const h = () => { if (!this.destroyed) fn(); };
+    const on = (type: string, fn: (e: Event) => void) => {
+      const h = (e: Event) => { if (!this.destroyed) fn(e); };
       this.videoListeners.push([type, h]);
       v.addEventListener(type, h);
     };
     on('play', () => {
+      this.selfPause = false;
       this.set({ playing: true });
       clearInterval(this.keepAliveTimer);
       if (this.pausedAt && Date.now() - this.pausedAt >= LONG_PAUSE_MS) this.resumedAt = Date.now();
@@ -1004,6 +1029,10 @@ export class PlayerEngine {
     on('pause', () => {
       if (this.hold) return; // paused by the buffer hold, not the viewer
       this.set({ playing: false });
+      if (this.selfPause) {
+        this.selfPause = false;
+        return;
+      }
       this.persist();
       if (v.ended) return;
       this.pausedAt = Date.now();
@@ -1028,7 +1057,7 @@ export class PlayerEngine {
       if (this.hasPlayed) this.beginStall(false);
       if (this.hasPlayed) this.confirmStall();
     });
-    on('playing', () => {
+    on('playing', e => {
       clearTimeout(this.stallConfirmTimer);
       this.set({ buffering: false, reconnecting: false });
       this.disarmStall();
@@ -1039,14 +1068,16 @@ export class PlayerEngine {
       clearTimeout(this.stallResetTimer);
       this.stallResetTimer = setTimeout(() => { this.recoveries = 0; }, 60000);
       if (this.leadProbe && !this.leadProbe.t0) {
-        this.leadProbe.t0 = performance.now();
+        this.leadProbe.t0 = eventTime(e.timeStamp, performance.now());
         this.leadTimer = setTimeout(() => this.takeLead(), LEAD_SAMPLE_MS);
       }
     });
-    // A seek restarts the clock at its target: its jump once playing is the clock's lead
+    // A seek restarts the clock at its target: its jump once playing is the clock's lead. A new stream's
+    // first seek (to where it starts) still counts for the stream (restartAt).
     on('seeking', () => {
       clearTimeout(this.leadTimer);
-      this.leadProbe = { target: v.currentTime, t0: 0 };
+      const p = this.leadProbe;
+      this.leadProbe = { target: v.currentTime, t0: 0, kind: p && !p.t0 ? p.kind : 'seek' };
     });
     // A stall or pause while sampling makes the elapsed time wrong
     const dropLead = () => {
@@ -1068,10 +1099,14 @@ export class PlayerEngine {
     if (!p || v.paused || v.seeking || v.playbackRate !== 1) return;
     const lead = leadSample(p.target, v.currentTime, (performance.now() - p.t0) / 1000);
     if (lead === null) return;
-    this.leadSamples = addSample(this.leadSamples, lead);
+    this.leadSamples = addKindSample(this.leadSamples, p.kind, lead);
     saveSamples(this.leadSamples);
-    this.clockLead = leadOf(this.leadSamples, 0);
-    this.plog?.note('clock', { lead, use: this.clockLead, n: this.leadSamples.length });
+    this.updateLead();
+    this.plog?.note('clock', { lead, kind: p.kind, use: this.clockLead, n: this.leadSamples[p.kind].length });
+  }
+
+  private updateLead() {
+    this.clockLead = leadFor(this.leadSamples, this.splitMode ? 'split' : 'muxed', isWebOS() ? DEFAULT_LEAD_S : 0);
   }
 
   private onTime() {
@@ -1519,6 +1554,15 @@ export class PlayerEngine {
     this.pollTimers.push(setTimeout(poll, UPGRADE_FIRST_MS));
   }
 
+  /** An upgrade waiting for the next seek was offered for the playing source: another one makes it stale */
+  private dropDeferredUpgrade(keep: string) {
+    const up = this.deferredUpgrade;
+    if (!up) return;
+    this.deferredUpgrade = null;
+    const h = up.src.hash.toLowerCase();
+    if (h !== keep.toLowerCase()) releaseTorrents([h]);
+  }
+
   // ---- seamless switch (splice into the playing MediaSource) ----
 
   /** The track of `tracks` closest to the playing one (same language, same channels first) */
@@ -1599,7 +1643,7 @@ export class PlayerEngine {
   private async spliceTo(src: StreamSource, reason: string, toast: MessageKey): Promise<boolean> {
     const mse = this.mse;
     this.spliceFail = '';
-    if (!mse || this.splicing || mse.splicing || this.state.phase !== 'ready' || !this.hasPlayed || !this.exact) return false;
+    if (!mse || this.splicing || mse.splicing || this.state.phase !== 'ready' || !this.hasPlayed || !this.offsetSure) return false;
     this.splicing = true;
     const session = this.session;
     const h = src.hash.toLowerCase();
@@ -1649,11 +1693,12 @@ export class PlayerEngine {
       this.resetDelayLog(0);
       this.set({ duration, audioTracks: tracks, audio, quality: qualityOf(video, src), audioBadge: this.audioBadge(tracks, audio), debrid: !!src.debrid, cinema: !!src.cinema, subDelay: 0 });
       this.health.reset();
-      // The old file's subtitle stays until the new list picks one for this file (as the web player does)
+      this.dropDeferredUpgrade(h);
+      // The old file's subtitle stays until the new file plays (the cut, seconds ahead) and its list picks one
+      // for it (as the web player does)
       this.subRepick = true;
-      this.loadSubtitles(next);
       this.scheduleUpgrade(next);
-      this.watchSplice(cut, old, toast, reason);
+      this.watchSplice(cut, old, toast, reason, () => this.loadSubtitles(next));
       return true;
     } finally {
       this.splicing = false;
@@ -1663,7 +1708,7 @@ export class PlayerEngine {
   /** The audio track changes without a restart; false when it could not. */
   private async spliceAudio(n: number): Promise<boolean> {
     const mse = this.mse;
-    if (!mse || this.splicing || mse.splicing || this.state.phase !== 'ready' || !this.hasPlayed || !this.exact) return false;
+    if (!mse || this.splicing || mse.splicing || this.state.phase !== 'ready' || !this.hasPlayed || !this.offsetSure) return false;
     // A muxed stream stays muxed: a track the TV only plays on its own needs a restart in split mode
     if (!mse.split && this.wantsSplit(this.state.audioTracks, n)) return false;
     this.splicing = true;
@@ -1680,7 +1725,7 @@ export class PlayerEngine {
   }
 
   /** Done once playback passed the cut with frames advancing: the old torrent can go. */
-  private watchSplice(cut: number, old: string, toast: MessageKey | '', reason: string) {
+  private watchSplice(cut: number, old: string, toast: MessageKey | '', reason: string, done?: () => void) {
     const v = this.video;
     const frames = () => (v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : 0);
     const frames0 = frames();
@@ -1699,6 +1744,7 @@ export class PlayerEngine {
         this.played.delete(old);
       }
       if (toast && passed && !this.stale(session)) this.toast(toast);
+      if (done && !this.stale(session)) done();
     };
     check();
   }
@@ -1787,6 +1833,8 @@ export class PlayerEngine {
     this.subUserPicked = true;
     const s = id ? (this.state.subs || []).find(x => x.id === id) : null;
     writePlayerPrefs(this.pid, { sub: s ? { lang: normLang(s.language), id: s.id } : 'off' });
+    // The shown one chosen again: it keeps showing (and polling) as it is
+    if (id === this.state.subId) return;
     if (!id) this.noteSubsNone('off');
     this.applySubtitle(id, 'user');
   }
@@ -1801,7 +1849,11 @@ export class PlayerEngine {
 
   private applySubtitle(id: string | null, why: SubsWhy) {
     clearTimeout(this.cueTimer);
-    this.set({ subId: id, cues: [], aiTranslating: false });
+    // Answers of an earlier apply (even of the same subtitle) are dropped: one poll loop at a time
+    const gen = ++this.subGen;
+    // The shown one again (a spliced-in file's list picked it too): its cues stay until the next answer
+    const cues = id && id === this.state.subId ? this.state.cues : [];
+    this.set({ subId: id, cues, aiTranslating: false });
     if (!id) return;
     const session = this.session;
     // Untimed answers are asked for sooner in the first minutes after it was put on (cuePollMs)
@@ -1813,15 +1865,29 @@ export class PlayerEngine {
     let loggedAt = 0;
     // A complete answer whose timing may still change is asked again while the viewer watches
     const whilePlaying = () => {
-      if (this.stale(session) || this.state.subId !== id) return;
+      if (this.stale(session) || gen !== this.subGen || this.state.subId !== id) return;
       if (this.state.playing) load();
       else this.cueTimer = setTimeout(whilePlaying, PROVISIONAL_CUES_POLL_MS);
     };
     // Asked again while partial (cuePollMs): a live embedded track (read from the playing position on, it grows)
     // and a subtitle the server still times to the file alike; then every minute while its timing is not final
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
-      if (this.stale(session) || this.state.subId !== id) return;
-      const answer = cueAnswer(f.cues.length, f.partial, loads);
+      if (this.stale(session) || gen !== this.subGen || this.state.subId !== id) return;
+      const answer = cueAnswer(f.cues.length, f.partial, loads, f.failed);
+      const translating = cueTranslating(answer, f.translating);
+      if (translating !== this.state.aiTranslating) this.set({ aiTranslating: translating });
+      if (answer === 'ai-off') {
+        // The AI translation cannot be used now (no credit, a bad key): another subtitle like after a quota,
+        // else this one again much later
+        const alt = this.subtitleFallback(id);
+        if (errors++ === 0) {
+          this.toast('player.aiUnavailable');
+          if (!alt) this.noteSubsNone('ai-unavailable', { id: idHash(id) });
+        }
+        if (alt) this.applySubtitle(alt, 'fallback');
+        else this.cueTimer = setTimeout(load, AI_OFF_RETRY_MS);
+        return;
+      }
       if (answer === 'retry') {
         this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
         return;
@@ -1852,7 +1918,6 @@ export class PlayerEngine {
         loggedAt = Date.now();
       }
       // The overlay looks the cue up again in the new list; the delay stays
-      if (!!f.translating !== this.state.aiTranslating) this.set({ aiTranslating: !!f.translating });
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
       const wait = cuePollMs(f, Date.now() - shownAt);
       if (wait !== null) this.cueTimer = setTimeout(f.partial ? load : whilePlaying, wait);
@@ -1957,7 +2022,8 @@ export class PlayerEngine {
       const id = pickSubtitle(items, { profileLang: this.locale, pref, audioLang: track?.language });
       const why: SubsWhy = picked ? 'auto' : 'open';
       picked = true;
-      if (repick ? id !== this.state.subId : id) this.applySubtitle(id, why);
+      // A re-pick of the shown one asks it again for this file (the old file's poll loop ended with its session)
+      if (id || (repick && this.state.subId)) this.applySubtitle(id, why);
       if (!id && why === 'open') this.noteSubsNone('open', { pref: pref === 'off' ? 'off' : undefined, audio: logToken(track?.language, 8) });
     };
     // The profile's language is needed when the audio is in another one
@@ -1994,6 +2060,15 @@ export class PlayerEngine {
     // After the retries: a release that carries the missing language is offered in the panel
     const settled = () => {
       if (this.stale(session)) return;
+      // A spliced-in file whose list never came: the old file's cues may be timed for the other release
+      if (this.subRepick) {
+        this.subRepick = false;
+        if (this.state.subId) {
+          console.info('[subtitles] no list for the spliced-in file: the old one is turned off');
+          this.noteSubsNone('repick');
+          this.applySubtitle(null, 'auto');
+        }
+      }
       if (!hasPreferred(list)) {
         const audio = this.state.audioTracks.find(a => a.index === this.state.audio)?.language;
         this.noteSubsNone('missing', { audio: logToken(audio, 8) });

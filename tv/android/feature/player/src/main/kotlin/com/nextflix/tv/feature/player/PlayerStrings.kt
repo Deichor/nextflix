@@ -31,6 +31,7 @@ internal interface PlayerStrings {
     val subAltSwitching: String
     val subAi: String
     val aiTranslating: String
+    val aiUnavailable: String
     val nextEpisode: String
     val back: String
     val youreWatching: String
@@ -72,6 +73,7 @@ private object PlayerEn : PlayerStrings {
     override val subAltSwitching = "Switching…"
     override val subAi = "AI translation"
     override val aiTranslating = "Translating subtitles with AI..."
+    override val aiUnavailable = "AI translation unavailable"
     override val nextEpisode = "Next episode"
     override val back = "Back"
     override val youreWatching = "You're watching"
@@ -133,6 +135,7 @@ private object PlayerTr : PlayerStrings {
     override val subAltSwitching = "Geçiliyor…"
     override val subAi = "AI çevirisi"
     override val aiTranslating = "Altyazı AI ile çevriliyor..."
+    override val aiUnavailable = "AI çeviri kullanılamıyor"
     override val nextEpisode = "Sonraki bölüm"
     override val back = "Geri"
     override val youreWatching = "İzlediğiniz içerik"

@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
 import Avatar, { AVATAR_KEYS, PROFILE_COLORS } from '../components/Avatar';
 import Keyboard from '../components/Keyboard';
 import { createProfile, updateProfile } from '../lib/catalog';
 import { useI18n, type Locale } from '../lib/i18n';
 import { MAX_PROFILE_NAME, profileLocale, type Profile } from '../lib/profile';
+import { changedFields } from '../lib/profileEdit';
 import { useFocusRestore, useRouter } from '../nav/router';
 
 const LANGUAGES: Locale[] = ['en', 'tr'];
@@ -27,6 +28,13 @@ export default function AddProfileScreen({ count, edit, onSaved }: AddProfileScr
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const savingRef = useRef(false);
+  // The values the editor opened with: only what differs is sent (the cached profile may be outdated)
+  const opened = useRef({ name, avatar, color, language });
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   // Editing usually means a new avatar: start on the current one
   useFocusRestore(true, edit ? `avatar-${edit.avatar}` : 'kbd-a');
 
@@ -39,8 +47,10 @@ export default function AddProfileScreen({ count, edit, onSaved }: AddProfileScr
     setError('');
     try {
       const input = { name: trimmed.slice(0, MAX_PROFILE_NAME), avatar, color, language };
-      const p = edit ? await updateProfile(edit.id, input) : await createProfile(input);
+      const p = edit ? await updateProfile(edit.id, changedFields(opened.current, input)) : await createProfile(input);
       if (onSaved) onSaved(p);
+      // The viewer already left with Back
+      if (!mounted.current) return;
       // The profiles screen below focuses the new tile when it comes back
       const below = router.stack[router.stack.length - 2];
       if (below && !edit) below.focusId = `profile-${p.id}`;

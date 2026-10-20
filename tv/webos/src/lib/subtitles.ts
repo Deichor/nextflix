@@ -1,28 +1,13 @@
 import { getJson, request } from './http';
 import { intlLocale, type Locale } from './i18n';
-import type { PlayerPrefs } from './stream';
 import { SYNC_NONE, syncValue } from '../player/subsLog';
 import { finalCues } from '../player/playRules';
+import { normLang, type SubtitleItem } from './subtitlePick';
+
+export { bestSubtitleOf, hasSubtitleLang, lateSubtitles, mergeSubtitles, normLang, pickSubtitle, type SubtitleItem } from './subtitlePick';
+export { activeCues } from '../player/cueTiming';
 
 // Ported from web/src/features/watch/subtitles.ts
-
-const ISO639_2: Record<string, string> = {
-  eng: 'en', tur: 'tr', spa: 'es', fre: 'fr', fra: 'fr', ger: 'de', deu: 'de', ita: 'it', por: 'pt', rus: 'ru',
-  jpn: 'ja', kor: 'ko', chi: 'zh', zho: 'zh', cmn: 'zh', yue: 'zh', ara: 'ar', hin: 'hi', dut: 'nl', nld: 'nl',
-  swe: 'sv', nor: 'no', nob: 'nb', nno: 'nn', dan: 'da', fin: 'fi', pol: 'pl', cze: 'cs', ces: 'cs', slo: 'sk',
-  slk: 'sk', hun: 'hu', rum: 'ro', ron: 'ro', gre: 'el', ell: 'el', heb: 'he', tha: 'th', vie: 'vi', ind: 'id',
-  may: 'ms', msa: 'ms', ukr: 'uk', bul: 'bg', hrv: 'hr', srp: 'sr', slv: 'sl', est: 'et', lav: 'lv', lit: 'lt',
-  per: 'fa', fas: 'fa', ice: 'is', isl: 'is', tam: 'ta', tel: 'te', ben: 'bn', urd: 'ur', cat: 'ca', baq: 'eu',
-  eus: 'eu', glg: 'gl', fil: 'fil', tgl: 'tl', aze: 'az', kaz: 'kk', geo: 'ka', kat: 'ka', arm: 'hy', hye: 'hy',
-  alb: 'sq', sqi: 'sq', mac: 'mk', mkd: 'mk', bos: 'bs', lat: 'la', wel: 'cy', cym: 'cy', gle: 'ga', kur: 'ku',
-};
-
-/** ISO 639-1 base code from 639-1/639-2/BCP 47 input; '' for unknown / undetermined. */
-export function normLang(code?: string | null): string {
-  const c = (code || '').trim().toLowerCase().split(/[-_]/)[0];
-  if (!c || c === 'und' || c === 'zxx' || c === 'mul' || c === 'mis') return '';
-  return c.length === 3 ? ISO639_2[c] || c : c;
-}
 
 // Intl.DisplayNames needs Chromium 81 (webOS 6); older engines use this table
 const NAMES: Record<string, [string, string]> = {
@@ -133,22 +118,6 @@ export function pickAudioTrack(
 
 // ---- Subtitles ----
 
-export interface SubtitleItem {
-  id: string;
-  source: string;
-  language: string;
-  label: string;
-  release: string;
-  hi: boolean;
-  forced: boolean;
-  synced: boolean;
-  score: number;
-  /** Embedded track of a big file: read while it plays, its cues grow (fetch with the position) */
-  live?: boolean;
-  /** Source "ai": Claude translates the subtitle of this language (listed only when no source has the language) */
-  ai_from?: string;
-}
-
 export interface SubtitleQuery {
   tmdb_id: number;
   media_type: 'movie' | 'tv';
@@ -193,13 +162,15 @@ export interface Cue {
   text: string;
 }
 
-// Parsed subtitle files with final timing, least recently used first (a few files only: they can be large)
-const cueCache = new Map<string, Promise<{ cues: Cue[]; sync: string }>>();
+// Parsed subtitle files with final timing, least recently used first (a few files only: they can be large).
+// Kept for a while only: the server may time a subtitle again later (a reopen then sees it).
+const cueCache = new Map<string, { cues: Cue[]; sync: string; at: number }>();
 const CUE_CACHE_MAX = 5;
+const CUE_CACHE_TTL_MS = 10 * 60 * 1000;
 
 function rememberCues(id: string, cues: Cue[], sync: string) {
   cueCache.delete(id);
-  cueCache.set(id, Promise.resolve({ cues, sync }));
+  cueCache.set(id, { cues, sync, at: Date.now() });
   while (cueCache.size > CUE_CACHE_MAX) cueCache.delete(cueCache.keys().next().value as string);
 }
 
@@ -227,17 +198,18 @@ export interface CueFile {
   sync: string;
   /** AI translation: the lines at the position are still being translated */
   translating?: boolean;
-  /** No cues because of a server or network error (often over in seconds), not a missing file */
-  failed?: 'error';
+  /** No cues because of a server or network error (often over in seconds), not a missing file; 'ai': the AI
+   * translation cannot be used now (502 or 409 with `ai: true`) */
+  failed?: 'error' | 'ai';
 }
 
 export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
   const hit = cueCache.get(id);
-  if (hit) {
+  cueCache.delete(id);
+  if (hit && Date.now() - hit.at < CUE_CACHE_TTL_MS) {
     // Most recently used goes last
-    cueCache.delete(id);
     cueCache.set(id, hit);
-    return hit.then(c => ({ cues: c.cues, partial: false, sync: c.sync }));
+    return Promise.resolve({ cues: hit.cues, partial: false, sync: hit.sync });
   }
   const t = at !== undefined && at > 0 ? `&t=${Math.floor(at)}` : '';
   const req = request(`/api/subtitles/file?id=${encodeURIComponent(id)}${t}`)
@@ -246,6 +218,7 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
       const text = res.ok ? await res.text() : '';
       const f: CueFile = { cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0, sync, translating: text.indexOf(AI_NOTE) >= 0 };
       if (res.status >= 500) f.failed = 'error';
+      if (!res.ok && (await res.json().catch(() => null) as { ai?: boolean } | null)?.ai) f.failed = 'ai';
       return f;
     })
     .catch((): CueFile => ({ cues: [], partial: false, sync: SYNC_NONE, failed: 'error' }));
@@ -258,44 +231,6 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
 /** The server times a subtitle of a file that does not play yet (the next episode, see player/pretime.ts). */
 export function pretimeSubtitle(id: string): Promise<void> {
   return request(`/api/subtitles/file?id=${encodeURIComponent(id)}&pre=1`).then(() => undefined, () => undefined);
-}
-
-// An AI translation does not count: a real subtitle that turns up later still replaces it
-export const hasSubtitleLang = (items: SubtitleItem[], lang: string) =>
-  items.some(s => s.source !== 'ai' && normLang(s.language) === normLang(lang));
-
-/** Both lists by id, the newer answer's entries first */
-export function mergeSubtitles(prev: SubtitleItem[], next: SubtitleItem[]): SubtitleItem[] {
-  const ids = new Set(next.map(s => s.id));
-  return [...next, ...prev.filter(s => !ids.has(s.id))];
-}
-
-/** Best subtitle of lang (not forced, synced first). */
-export function bestSubtitleOf(items: SubtitleItem[], lang: string): string | null {
-  const l = normLang(lang);
-  const of = items.filter(s => normLang(s.language) === l);
-  const regular = of.filter(s => !s.forced);
-  const pool = regular.length > 0 ? regular : of;
-  return (pool.find(s => s.synced) || pool[0])?.id ?? null;
-}
-
-/**
- * A later list brought subtitles in lang that the shown list lacked: the merged list, whether lang is new,
- * and the subtitle to show by itself when the viewer has not chosen one. Same rules as the web player.
- */
-export function lateSubtitles(
-  shown: SubtitleItem[],
-  fresh: SubtitleItem[],
-  lang: string,
-  viewerChose: boolean,
-): { items: SubtitleItem[]; arrived: boolean; pick: string | null } {
-  const items = mergeSubtitles(shown, fresh);
-  const arrived = !hasSubtitleLang(shown, lang) && hasSubtitleLang(items, lang);
-  if (!arrived || viewerChose) return { items, arrived, pick: null };
-  const l = normLang(lang);
-  const pool = items.filter(s => normLang(s.language) === l && !s.forced);
-  const best = pool.find(s => s.synced) || pool[0];
-  return { items, arrived, pick: best ? best.id : null };
 }
 
 const TIME = /(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})/;
@@ -322,43 +257,6 @@ export function parseVtt(text: string): Cue[] {
     if (body) cues.push({ start, end, text: body });
   }
   return cues.sort((x, y) => x.start - y.start);
-}
-
-/** Cues showing at time t (cues sorted by start). */
-export function activeCues(cues: Cue[], t: number): Cue[] {
-  let lo = 0;
-  let hi = cues.length - 1;
-  let last = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (cues[mid].start <= t) { last = mid; lo = mid + 1; } else hi = mid - 1;
-  }
-  const out: Cue[] = [];
-  for (let i = last; i >= 0 && i > last - 12; i--) {
-    if (cues[i].end > t) out.unshift(cues[i]);
-  }
-  return out;
-}
-
-/** Last choice of the viewer; without one a Turkish profile gets Turkish unless the audio is Turkish. */
-export function pickSubtitle(
-  items: SubtitleItem[],
-  opts: { profileLang: Locale; pref?: PlayerPrefs['sub']; audioLang?: string },
-): string | null {
-  const best = (lang: string) => {
-    const l = normLang(lang);
-    const of = items.filter(s => normLang(s.language) === l && !s.forced);
-    const pool = of.length > 0 ? of : items.filter(s => normLang(s.language) === l);
-    return (pool.find(s => s.synced) || pool[0])?.id ?? null;
-  };
-  const pref = opts.pref;
-  if (pref === 'off') return null;
-  if (pref) {
-    if (pref.id && items.some(s => s.id === pref.id)) return pref.id;
-    return best(pref.lang);
-  }
-  if (opts.profileLang === 'tr' && normLang(opts.audioLang) !== 'tr') return best('tr');
-  return null;
 }
 
 /** One row per language (its best subtitle), the requested languages first. */

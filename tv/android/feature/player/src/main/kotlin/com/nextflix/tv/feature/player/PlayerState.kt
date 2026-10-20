@@ -32,6 +32,8 @@ internal data class PlayerState(
     /** the viewer wants playback (false while paused, also during a start hold) */
     val playing: Boolean = false,
     val buffering: Boolean = true,
+    /** the stream's real start (/seekpoint) is not known yet: positions may run a keyframe interval ahead */
+    val seekPending: Boolean = false,
     /** waiting paused for a larger buffer */
     val holding: Boolean = false,
     val status: Msg = Msg.Connecting,
