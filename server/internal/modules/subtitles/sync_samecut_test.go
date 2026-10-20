@@ -371,6 +371,93 @@ func TestSpeechMatchesTheSameCut(t *testing.T) {
 	}
 }
 
+// A copy the speech match held (SameSpeech) is held against this file's windows once that file's
+// speech no longer matches (review: copyFits kept it for minutes right after the re-check failed).
+func TestSameCutCopyGivesWayWhenTheSpeechNoLongerMatches(t *testing.T) {
+	file := dialogue(59, episode)
+	starts := windowStarts(episode, syncWindowLen, 8)
+	speech := func(seed int64) []refWindow {
+		ws := speechWindows(dialogue(seed, episode), starts, 0.15, 0.08, 0.1, 3)
+		for i := range ws {
+			ws[i].Kind = "audio"
+		}
+		return ws
+	}
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none"}
+	sub := dialogue(83, episode) // its lines are neither file's
+	moved := shiftSpans(sub, 1.5)
+	s := newSwitchTest(t, episode, syncRef{Probe: probe, Windows: speechWindows(file, starts, 0.15, 0.08, 0.1, 3)},
+		syncRef{Probe: probe, Windows: speech(61)}, sub)
+	y := s.y
+	fit := syncMeta{State: syncStateSynced, Fit: syncFit{Scale: 1, Segments: []syncSegment{{0, 1.5}}}, Live: true}
+	y.store(s.keyA, fit, vttOf(moved))
+	copied := fit
+	copied.SameCut, copied.SameSpeech = syncFileKey(s.a, 1), true
+	y.store(s.keyB, copied, vttOf(moved))
+	if !y.decide(s.ctx, s.inner, s.b, 1, s.base, s.refB, false) {
+		t.Fatal("too little to tell")
+	}
+	if m := y.meta(s.keyB); m == nil || m.SameCut != "" || m.fits() {
+		t.Fatalf("the copy stayed: %+v", m)
+	}
+}
+
+// A copy takes the fit of the most recent file of the same cut that fits: not a copy itself (it
+// was not timed to that file), and past a file that replaced the subtitle (review: the first
+// such file ended the search).
+func TestSameCutCopiesOnlyFits(t *testing.T) {
+	file := dialogue(59, episode)
+	starts := windowStarts(episode, syncWindowLen, 8)
+	speech := speechWindows(file, starts, 0.15, 0.08, 0.1, 3)
+	for i := range speech {
+		speech[i].Kind = "audio"
+	}
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none"}
+	ref := syncRef{Probe: probe, Windows: speech}
+	sub := dialogue(83, episode)
+	moved := shiftSpans(sub, 1.5)
+	fit := syncMeta{State: syncStateSynced, Fit: syncFit{Scale: 1, Segments: []syncSegment{{0, 1.5}}}, Live: true}
+	s := newSwitchTest(t, episode, ref, ref, sub)
+	y := s.y
+	c := "6d9f7e2f3b4c5d6e7f8091a2b3c4d5e6f7081923" // a third file of the cut, served last
+	setRef(y, c, 1, ref)
+	keyC, _ := syncKey(s.inner, c, 1)
+	y.noteServed(keyC, s.inner, c, 1, 30)
+	copied := fit
+	copied.SameCut = syncFileKey(s.a, 1)
+	y.store(keyC, copied, vttOf(moved))
+	if _, ok := y.sameCutFit(s.ctx, s.inner, s.b, 1, s.base, probe); ok {
+		t.Fatal("a copy was copied on")
+	}
+	y.store(keyC, syncMeta{State: syncStateReplaced, ReplacedBy: "x", Live: true}, vttOf(sub))
+	y.store(s.keyA, fit, vttOf(moved))
+	if !y.decide(s.ctx, s.inner, s.b, 1, s.base, ref, false) {
+		t.Fatal("too little to tell")
+	}
+	if m := y.meta(s.keyB); m == nil || !m.fits() || m.SameCut != syncFileKey(s.a, 1) {
+		t.Fatalf("b: %+v", m)
+	}
+}
+
+// An onset of one file counts once, also where windows of the other overlap (review: it counted
+// once per window, so a stretch read and played passed the 40 onsets with 30).
+func TestSpeechMatchesCountsOnsetsOnce(t *testing.T) {
+	w := refWindow{Start: 100, Kind: "live", Speech: make([]byte, liveWindowFrames)}
+	for i := 50; i+100 < len(w.Speech); i += 200 { // 30 onsets
+		for j := i; j < i+100; j++ {
+			w.Speech[j] = 1
+		}
+	}
+	if speechMatches([]refWindow{w}, []refWindow{w, w}) {
+		t.Fatal("30 onsets counted twice")
+	}
+	v := w
+	v.Start = 160
+	if !speechMatches([]refWindow{w, v}, []refWindow{w, v, w}) {
+		t.Fatal("60 onsets did not match")
+	}
+}
+
 // Only a result that is none, untimed or a copy gives way to a fit of the same cut.
 func TestTakesCopy(t *testing.T) {
 	for _, c := range []struct {

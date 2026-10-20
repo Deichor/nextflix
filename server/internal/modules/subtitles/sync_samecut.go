@@ -83,19 +83,31 @@ func sameLength(a, b mediaProbe) bool {
 // sameCutFit is the fit the subtitle has on the file of the same cut that served it most recently,
 // as a provisional result of this file (p: its probe, zero to probe it); false when there is none.
 func (y *syncer) sameCutFit(ctx context.Context, inner, hash string, index int, base []byte, p mediaProbe) (sameCutCopy, bool) {
+	cs := y.sameCutFits(ctx, inner, hash, index, base, p, false, true)
+	if len(cs) == 0 {
+		return sameCutCopy{}, false
+	}
+	return cs[0], true
+}
+
+// sameCutFits are the subtitle's fits on the files of the same cut that served it recently, last
+// served first (fitting: only fits, not replacements; first: the first one only). A copy is not
+// copied on: it was not timed to the file it is served for.
+func (y *syncer) sameCutFits(ctx context.Context, inner, hash string, index int, base []byte, p mediaProbe, fitting, first bool) []sameCutCopy {
 	others := y.servedElsewhere(inner, syncFileKey(hash, index))
 	if len(others) == 0 {
-		return sameCutCopy{}, false
+		return nil
 	}
 	if p.Duration <= 0 || p.FPS <= 0 {
 		var err error
 		if p, err = y.probeFile(ctx, hash, index, torrFileURL(y.svc.cfg.TorrServerURL, hash, index)); err != nil {
-			return sameCutCopy{}, false
+			return nil
 		}
 	}
+	var out []sameCutCopy
 	for _, o := range others {
 		m := y.meta(o.key)
-		if m == nil || m.stale() || !m.fits() && m.State != syncStateReplaced {
+		if m == nil || m.stale() || m.SameCut != "" || !m.fits() && (fitting || m.State != syncStateReplaced) {
 			continue
 		}
 		if op, ok := y.knownProbe(o.hash, o.index); !ok || !sameLength(p, op) {
@@ -111,9 +123,11 @@ func (y *syncer) sameCutFit(ctx context.Context, inner, hash string, index int, 
 		if c.State != syncStateUnchanged {
 			vtt = a.VTT
 		}
-		return sameCutCopy{c, vtt, o, p}, true
+		if out = append(out, sameCutCopy{c, vtt, o, p}); first {
+			break
+		}
 	}
-	return sameCutCopy{}, false
+	return out
 }
 
 // storeSameCut stores a copied fit for a file without a result (decide lock held).
@@ -135,38 +149,57 @@ func takesCopy(m *syncMeta) bool {
 // copySameCut is decide's step for a provisional fit m that does not fit while the stored result
 // takes a copy (takesCopy): the subtitle's fit on a file of the same cut is served when it fits
 // this file's windows (copyFits), or the two files' speech matched at offset 0 (then the copy
-// is not held against the windows, and a pre-timed fit shows once this file plays). It reports
-// whether a copy is served.
-func (y *syncer) copySameCut(ctx context.Context, key, inner, hash string, index int, base []byte, ref syncRef, live []refWindow,
-	liveSecs float64, served, prev *syncMeta, m syncMeta) bool {
-	c, ok := y.sameCutFit(ctx, inner, hash, index, base, ref.Probe)
-	if !ok || !c.m.fits() {
-		return false
-	}
-	other, _ := y.knownRef(c.from.hash, c.from.index)
-	same := speechMatches(fileSpeech(ref, live), y.speechOf(c.from.hash, c.from.index, other))
-	if !same && (len(m.Fit.windows) == 0 || !copyFits(&c.m, m, base, ref.Probe.Duration)) {
-		return false
-	}
-	c.m.SameSpeech, c.m.LiveWindows, c.m.LiveSeconds = same, len(live), liveSecs
-	c.m.Pre = c.m.Pre && !(same && (len(live) > 0 || y.livePlaying(syncFileKey(hash, index))))
-	if prev == nil || prev.SameCut != c.m.SameCut || prev.SameSpeech != same || fitChanged(prev, c.m) {
-		how := "its offsets fit this file's windows"
-		if same {
-			how = "the speech matches at offset 0"
+// is not held against the windows, and a pre-timed fit shows once this file plays); each such
+// file is tried, last served first. It reports whether a copy is served, and whether the file
+// the stored copy came from was tried and its speech does not match (any more).
+func (y *syncer) copySameCut(ctx context.Context, key, inner, hash string, index int, base []byte, r fitRefs,
+	liveSecs float64, served, prev *syncMeta, m syncMeta) (copied, unmatched bool) {
+	ref, live := r.ref, r.live
+	for _, c := range y.sameCutFits(ctx, inner, hash, index, base, ref.Probe, true, false) {
+		other, _ := y.knownRef(c.from.hash, c.from.index)
+		same := y.sameSpeech(r, hash, index, c.from, other)
+		if !same && prev != nil && prev.SameCut == c.from.fk {
+			unmatched = true
 		}
-		log.Printf("subtitles: timing of %s on %s:%d: the fit on %s:%d (same cut: %s; this file's own fit %s, peak %.2f), provisional",
-			shortSubID(inner), hash[:8], index, c.from.hash[:8], c.from.index, how, m.State, m.Fit.Peak)
-		y.storeWatched(key, inner, hash, index, base, served, c.m, c.vtt)
+		if !same && (len(m.Fit.windows) == 0 || !copyFits(&c.m, m, base, ref.Probe.Duration)) {
+			continue
+		}
+		c.m.SameSpeech, c.m.LiveWindows, c.m.LiveSeconds = same, len(live), liveSecs
+		c.m.Pre = c.m.Pre && !(same && (len(live) > 0 || y.livePlaying(syncFileKey(hash, index))))
+		if prev == nil || prev.SameCut != c.m.SameCut || prev.SameSpeech != same || fitChanged(prev, c.m) {
+			how := "its offsets fit this file's windows"
+			if same {
+				how = "the speech matches at offset 0"
+			}
+			log.Printf("subtitles: timing of %s on %s:%d: the fit on %s:%d (same cut: %s; this file's own fit %s, peak %.2f), provisional",
+				shortSubID(inner), hash[:8], index, c.from.hash[:8], c.from.index, how, m.State, m.Fit.Peak)
+			y.storeWatched(key, inner, hash, index, base, served, c.m, c.vtt)
+		}
+		return true, false
 	}
-	return true
+	return false, unmatched
 }
 
-// sameCutWindows adds to the windows a fit of the file uses the read own-track windows of a file
-// of the same cut that served the subtitle recently, when that file's own track is timed to it
-// and this file's is not known to be, once the two files' speech matched at offset 0. They take
-// the place of this file's windows of the same stretches.
-func (y *syncer) sameCutWindows(inner, hash string, index int, ref syncRef, live []refWindow) syncRef {
+// sameSpeech reports whether the file's speech, as read and played (r.own: before the windows of
+// another file replace some, sameCutWindows), matches the speech of o at offset 0; once per
+// decide and file (r.same).
+func (y *syncer) sameSpeech(r fitRefs, hash string, index int, o servedSub, other syncRef) bool {
+	if v, ok := r.same[o.fk]; ok {
+		return v
+	}
+	v := speechMatches(y.speechOf(hash, index, r.own), y.speechOf(o.hash, o.index, other))
+	if r.same != nil {
+		r.same[o.fk] = v
+	}
+	return v
+}
+
+// sameCutWindows adds to the windows a fit of the file uses (r.ref) the read own-track windows of
+// a file of the same cut that served the subtitle recently, when that file's own track is timed
+// to it and this file's is not known to be, once the two files' speech matched at offset 0. They
+// take the place of this file's windows of the same stretches.
+func (y *syncer) sameCutWindows(inner, hash string, index int, r fitRefs) syncRef {
+	ref := r.ref
 	if ref.Full || !y.svc.cfg.LiveTiming || ref.Own.State == ownTimed {
 		return ref
 	}
@@ -176,7 +209,7 @@ func (y *syncer) sameCutWindows(inner, hash string, index int, ref syncRef, live
 			continue
 		}
 		oc := y.liveFile(o.hash, o.index).ownChecked()
-		if oc.State != ownTimed || !speechMatches(fileSpeech(ref, live), y.speechOf(o.hash, o.index, other)) {
+		if oc.State != ownTimed || !y.sameSpeech(r, hash, index, o, other) {
 			continue
 		}
 		var ws []refWindow
@@ -255,10 +288,12 @@ func fileSpeech(ref syncRef, live []refWindow) []refWindow {
 	return out
 }
 
-// speechMatches reports whether two files' speech windows match at offset 0 (same cut).
+// speechMatches reports whether two files' speech windows match at offset 0 (same cut). Each
+// onset of a counts once, also where windows of b overlap.
 func speechMatches(a, b []refWindow) bool {
 	tol := int(sameCutTol * syncRate)
 	matched, n := 0, 0
+	counted := map[int]bool{} // onsets of a (file frames): matched in some window of b
 	for _, wa := range a {
 		sa := int(math.Round(wa.Start * syncRate))
 		for _, wb := range b {
@@ -270,15 +305,27 @@ func speechMatches(a, b []refWindow) bool {
 			other := onsetFrames(wb.Speech[lo-sb : hi-sb])
 			m, k := 0, 0
 			for _, i := range onsetFrames(wa.Speech[lo-sa : hi-sa]) {
-				k++
+				hit := false
 				if j := sort.SearchInts(other, i-tol); j < len(other) && other[j] <= i+tol {
+					hit = true
+				}
+				k++
+				if hit {
 					m++
 				}
+				at := lo + i
+				was, seen := counted[at]
+				if !seen {
+					n++
+				}
+				if hit && !was {
+					matched++
+				}
+				counted[at] = was || hit
 			}
 			if k >= sameCutStretch && float64(m) < sameCutLoose*float64(k) {
 				return false
 			}
-			matched, n = matched+m, n+k
 		}
 	}
 	return n >= sameCutOnsets && float64(matched) >= sameCutShare*float64(n)
