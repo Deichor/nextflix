@@ -26,10 +26,13 @@ var (
 // tsDefaultJackettURL is the compose service (deploy/docker-compose.yml).
 const tsDefaultJackettURL = "http://jackett:9117"
 
-// jackettTestClient never follows redirects, so a test cannot be bounced to another host.
-var jackettTestClient = &http.Client{
+// jackettClient never follows redirects, so a request (and its API key) cannot be bounced
+// to another host. Jackett answers are read up to jackettMaxBody.
+var jackettClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
+
+const jackettMaxBody = 32 << 20
 
 // tsServiceName: a single-label host (a compose service or LAN machine) that starts with a
 // letter, so no resolver reads it as a numeric IP ("2130706433", "0x7f000001").
@@ -144,6 +147,13 @@ func sameJackettURL(a, b string) bool {
 	return a != "" && norm(a) == norm(b)
 }
 
+// jackettKeyHome reports whether base is a URL the stored keys already go to: the saved
+// URL, the env URL or the compose default.
+func (s *Service) jackettKeyHome(base, savedURL string) bool {
+	envURL := strings.TrimSuffix(strings.TrimSpace(s.cfg.JackettURL), "/")
+	return sameJackettURL(base, savedURL) || sameJackettURL(base, envURL) || sameJackettURL(base, tsDefaultJackettURL)
+}
+
 func (s *Service) UpdateSettings(in SettingsInput) (*IndexerSettings, error) {
 	st, err := s.Settings()
 	if err != nil {
@@ -153,6 +163,10 @@ func (s *Service) UpdateSettings(in SettingsInput) (*IndexerSettings, error) {
 		v, err := normalizeJackettURL(*in.JackettURL)
 		if err != nil {
 			return nil, err
+		}
+		// Resolve sends the stored (or env) key to the saved URL, so a new URL needs its own key
+		if v != "" && !s.jackettKeyHome(v, st.JackettURL) && strings.TrimSpace(in.JackettAPIKey.Value) == "" {
+			return nil, SettingsError{"Enter the API key for the new Jackett URL"}
 		}
 		st.JackettURL = v
 	}
@@ -213,7 +227,7 @@ func (s *Service) TestIndexer(ctx context.Context, in TestInput) (string, int, e
 		base = envURL
 	}
 	key := strings.TrimSpace(in.JackettAPIKey)
-	if key == "" && (sameJackettURL(base, saved.JackettURL) || sameJackettURL(base, envURL) || sameJackettURL(base, tsDefaultJackettURL)) {
+	if key == "" && s.jackettKeyHome(base, saved.JackettURL) {
 		key = saved.JackettAPIKey
 		if key == "" {
 			key = strings.TrimSpace(s.cfg.JackettAPIKey)
@@ -246,7 +260,7 @@ func jackettTestSearch(ctx context.Context, base, key string) (int, error) {
 	if err != nil {
 		return 0, errors.New("invalid Jackett URL")
 	}
-	resp, err := jackettTestClient.Do(req)
+	resp, err := jackettClient.Do(req)
 	if err != nil {
 		var ue *url.Error
 		if errors.As(err, &ue) {
@@ -259,7 +273,7 @@ func jackettTestSearch(ctx context.Context, base, key string) (int, error) {
 		return 0, errors.New("jackett returned status " + resp.Status)
 	}
 	var jr JackettResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&jr); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, jackettMaxBody)).Decode(&jr); err != nil {
 		return 0, errors.New("jackett answer is not JSON")
 	}
 	return len(jr.Results), nil
