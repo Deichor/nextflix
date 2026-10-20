@@ -380,6 +380,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t flo
 	}
 	fk := syncFileKey(hash, index)
 	first, fresh := y.noteServed(key, inner, hash, index, t)
+	y.noteViewer(fk, t)
 	// Live audio may still come: keep the players asking
 	listening := func() bool { return y.svc.cfg.LiveTiming && (fresh || y.livePlaying(fk)) }
 	pending := func() FileAnswer {

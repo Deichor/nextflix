@@ -580,3 +580,30 @@ func TestMergeWindows(t *testing.T) {
 		}
 	}
 }
+
+// A stream that hears less than a minute ahead of the viewer (muxed 4K plays at its pace) re-fits
+// every 10 s of audio, like an untimed viewing's first minutes; one far ahead (the TV's split
+// stream), a closed one or an old position every 30 s.
+func TestNearViewerRefitsSooner(t *testing.T) {
+	y := newLiveTest(t, episode).sync
+	f := y.liveFile(syncHash, 1)
+	y.noteViewer(syncFileKey(syncHash, 1), 960)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.taps, f.tapAt = 1, 1000
+	if f.growStep() != livePendingGrowth {
+		t.Fatalf("40 s ahead: %.0f s", f.growStep())
+	}
+	f.viewer = 900
+	if f.growStep() != liveRefitGrowth {
+		t.Fatalf("100 s ahead: %.0f s", f.growStep())
+	}
+	f.viewer, f.taps = 960, 0
+	if f.growStep() != liveRefitGrowth {
+		t.Fatalf("no stream: %.0f s", f.growStep())
+	}
+	f.taps, f.viewerAt = 1, time.Now().Add(-3*time.Minute)
+	if f.growStep() != liveRefitGrowth {
+		t.Fatalf("an old position: %.0f s", f.growStep())
+	}
+}
