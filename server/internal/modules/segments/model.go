@@ -9,7 +9,7 @@ type SkipSegment struct {
 	TmdbID       int    `gorm:"index:idx_skip_ep"`
 	Season       int    `gorm:"index:idx_skip_ep"`
 	Episode      int    `gorm:"index:idx_skip_ep"`
-	Duration     int    // file length the lookup was for (TheIntroDB picks the release version by it)
+	Duration     int    // file length the lookup was for, rounded by lookupLength (TheIntroDB picks the release version by it)
 	Source       string // theintrodb, introdb; "" when neither knew the episode
 	IntroStart   float64
 	IntroEnd     float64

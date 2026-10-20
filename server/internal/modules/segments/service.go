@@ -48,6 +48,8 @@ type Service struct {
 	mu       sync.Mutex
 	inflight map[string]*lookup
 	pausedTo time.Time // no community lookups until then (failures, 429)
+	perIP    ipLimiter // new community lookups per client IP
+	now      func() time.Time
 }
 
 type lookup struct {
@@ -71,6 +73,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		theIntroDBURL: theIntroDBURL,
 		introDBURL:    introDBURL,
 		inflight:      map[string]*lookup{},
+		now:           time.Now,
 	}
 }
 
@@ -81,6 +84,7 @@ type Query struct {
 	Index                   int
 	TmdbID, Season, Episode int
 	Duration                float64
+	Client                  string // the caller's IP (rate limits its community lookups)
 }
 
 // Get returns the skip segments of a file. Chapters win per segment; the community data fills
@@ -99,8 +103,9 @@ func (s *Service) Get(ctx context.Context, q Query) Result {
 			intro, credits = fromChapters(chapters, duration)
 		}
 	}
-	if (intro == nil || credits == nil) && q.TmdbID > 0 && q.Season > 0 && q.Episode > 0 && duration > 0 {
-		row := s.community(ctx, q.TmdbID, q.Season, q.Episode, duration)
+	if (intro == nil || credits == nil) && q.TmdbID > 0 && q.Season > 0 && q.Episode > 0 &&
+		duration >= shortestEp && duration <= longestEp {
+		row := s.community(ctx, q.Client, q.TmdbID, q.Season, q.Episode, duration)
 		if intro == nil && row.IntroEnd > 0 {
 			intro = validIntro(row.IntroStart, row.IntroEnd, duration, row.Source)
 		}
@@ -112,19 +117,25 @@ func (s *Service) Get(ctx context.Context, q Query) Result {
 }
 
 // community returns the cached lookup of an episode, asking the databases when it is missing
-// or stale. Concurrent callers share one lookup.
-func (s *Service) community(ctx context.Context, tmdbID, season, episode int, duration float64) SkipSegment {
+// or stale. Concurrent callers share one lookup; a new one counts against the client's limit.
+func (s *Service) community(ctx context.Context, client string, tmdbID, season, episode int, duration float64) SkipSegment {
 	if row, ok := s.cached(tmdbID, season, episode, duration); ok {
 		return row
 	}
-	key := fmt.Sprintf("%d:%d:%d:%d", tmdbID, season, episode, int(math.Round(duration)))
+	length := lookupLength(duration)
+	key := fmt.Sprintf("%d:%d:%d:%d", tmdbID, season, episode, length)
 	s.mu.Lock()
-	if time.Now().Before(s.pausedTo) {
+	now := s.now()
+	if now.Before(s.pausedTo) {
 		s.mu.Unlock()
 		return SkipSegment{}
 	}
 	l, running := s.inflight[key]
 	if !running {
+		if !s.perIP.take(client, now) {
+			s.mu.Unlock()
+			return SkipSegment{}
+		}
 		l = &lookup{done: make(chan struct{})}
 		s.inflight[key] = l
 	}
@@ -142,6 +153,7 @@ func (s *Service) community(ctx context.Context, tmdbID, season, episode int, du
 	lctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	row, err := s.fetch(lctx, tmdbID, season, episode, duration)
 	cancel()
+	row.Duration = length
 	if err != nil {
 		pause := failPause
 		if errors.Is(err, errRateLimited) {

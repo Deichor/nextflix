@@ -1812,9 +1812,10 @@ tells both players where an episode's intro and end credits are. Sources, first 
 2. Community timestamps: [TheIntroDB](https://theintrodb.org/docs) (`/v4/media?tmdb_id=&season=&episode=&duration_ms=`,
    TMDB id of the show, the file length picks the release version; 500 reads a day per IP without a key), then
    [IntroDB](https://introdb.app/docs) (`/segments?imdb_id=&season=&episode=`, IMDb id via TMDB external ids) for
-   what the first one lacks. The answer is stored per episode and file length (±5 s) in `skip_segments`: found 30
-   days, not found (or a segment missing because a database failed) 3 days; failures that found nothing are not
-   stored and pause lookups for 10 min (an hour after a 429).
+   what the first one lacks. The answer is stored per episode and file length (rounded to 10 s, shared ±5 s) in
+   `skip_segments`: found 30 days, not found (or a segment missing because a database failed) 3 days; failures that
+   found nothing are not stored and pause lookups for 10 min (an hour after a 429). Only lengths of 1 min to 4 h are
+   looked up, and each client IP starts at most 10 new lookups, then one per 6 min.
 
 Audio fingerprinting (Jellyfin Intro Skipper style: chromaprint of several episodes of a season, black frames for
 credits) was left out: it needs the decoded audio of many episodes, i.e. gigabytes read from swarms while one plays.

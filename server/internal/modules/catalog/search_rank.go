@@ -383,9 +383,14 @@ type RatedTitle struct {
 // RatingsSource lists a profile's rated and favorite titles.
 type RatingsSource func(profileID uint) ([]RatedTitle, error)
 
+// ProfileChecker reports whether a profile exists (the profiles module, wired in main.go).
+type ProfileChecker func(profileID uint) (bool, error)
+
 const (
-	tasteTTL       = 30 * time.Minute
-	tasteMaxTitles = 40
+	tasteTTL         = 30 * time.Minute
+	tasteMaxTitles   = 40
+	tasteMaxProfiles = 256 // cached profiles; the ids come from clients
+	tasteMaxRunning  = 16
 )
 
 type tasteEntry struct {
@@ -399,6 +404,7 @@ type tasteEntry struct {
 type tasteCache struct {
 	mu      sync.Mutex
 	source  RatingsSource
+	exists  ProfileChecker // nil = every id is accepted
 	tm      *tmdb.Client
 	entries map[uint]tasteEntry
 	running map[uint]uint64 // generation of the running compute
@@ -410,6 +416,13 @@ func (s *Service) SetRatings(src RatingsSource) {
 	s.taste.mu.Lock()
 	s.taste.source = src
 	s.taste.tm = s.tm
+	s.taste.mu.Unlock()
+}
+
+// SetProfiles makes taste skip ids of profiles that do not exist. Called once at startup.
+func (s *Service) SetProfiles(check ProfileChecker) {
+	s.taste.mu.Lock()
+	s.taste.exists = check
 	s.taste.mu.Unlock()
 }
 
@@ -442,10 +455,11 @@ func (t *tasteCache) affinity(profileID uint) map[int]float64 {
 	}
 	t.init()
 	e, ok := t.entries[profileID]
-	if _, busy := t.running[profileID]; (!ok || time.Now().After(e.expires)) && !busy {
+	_, busy := t.running[profileID]
+	if (!ok || time.Now().After(e.expires)) && !busy && len(t.running) < tasteMaxRunning {
 		gen := t.gen[profileID]
 		t.running[profileID] = gen
-		go t.compute(profileID, gen, t.source, t.tm)
+		go t.compute(profileID, gen, t.source, t.exists, t.tm)
 	}
 	return e.affinity
 }
@@ -467,19 +481,29 @@ func ratingWeight(r RatedTitle) float64 {
 }
 
 // compute sums rating weights per genre (details from the shared TMDB cache) and stores them
-// scaled to [-1, 1], unless the profile was invalidated meanwhile.
-func (t *tasteCache) compute(profileID uint, gen uint64, source RatingsSource, tm *tmdb.Client) {
-	aff := map[int]float64{}
+// scaled to [-1, 1], unless the profile was invalidated meanwhile. Unknown profiles and failed
+// lookups store nothing.
+func (t *tasteCache) compute(profileID uint, gen uint64, source RatingsSource, exists ProfileChecker, tm *tmdb.Client) {
+	var aff map[int]float64
 	defer func() {
 		t.mu.Lock()
-		if t.gen[profileID] == gen {
-			t.entries[profileID] = tasteEntry{affinity: aff, expires: time.Now().Add(tasteTTL)}
+		if aff != nil && t.gen[profileID] == gen {
+			t.store(profileID, aff)
 		}
 		if g, ok := t.running[profileID]; ok && g == gen {
 			delete(t.running, profileID)
 		}
 		t.mu.Unlock()
 	}()
+	if exists != nil {
+		ok, err := exists(profileID)
+		if err != nil {
+			log.Printf("catalog: taste of profile %d: %v", profileID, err)
+		}
+		if !ok || err != nil {
+			return
+		}
+	}
 	rated, err := source(profileID)
 	if err != nil {
 		log.Printf("catalog: taste of profile %d: %v", profileID, err)
@@ -495,6 +519,29 @@ func (t *tasteCache) compute(profileID uint, gen uint64, source RatingsSource, t
 		}
 		return nil
 	})
+}
+
+// store keeps at most tasteMaxProfiles entries: expired ones go first, then the oldest.
+// Called with t.mu held.
+func (t *tasteCache) store(profileID uint, aff map[int]float64) {
+	now := time.Now()
+	if _, ok := t.entries[profileID]; !ok && len(t.entries) >= tasteMaxProfiles {
+		var oldest uint
+		found := false
+		for id, e := range t.entries {
+			if now.After(e.expires) {
+				delete(t.entries, id)
+				continue
+			}
+			if !found || e.expires.Before(t.entries[oldest].expires) {
+				oldest, found = id, true
+			}
+		}
+		if len(t.entries) >= tasteMaxProfiles {
+			delete(t.entries, oldest)
+		}
+	}
+	t.entries[profileID] = tasteEntry{affinity: aff, expires: now.Add(tasteTTL)}
 }
 
 // affinityOf sums rating weights per (common) genre and scales them to [-1, 1]. It is empty

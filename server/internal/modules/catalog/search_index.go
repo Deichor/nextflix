@@ -877,6 +877,9 @@ func (l *IndexLoader) saveAliases() {
 		return nil
 	}); err != nil {
 		log.Printf("catalog: search index: save aliases: %v", err)
+		ix.mu.Lock()
+		ix.dirty = true // retry on the next save
+		ix.mu.Unlock()
 	}
 }
 
