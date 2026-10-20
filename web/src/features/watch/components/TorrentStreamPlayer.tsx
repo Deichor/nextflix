@@ -80,7 +80,7 @@ import { BufferMonitor, bufferedEnd, type BufferVerdict } from '@/features/watch
 import { useScrollLock } from '@/features/watch/useScrollLock';
 import { healthRatio, healthStarving, holdDone, needsStartHold, type HoldKind } from '@/features/watch/startBuffer';
 import { guardedStart } from '@/features/watch/rewindGuard';
-import { catchUpStep, catchUpTime } from '@/features/watch/catchUp';
+import { catchUpStep, catchUpTime, playPress } from '@/features/watch/catchUp';
 import { savePosition } from '@/features/watch/progressSave';
 import { skipPhase, useSkipSegments } from '@/features/watch/skipSegments';
 import { Upscaler, upscaleSupported, type UpscaleMode, type UpscaleStop } from '@/features/watch/upscale';
@@ -223,6 +223,10 @@ const PROACTIVE_POLL_MS = 5000;
 const PROACTIVE_POLL_MAX_MS = 10000;
 const SWITCH_EVERY_MS = 60000;
 const RECOVERED_MS = 15000;
+// The next episode's warm-up is asked again this often while its window is open (a turned away prefetch)
+const NEXT_WARM_RETRY_MS = 30000;
+// A failed /seekpoint is asked once more after this; then the requested time stands in for the start
+const SEEKPOINT_RETRY_MS = 2000;
 
 // Resolve request of a title / episode (optionally capped after a step down)
 const paramsOf = (m: StreamMeta, maxq?: QualityCap): ResolveParams => ({
@@ -436,6 +440,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // offlineRetryRef (the same source, where it stopped) once the connection is back
   const [net, setNet] = useState<Exclude<NetState, 'online'> | null>(null);
   const offlineRetryRef = useRef<typeof retryRef.current>({ refresh: false });
+  // Where the last resolve was to start (saved progress included): the error screen's Retry starts there
+  const attemptStartRef = useRef(startAt || 0);
   const autoRefreshesRef = useRef(0);
   // A recovery chain runs (restart, fallback, resolve without the failed source): one stable
   // overlay until frames run again, over the last frame when one was shown (frameRef)
@@ -476,6 +482,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   // for the `resolved` it was made on, so any hard switch or new resolve drops it
   const [live, setLive] = useState<{ base: typeof resolved; source: StreamSource } | null>(null);
   const playingSource = live && live.base === resolved ? live.source : resolved.source;
+  const playingRef = useRef(playingSource);
+  useSyncRef(playingRef, playingSource);
   const resolvedRef = useRef(resolved);
   useSyncRef(resolvedRef, resolved);
   // PlayerCore's seamless switch (null while no PlayerCore is mounted)
@@ -512,6 +520,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     if (coreSwitchRef.current && !exitWhyRef.current) exitWhyRef.current = 'remount';
     // A retry or switch never starts over at 0 once the item played past REWIND_GUARD_S
     const startPos = guardedStart(retry.startAt ?? item.startAt ?? 0, positionRef.current);
+    attemptStartRef.current = startPos || 0;
 
     if (retry.switchTo) {
       setResolved({ source: retry.switchTo, startAt: startPos || 0, origin: 'fresh' });
@@ -559,6 +568,7 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
               saved = { hash: p.hash, index: p.file_index, magnet: p.magnet || undefined };
               origin = 'saved';
               start = item.startAt ?? (isFinished(p) ? 0 : Math.max(0, p.position - 5));
+              attemptStartRef.current = start;
             }
           }
         }
@@ -811,6 +821,11 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
     resolveSource(paramsOf(m, cap), ctrl.signal, { avoid: avoidRef.current })
       .then(r => {
         if (ctrl.signal.aborted) return;
+        // Another switch replaced the source meanwhile: its stalls are not this one's (it may step down later)
+        if (playingRef.current !== current) {
+          triedCapsRef.current = triedCapsRef.current.filter(c => c !== cap);
+          return;
+        }
         // A lower quality that does not keep up either is no improvement: the cap stays (later
         // sidegrades still find spares of the playing resolution) and the step down may run again later
         if ((r.health && !r.health.keeps_up) ||
@@ -1244,14 +1259,16 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
   }, [next, item.meta]);
 
   // Resolve and warm the next episode once 10 minutes are left (85 % of short episodes), once per episode;
-  // once its source is known the subtitle this player would show there is timed before it opens
+  // once its source is known the subtitle this player would show there is timed before it opens.
+  // Called again while the window is open: a prefetch the server turned away (busy, early, deferred) is
+  // asked again (prefetchResolve dedupes the rest), and the pre-timing starts over with it.
   const prefetchNext = useCallback((position: number, duration: number, audioLang?: string) => {
     const m = item.meta;
     if (!m || m.media_type !== 'tv' || !next) return;
     const params: ResolveParams = { type: 'tv', title: m.title, tmdb_id: m.tmdb_id, season: next.season, episode: next.episode, maxq: capRef.current };
-    if (nextWarmRef.current && JSON.stringify(nextWarmRef.current) === JSON.stringify(params)) return;
+    const same = !!nextWarmRef.current && JSON.stringify(nextWarmRef.current) === JSON.stringify(params);
     nextWarmRef.current = params;
-    prefetchResolve(params, { next: { position, duration } });
+    if (!prefetchResolve(params, { next: { position, duration } }) && same) return;
     if (pretimeRef.current) pretimeRef.current.cancelled = true;
     const run = { cancelled: false };
     pretimeRef.current = run;
@@ -1481,7 +1498,8 @@ export default function TorrentStreamPlayer({ magnet, source, meta, title, start
                 <div className="flex gap-3">
                   <button
                     onClick={() => {
-                      retryRef.current = { refresh: true };
+                      // Where playback was, else where the failed resolve was to start (never the item's first start)
+                      retryRef.current = { refresh: true, startAt: positionRef.current > 0 ? positionRef.current : attemptStartRef.current };
                       setAttempt(a => a + 1);
                     }}
                     className="flex items-center gap-2 px-6 py-2.5 bg-white text-black font-bold rounded hover:bg-white/80 transition"
@@ -1670,8 +1688,9 @@ function PlayerCore({
   const bufferingRef = useRef(buffering);
   useSyncRef(bufferingRef, buffering);
   // Adaptive start buffer (startBuffer.ts): the active element waits paused until enough is
-  // buffered; `since` is when the wait counts from (null until the first frames are playable)
-  const holdRef = useRef<{ kind: HoldKind; since: number | null; ahead: number } | null>(null);
+  // buffered; `since` is when the wait counts from (null until the first frames are playable);
+  // done: it ends at the next poll (a catch-up that turned out not to be needed)
+  const holdRef = useRef<{ kind: HoldKind; since: number | null; ahead: number; done?: boolean } | null>(null);
   const [holding, setHolding] = useState(false);
   // The file whose first stream got its start hold (only the first stream of a source holds;
   // a TorBox source never does: it delivers at line speed)
@@ -1904,15 +1923,26 @@ function PlayerCore({
     onStrugglingRef.current?.(v ? videoQuality(v.width, v.height) : 0);
   }, []);
 
+  // Safari: a restart the viewer did not ask for (switch, recovery, step down) seeks past the frames
+  // before its target inside the new stream (catchUp.ts). Meanwhile the element is hidden and held,
+  // and the position reads the target. rel: element time of the target, -1 until /seekpoint answers.
+  const catchUpRef = useRef<{ target: number; rel: number; seeking: boolean; last: boolean; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const [catchingUp, setCatchingUp] = useState(false);
+
+  // The long stall counts from now; the catch-up's wait is not the source's (endCatchUp starts it again)
+  const armLongStall = useCallback(() => {
+    if (longStallTimer.current) clearTimeout(longStallTimer.current);
+    longStallTimer.current = setTimeout(() => {
+      if (stall.current && !catchUpRef.current && (!videoRef.current?.paused || holdRef.current)) struggling();
+    }, LONG_STALL_MS);
+  }, [struggling]);
+
   // seek: a restart the viewer asked for. Only its length counts, since seeking twice is normal.
   const beginStall = useCallback((seek: boolean) => {
     if (!everPlayed.current || stall.current) return;
     stall.current = { start: Date.now(), seek };
-    if (longStallTimer.current) clearTimeout(longStallTimer.current);
-    longStallTimer.current = setTimeout(() => {
-      if (stall.current && (!videoRef.current?.paused || holdRef.current)) struggling();
-    }, LONG_STALL_MS);
-  }, [struggling]);
+    armLongStall();
+  }, [armLongStall]);
 
   const endStall = useCallback(() => {
     if (longStallTimer.current) clearTimeout(longStallTimer.current);
@@ -1959,17 +1989,17 @@ function PlayerCore({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Safari: a restart the viewer did not ask for (switch, recovery, step down) seeks past the frames
-  // before its target inside the new stream (catchUp.ts). Meanwhile the element is hidden and held,
-  // and the position reads the target. rel: element time of the target, -1 until /seekpoint answers.
-  const catchUpRef = useRef<{ target: number; rel: number; seeking: boolean; last: boolean; timer: ReturnType<typeof setTimeout> } | null>(null);
-  const [catchingUp, setCatchingUp] = useState(false);
   const endCatchUp = useCallback((res: '' | 'ok' | 'timeout') => {
     const c = catchUpRef.current;
     if (!c) return;
     clearTimeout(c.timer);
     catchUpRef.current = null;
     setCatchingUp(false);
+    // The long stall check skipped the catch-up: it runs again, counting from here after a catch-up
+    if (stall.current) {
+      if (res) stall.current.start = Date.now();
+      armLongStall();
+    }
     if (!res) return;
     const v = videoRef.current;
     if (v) setCur(v.currentTime);
@@ -1980,7 +2010,7 @@ function PlayerCore({
       h.since = h.kind === 'stall' ? Date.now() : null;
       h.ahead = 0;
     }
-  }, [setCur]);
+  }, [setCur, armLongStall]);
   const stepCatchUp = useCallback(() => {
     const c = catchUpRef.current;
     const v = videoRef.current;
@@ -2030,35 +2060,47 @@ function PlayerCore({
 
     // The answer is the file time of the stream's time 0: its first decode time, up to two frames
     // before the keyframe shows, so at t=0 too it is slightly negative (positions ran ~80 ms ahead)
-    const ctrl = new AbortController();
-    seekCtrl.current = ctrl;
-    const timer = setTimeout(() => ctrl.abort(), 15000);
-    (async () => {
-      let t = target;
+    const ask = async (): Promise<number | null> => {
+      const ctrl = new AbortController();
+      seekCtrl.current = ctrl;
+      const timer = setTimeout(() => ctrl.abort(), 15000);
       try {
         const res = await fetch(`${apiUrl}/api/torrent-stream/seekpoint?hash=${hash}&index=${file.id}&t=${target.toFixed(3)}&audio=${audioRef.current}${capsQuery()}`, { signal: ctrl.signal });
         const data = await res.json();
-        if (res.ok && typeof data.t === 'number' && data.t >= -1 && data.t <= target + 1) t = data.t;
+        return res.ok && typeof data.t === 'number' && data.t >= -1 && data.t <= target + 1 ? data.t : null;
       } catch {
-        /* the stream still starts near target, just without the exact offset */
+        return null;
       } finally {
         clearTimeout(timer);
       }
+    };
+    (async () => {
+      // Until it answers the start is not exact (subtitles wait); asked once more after a failure
+      let answer = await ask();
+      if (answer === null && seq === seekSeq.current) {
+        await new Promise(resolve => setTimeout(resolve, SEEKPOINT_RETRY_MS));
+        if (seq === seekSeq.current) answer = await ask();
+      }
       // A newer restart owns the offset now
-      if (seq === seekSeq.current) {
-        exactRef.current = true;
-        offsetRef.current = t;
-        setStartPoint({ t, exact: true });
-        const c = catchUpRef.current;
-        if (c) {
-          c.rel = catchUpTime(target, t);
-          if (c.rel > 0) {
-            // The position reads the target while the element is still before it
-            setCur(c.rel);
-            stepCatchUp();
-          } else {
-            endCatchUp('');
-          }
+      if (seq !== seekSeq.current) return;
+      // The stream still starts near target, just without the exact offset
+      if (answer === null) subLogRef.current?.note('seekpoint-failed', { t: Math.round(target * 100) / 100 });
+      const t = answer ?? target;
+      exactRef.current = true;
+      offsetRef.current = t;
+      setStartPoint({ t, exact: true });
+      const c = catchUpRef.current;
+      if (c) {
+        c.rel = catchUpTime(target, t);
+        if (c.rel > 0) {
+          // The position reads the target while the element is still before it
+          setCur(c.rel);
+          stepCatchUp();
+        } else {
+          endCatchUp('');
+          // Nothing to skip: the hold the catch-up started ends at once, as after any restart
+          const h = holdRef.current;
+          if (h?.kind === 'stall') h.done = true;
         }
       }
     })();
@@ -2404,8 +2446,12 @@ function PlayerCore({
     }
   }, [noteSubsNone]);
 
-  // Subtitles off: the last file's cues go (switching between files keeps them until the next loads)
-  if (!subId && cues.length > 0) setCues([]);
+  // Another subtitle (or off): the last one's cues go at once, not only once the new one has cues
+  const [cuesFor, setCuesFor] = useState(subId);
+  if (cuesFor !== subId) {
+    setCuesFor(subId);
+    if (cues.length > 0) setCues([]);
+  }
   useEffect(() => {
     if (!subId) {
       subShownRef.current = null;
@@ -2626,7 +2672,7 @@ function PlayerCore({
         return;
       }
       const dur = stateRef.current.duration;
-      const done = holdDone(h.kind, {
+      const done = h.done || holdDone(h.kind, {
         ahead,
         waitedMs: h.since === null ? 0 : now - h.since,
         fetching: v.networkState === HTMLMediaElement.NETWORK_LOADING,
@@ -2643,6 +2689,8 @@ function PlayerCore({
     clearStall();
     clearStallConfirm();
     if (stallResetTimer.current) clearTimeout(stallResetTimer.current);
+    // A /seekpoint retry still waiting is not asked any more
+    seekSeq.current++;
     seekCtrl.current?.abort();
   }, [clearStall, clearStallConfirm]);
 
@@ -2778,16 +2826,28 @@ function PlayerCore({
     const v = videoRef.current;
     if (!v) return;
     const hold = holdRef.current;
-    if (hold) {
-      // The viewer decides: Play during the start buffer starts now, Pause during a stall stays paused
+    // A play() the browser refused needs this tap's own play()
+    const press = playPress(hold?.kind ?? null, !!catchUpRef.current && !playBlockedRef.current, v.paused);
+    if (press === 'release') {
+      // Pause during a stall stays paused
       clearHold();
-      if (hold.kind === 'start') v.play().catch(() => {});
-      else setPlaying(false);
-      return;
+      setPlaying(false);
+    } else if (press === 'hold') {
+      // Safari catch-up: the hidden element would play from the keyframe (sound over black); it plays
+      // once it is past those frames (the stall hold then plays on)
+      viewerPausedAtRef.current = 0;
+      startHold('stall');
+      setPlaying(true);
+      setBuffering(true);
+      armStall();
+    } else if (press === 'play') {
+      // Play during the start buffer starts now
+      if (hold) clearHold();
+      v.play().catch(() => {});
+    } else {
+      v.pause();
     }
-    if (v.paused) v.play().catch(() => {});
-    else v.pause();
-  }, [clearHold]);
+  }, [clearHold, startHold, armStall]);
 
   const armHideControls = useCallback(() => {
     if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -2902,15 +2962,20 @@ function PlayerCore({
     return () => ro.disconnect();
   }, [touchUi]);
 
+  // The N key's next episode (nextEpisode below)
+  const nextEpisodeRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === 'SELECT') return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'SELECT') return;
+      // A focused slider (seek, volume) moves itself with the arrows
+      if (tag === 'INPUT' && e.key.startsWith('Arrow')) return;
       if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
       else if (e.key === 'ArrowRight') seekTo(posRef.current + 10);
       else if (e.key === 'ArrowLeft') seekTo(posRef.current - 10);
       else if (e.key === 'f') toggleFullscreen();
       else if (e.key === 'm') setMuted(m => !m);
-      else if (e.key === 'n' && onNext) onNext();
+      else if (e.key === 'n' && onNext) nextEpisodeRef.current();
       else return;
       revealControls();
     };
@@ -2983,8 +3048,10 @@ function PlayerCore({
     setBuffering(false);
     setEnded(false);
     setShownSource(p.source);
-    // Subtitles are listed again for the new file and the default pick runs again (as on a new source)
+    // Subtitles are listed again for the new file and the default pick runs again (as on a new source);
+    // the old file's subtitle is timed to that file, so it goes now (its id names that file)
     subDecided.current = false;
+    setSubId(null);
     setSubDelay(0);
     clearTimeout(delayTimerRef.current);
     noteDelay(delayLog().reset(0, Date.now()));
@@ -3093,7 +3160,9 @@ function PlayerCore({
       setAudio(audio);
       setVideoInfo(video);
       setShownSource(next);
+      // As in adopt: the new file's subtitle list picks again, the old file's subtitle goes
       subDecided.current = false;
+      setSubId(null);
       setSubDelay(0);
       clearTimeout(delayTimerRef.current);
       noteDelay(delayLog().reset(0, Date.now()));
@@ -3252,15 +3321,25 @@ function PlayerCore({
   // TV: warm the next episode's source near the end of this one
   const nextDue = nextWarmDue(position, duration);
   useEffect(() => {
+    if (!nextDue || !onPrefetchNext) return;
     // posRef / durationRef were synced in this commit's layout phase
-    if (nextDue) onPrefetchNext?.(posRef.current, durationRef.current, audioTracksRef.current.find(a => a.index === audioRef.current)?.language);
+    const warm = () => onPrefetchNext(posRef.current, durationRef.current, audioTracksRef.current.find(a => a.index === audioRef.current)?.language);
+    warm();
+    // A prefetch the server turned away is asked again (the parent dedupes the rest)
+    const timer = setInterval(warm, NEXT_WARM_RETRY_MS);
+    return () => clearInterval(timer);
   }, [nextDue, onPrefetchNext]);
 
   // Skip intro / end credits of the episode (skipSegments.ts)
   const skipSegs = useSkipSegments(itemMeta, hash, file?.id, duration);
   const skip = skipPhase(skipSegs, position, duration);
-  // Leaving from the end credits: mark this episode watched before the next one starts
-  const nextFromCredits = () => { persist({ finished: true }); onNext?.(); };
+  // Leaving from the end credits on (any Next button or N): mark this episode watched before the next one starts
+  const nextEpisode = () => {
+    const c = skipSegs?.credits;
+    if (c && position >= c.start) persist({ finished: true });
+    onNext?.();
+  };
+  useSyncRef(nextEpisodeRef, nextEpisode);
 
   // The end credits started: count down to the next episode while they play
   useEffect(() => {
@@ -3641,7 +3720,8 @@ function PlayerCore({
             key={upscaleGen}
             ref={upscaleCanvasRef}
             aria-hidden="true"
-            className={`absolute inset-0 z-[2] w-full h-full object-contain pointer-events-none ${upscaleCss.canvas} ${upscaleReady ? upscaleCss.reveal : ''}`}
+            // Hidden with the element it draws while that catches up (Safari)
+            className={`absolute inset-0 z-[2] w-full h-full object-contain pointer-events-none ${upscaleCss.canvas} ${upscaleReady ? upscaleCss.reveal : ''} ${catchingUp ? 'opacity-0' : ''}`}
           />
         )}
         {upscaleOn && upscaleSweep && (
@@ -3655,8 +3735,9 @@ function PlayerCore({
         )}
       </div>
 
-      {/* Subtitles are drawn here (the stream restarts with offsets, so native tracks would drift) */}
-      {playable && pictureShown && !catchingUp && !!subId && cues.length > 0 && (
+      {/* Subtitles are drawn here (the stream restarts with offsets, so native tracks would drift);
+          not before /seekpoint said where the stream starts (they could run up to a keyframe interval early) */}
+      {playable && pictureShown && !catchingUp && startPoint.exact && !!subId && cues.length > 0 && (
         <SubtitleOverlay videoRef={videoRef} offsetRef={offsetRef} cues={cues} delay={subDelay} raised={controlsVisible} scale={subScale} layout={subLayout} />
       )}
 
@@ -3808,7 +3889,7 @@ function PlayerCore({
             {t('player.watchCredits')}
           </button>
           <button
-            onClick={nextFromCredits}
+            onClick={nextEpisode}
             aria-label={t('player.nextStartsIn', { label: nextLabel, n: Math.max(0, countdown) })}
             className="relative overflow-hidden px-5 py-2.5 bg-white/60 text-black font-bold rounded shadow-lg"
           >
@@ -3833,7 +3914,7 @@ function PlayerCore({
       {/* Next episode button during the end credits */}
       {showNextButton && !panelOpen && (
         <button
-          onClick={nextFromCredits}
+          onClick={nextEpisode}
           className={`absolute ${touchUi ? mobileCss.nextUp : 'right-4 md:right-8 bottom-28'} flex items-center gap-2 px-5 py-2.5 bg-white text-black font-bold rounded shadow-lg hover:bg-white/80 transition`}
         >
           <SkipForward className="w-5 h-5 fill-current" /> {t('player.nextEpisode')}
@@ -3884,7 +3965,7 @@ function PlayerCore({
             </span>
             <div className="flex-1" />
             {!!onNext && (
-              <button onClick={() => onNext()} className={ctl} title={`${t('player.nextEpisode')} ${nextLabel} (N)`} aria-label={t('player.nextEpisode')}>
+              <button onClick={nextEpisode} className={ctl} title={`${t('player.nextEpisode')} ${nextLabel} (N)`} aria-label={t('player.nextEpisode')}>
                 <SkipForward className="w-5 h-5" />
               </button>
             )}
@@ -3966,7 +4047,7 @@ function PlayerCore({
           <div className="flex items-center gap-1">
             <div className="flex-1" />
             {!!onNext && (
-              <button type="button" onClick={() => onNext()} className={touchBtn} aria-label={t('player.nextEpisode')}>
+              <button type="button" onClick={nextEpisode} className={touchBtn} aria-label={t('player.nextEpisode')}>
                 <SkipForward className="h-5 w-5" />
                 <span className={`text-sm font-semibold ${mobileCss.wideOnly}`}>{t('player.nextEpisode')}</span>
               </button>

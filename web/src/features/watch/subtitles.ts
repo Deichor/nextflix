@@ -212,8 +212,7 @@ export function lateSubtitles(
   if (!arrived || viewerChose) return { items, arrived, pick: null };
   const l = normLang(lang);
   const pool = downloadable(items.filter(s => normLang(s.language) === l && !s.forced));
-  const best = pool.find(s => s.synced) || pool[0];
-  return { items, arrived, pick: best?.id ?? null };
+  return { items, arrived, pick: pool[0]?.id ?? null };
 }
 
 /** Items that can be downloaded now: without the ones whose quota is used up or that failed (all of them when none is left). */
@@ -223,12 +222,15 @@ function downloadable(pool: SubtitleItem[], failed?: ReadonlySet<string>): Subti
   return ok.length > 0 ? ok : pool;
 }
 
-/** Best subtitle of lang in items (not forced, downloadable, synced first), for a pick the viewer asked for. */
+/**
+ * Best subtitle of lang in items (not forced, downloadable), for a pick the viewer asked for. The server's
+ * order is best first (synced ones first, but complete ones ahead of ones known to have holes).
+ */
 export function bestSubtitleOf(items: SubtitleItem[], lang: string, failed?: ReadonlySet<string>): string | null {
   const l = normLang(lang);
   const of = items.filter(s => normLang(s.language) === l);
   const pool = downloadable(of.filter(s => !s.forced).length > 0 ? of.filter(s => !s.forced) : of, failed);
-  return (pool.find(s => s.synced) || pool[0])?.id ?? null;
+  return pool[0]?.id ?? null;
 }
 
 // Why a subtitle file could not be loaded: quota = OpenSubtitles' daily download limit,
@@ -266,7 +268,9 @@ export interface Cue {
   text: string;
 }
 
-const cueCache = new LruCache<string, Promise<{ cues: Cue[]; sync: string }>>(CACHE_MAX);
+// Final answers, asked again after CUE_CACHE_MS (the server may have timed the file better since)
+const cueCache = new LruCache<string, { at: number; file: Promise<{ cues: Cue[]; sync: string }> }>(CACHE_MAX);
+const CUE_CACHE_MS = 10 * 60 * 1000;
 // Subtitle files that could not be loaded, by id: not asked again before `until`
 const failedFiles = new Map<string, { why: SubtitleFailure; until: number; errors: number }>();
 const FAILED_FILE_MS = 5 * 60 * 1000;
@@ -315,7 +319,8 @@ export interface SubtitleFile {
 /** poll: the file answered before (a partial one asked again); a failure now is temporary and not remembered */
 export function fetchSubtitleFile(id: string, at?: number, poll = false): Promise<SubtitleFile> {
   const hit = cueCache.get(id);
-  if (hit) return hit.then(c => ({ cues: c.cues, partial: false, sync: c.sync }));
+  if (hit && Date.now() - hit.at < CUE_CACHE_MS) return hit.file.then(c => ({ cues: c.cues, partial: false, sync: c.sync }));
+  if (hit) cueCache.delete(id);
   // A file that failed is not asked again for a while (every seek reloads the cues)
   const bad = poll ? undefined : failedFiles.get(id);
   if (bad && Date.now() < bad.until) return Promise.resolve({ cues: [], partial: false, sync: SYNC_NONE, failed: bad.why });
@@ -340,7 +345,7 @@ export function fetchSubtitleFile(id: string, at?: number, poll = false): Promis
       return { cues: [], partial: false, sync: SYNC_NONE, failed: 'error' };
     });
   req.then(f => {
-    if (f.cues.length > 0 && finalCues(f)) cueCache.set(id, Promise.resolve({ cues: f.cues, sync: f.sync }));
+    if (f.cues.length > 0 && finalCues(f)) cueCache.set(id, { at: Date.now(), file: Promise.resolve({ cues: f.cues, sync: f.sync }) });
   });
   return req;
 }
@@ -389,12 +394,12 @@ export function pickSubtitle(
   items: SubtitleItem[],
   opts: { profileLang: Locale; pref?: PlayerPrefs['sub']; audioLang?: string },
 ): string | null {
-  // A subtitle whose download quota is used up is only taken when nothing else is left
+  // A subtitle whose download quota is used up is only taken when nothing else is left (the server's order is best first)
   const best = (lang: string) => {
     const l = normLang(lang);
     const of = items.filter(s => normLang(s.language) === l && !s.forced);
     const pool = downloadable(of.length > 0 ? of : items.filter(s => normLang(s.language) === l));
-    return (pool.find(s => s.synced) || pool[0])?.id ?? null;
+    return pool[0]?.id ?? null;
   };
   const pref = opts.pref;
   if (pref === 'off') return null;
