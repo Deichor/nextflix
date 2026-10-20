@@ -236,3 +236,40 @@ func TestSnapshotOwnCheck(t *testing.T) {
 		}
 	}
 }
+
+// The timed checks kept with the snapshot's live windows: one kept before its offsets were is
+// checked again with the next fit, from the file's stretches as a fit pairs them.
+func TestSnapshotKeptChecks(t *testing.T) {
+	files, _ := loadSnapshot(t)
+	refs := map[string]syncRef{}
+	for _, f := range files {
+		refs[f.name] = f.ref
+	}
+	lives, _ := filepath.Glob(filepath.Join(snapshotDir(t), "synclive", "*.json"))
+	timed, old, offsets := 0, 0, 0
+	for _, p := range lives {
+		b, _ := os.ReadFile(p)
+		var s liveSaved
+		if json.Unmarshal(b, &s) != nil || s.Check == nil || s.Check.State != ownTimed {
+			continue
+		}
+		timed++
+		name := strings.TrimSuffix(filepath.Base(p), ".json")
+		kept, n, _ := s.Check.check()
+		f := &liveFile{done: s.Windows, ownDone: s.Own, check: kept, checkN: n}
+		pairs := ownPairsOf(refs[name], f)
+		c := checkOwnCached(f, pairs, true, name, 1)
+		if len(s.Check.Offsets) == 0 {
+			old++
+			if n != 0 {
+				t.Errorf("%s: kept without offsets, counted as done from %d stretches", name[:8], n)
+			}
+		}
+		if len(c.Fit.Segments) > 0 {
+			offsets++
+		}
+		t.Logf("%s: kept %s tight=%-5v from %2d stretches, offsets %-14s -> %s tight=%-5v from %2d, offsets %s (%d local)",
+			name[:8], kept.State, kept.Tight, kept.Pairs, segText(kept.Fit), c.State, c.Tight, c.Pairs, segText(c.Fit), len(c.local))
+	}
+	t.Logf("%d timed checks kept, %d without offsets; %d with offsets after the next fit", timed, old, offsets)
+}

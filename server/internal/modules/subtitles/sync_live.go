@@ -82,12 +82,8 @@ type liveFile struct {
 	lastFit  time.Time
 	// pending: a subtitle served in a viewing's first minutes is untimed (re-fit sooner)
 	pending bool
-	// tapAt: seconds of the file the play streams heard up to; viewer: the player's position at
-	// viewerAt (nearViewer)
-	tapAt    float64
-	viewer   float64
-	viewerAt time.Time
-	wake     chan struct{} // the re-fit loop's wait is computed again
+	heads   map[*SpeechSink]float64 // seconds of the file each play stream heard up to (nearViewer)
+	wake    chan struct{}           // the re-fit loop's wait is computed again
 }
 
 // liveWin is a finished window: its speech frames (own-track windows: frames a cue shows), one
@@ -108,12 +104,14 @@ type liveSaved struct {
 func newLiveFile(hash string, index int) *liveFile {
 	return &liveFile{fk: syncFileKey(hash, index), hash: strings.ToLower(hash), index: index,
 		chunks: map[int][]uint8{}, covered: map[int]int{}, done: map[int]liveWin{},
-		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}, wake: make(chan struct{}, 1)}
+		own: map[int][]uint8{}, ownRead: map[int]int{}, ownDone: map[int]liveWin{}, heads: map[*SpeechSink]float64{},
+		wake: make(chan struct{}, 1)}
 }
 
-// growStep is the new audio (or own track) in seconds that re-fits the file (f.mu held).
-func (f *liveFile) growStep() float64 {
-	if f.pending || f.nearViewer() {
+// growStep is the new audio (or own track) in seconds that re-fits the file, the viewer at
+// seconds of the file (-1 unknown; fileViewer) (f.mu held).
+func (f *liveFile) growStep(viewer float64) float64 {
+	if f.pending || f.nearViewer(viewer) {
 		return livePendingGrowth
 	}
 	return liveRefitGrowth
@@ -121,26 +119,17 @@ func (f *liveFile) growStep() float64 {
 
 // nearViewer reports a play stream that hears less than liveNearViewer ahead of the viewer (a
 // muxed 4K stream plays at its pace): a re-fit every 30 s of audio then lands up to a minute after
-// the stretch was shown (Westworld S01E01 took an offset change 48 s late), so it goes every 10 s
-// (f.mu held).
-func (f *liveFile) nearViewer() bool {
-	if f.taps == 0 || f.viewerAt.IsZero() || time.Since(f.viewerAt) > liveNearFor {
+// the stretch was shown, so it goes every 10 s (f.mu held).
+func (f *liveFile) nearViewer(viewer float64) bool {
+	if viewer < 0 {
 		return false
 	}
-	return f.tapAt-(f.viewer+time.Since(f.viewerAt).Seconds()) < liveNearViewer
-}
-
-// noteViewer keeps the player's position t (seconds of the file) for a file with a live reference.
-func (y *syncer) noteViewer(fk string, t float64) {
-	y.mu.Lock()
-	f := y.lives[fk]
-	y.mu.Unlock()
-	if f == nil || !(t > 0) {
-		return
+	for _, at := range f.heads {
+		if at-viewer < liveNearViewer {
+			return true
+		}
 	}
-	f.mu.Lock()
-	f.viewer, f.viewerAt = t, time.Now()
-	f.mu.Unlock()
+	return false
 }
 
 // setPending marks whether an untimed subtitle is served in a viewing's first minutes.
@@ -223,9 +212,9 @@ type liveFrame struct {
 	v  uint8
 }
 
-// add takes frame energies of a play stream whose previous batch ended in window prev (-1:
-// none); it reports whether a re-fit is due.
-func (f *liveFile) add(frames []liveFrame, prev int) bool {
+// add takes frame energies of play stream s whose previous batch ended in window prev (-1:
+// none), the viewer at seconds of the file (-1 unknown); it reports whether a re-fit is due.
+func (f *liveFile) add(s *SpeechSink, frames []liveFrame, prev int, viewer float64) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var touched []int
@@ -263,9 +252,9 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 	f.checkComplete()
 	f.heard += float64(len(frames)) / syncRate
 	if n := len(frames); n > 0 {
-		f.tapAt = float64(frames[n-1].at) / syncRate
+		f.heads[s] = float64(frames[n-1].at) / syncRate
 	}
-	if f.grown >= f.growStep() {
+	if f.grown >= f.growStep(viewer) {
 		f.grown = 0
 		return true
 	}
@@ -411,7 +400,7 @@ func (s *SpeechSink) Write(at int64, pcm []byte) {
 	if len(s.buf) == 0 {
 		return
 	}
-	grown := s.f.add(s.buf, s.lastW)
+	grown := s.f.add(s, s.buf, s.lastW, s.y.fileViewer(s.f.fk))
 	s.lastW = s.buf[len(s.buf)-1].at / liveWindowFrames
 	if grown {
 		s.y.onGrow(s.f)
@@ -423,6 +412,7 @@ func (s *SpeechSink) Close() {
 	f := s.f
 	f.mu.Lock()
 	f.taps--
+	delete(f.heads, s)
 	f.lastTap = time.Now()
 	for w := range f.chunks {
 		f.finishIfHeard(w)
@@ -589,8 +579,8 @@ func (y *syncer) liveFile(hash string, index int) *liveFile {
 			}
 			f.complete = saved.Complete
 			if s := saved.Check; s != nil {
-				if c, ok := s.check(); ok {
-					f.check, f.checkN = c, c.Pairs
+				if c, n, ok := s.check(); ok {
+					f.check, f.checkN = c, n
 				}
 			}
 		}
@@ -703,9 +693,10 @@ func (y *syncer) scheduleRefit(f *liveFile) {
 func (y *syncer) waitRefit(f *liveFile) {
 	start := time.Now()
 	for {
+		viewer := y.fileViewer(f.fk)
 		f.mu.Lock()
 		gap := y.refitGap
-		if f.pending || f.nearViewer() {
+		if f.pending || f.nearViewer(viewer) {
 			gap = y.pendingGap
 		}
 		due := start.Add(y.refitDelay)
@@ -766,16 +757,38 @@ func (y *syncer) noteServed(key, inner, hash string, index int, t float64) (firs
 // request with a position; false when unknown or not recent.
 func (y *syncer) viewerAt(key string) (float64, bool) {
 	y.mu.Lock()
-	s := y.served[key]
-	var at float64
-	var since time.Duration
-	if s != nil {
-		at, since = s.at, time.Since(s.last)
+	var s servedSub
+	if p := y.served[key]; p != nil {
+		s = *p
 	}
 	y.mu.Unlock()
-	if s == nil || at <= 0 || since > liveNearFor {
+	return y.playerAt(s)
+}
+
+// fileViewer is where the player that asked last for a subtitle of the file with its position is
+// now (viewerAt), -1 when unknown.
+func (y *syncer) fileViewer(fk string) float64 {
+	y.mu.Lock()
+	var s servedSub
+	for _, p := range y.served {
+		if p.fk == fk && p.at > 0 && p.last.After(s.last) {
+			s = *p
+		}
+	}
+	y.mu.Unlock()
+	if at, ok := y.playerAt(s); ok {
+		return at
+	}
+	return -1
+}
+
+// playerAt is where the player of s is now, from its last request with a position.
+func (y *syncer) playerAt(s servedSub) (float64, bool) {
+	since := time.Since(s.last)
+	if s.at <= 0 || since > liveNearFor {
 		return 0, false
 	}
+	at := s.at
 	if y.livePlaying(s.fk) {
 		at += since.Seconds() // it played on since (a pause is not known here)
 	}

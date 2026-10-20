@@ -430,6 +430,60 @@ func TestSameCutCopyGivesWayWhenTheSpeechNoLongerMatches(t *testing.T) {
 	}
 }
 
+// While the reference of the file a copy came from cannot be loaded (a read runs), its speech is
+// not compared: the copy the speech match held stays (review: it counted as no match and was
+// dropped).
+func TestSameCutCopyStaysWhileTheOtherReferenceIsRead(t *testing.T) {
+	file := dialogue(59, episode)
+	starts := windowStarts(episode, syncWindowLen, 8)
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none"}
+	ref := syncRef{Probe: probe, Windows: speechWindows(file, starts, 0.15, 0.08, 0.1, 3)}
+	sub := dialogue(83, episode)
+	moved := shiftSpans(sub, 1.5)
+	s := newSwitchTest(t, episode, ref, ref, sub)
+	y := s.y
+	fit := syncMeta{State: syncStateSynced, Fit: syncFit{Scale: 1, Segments: []syncSegment{{0, 1.5}}}, Live: true}
+	y.store(s.keyA, fit, vttOf(moved))
+	copied := fit
+	copied.SameCut, copied.SameSpeech = syncFileKey(s.a, 1), true
+	y.store(s.keyB, copied, vttOf(moved))
+	fk := syncFileKey(s.a, 1)
+	y.mu.Lock()
+	y.probes[fk] = probe
+	y.mu.Unlock()
+	st, release := y.refState(fk)
+	defer release()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !y.decide(s.ctx, s.inner, s.b, 1, s.base, s.refB, false) {
+		t.Fatal("too little to tell")
+	}
+	if m := y.meta(s.keyB); m == nil || m.SameCut != fk || !m.SameSpeech || !m.fits() {
+		t.Fatalf("the copy gave way: %+v", m)
+	}
+}
+
+// A speech match is kept for the decide, no match is not: a fit that reads more windows compares
+// again (review: a no-match from fewer windows stuck).
+func TestSameSpeechComparesAgainAfterNoMatch(t *testing.T) {
+	file := dialogue(59, episode)
+	starts := windowStarts(episode, syncWindowLen, 8)
+	probe := mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none"}
+	ref := syncRef{Probe: probe, Windows: speechWindows(file, starts, 0.15, 0.08, 0.1, 3)}
+	s := newSwitchTest(t, episode, ref, ref, dialogue(83, episode))
+	r := fitRefs{own: ref, same: map[string]bool{}}
+	o := servedSub{fk: syncFileKey(s.a, 1), hash: s.a, index: 1}
+	if s.y.sameSpeech(r, s.b, 1, o, syncRef{Probe: probe}) {
+		t.Fatal("matched without the other file's speech")
+	}
+	if !s.y.sameSpeech(r, s.b, 1, o, ref) {
+		t.Fatal("the no-match stuck")
+	}
+	if !s.y.sameSpeech(r, s.b, 1, o, syncRef{Probe: probe}) {
+		t.Fatal("the match was not kept")
+	}
+}
+
 // A copy takes the fit of the most recent file of the same cut that fits: not a copy itself (it
 // was not timed to that file), and past a file that replaced the subtitle (review: the first
 // such file ended the search).

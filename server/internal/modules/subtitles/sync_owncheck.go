@@ -57,8 +57,9 @@ type ownCheck struct {
 	// there, so they do not time subtitles alone (checkOwnTrack)
 	NoFit bool
 	Lag   float64 // NoFit: its best offset, when one within the lag with more line starts on an onset than by chance
-	// local: a loose track's offset per stretch (pair start), for one fit (localOffsets)
-	local map[float64]float64
+	// local: a loose track's offset per stretch (pair start; localOffsets), from localN pairs
+	local  map[float64]float64
+	localN int
 }
 
 // ownSaved is a decided check (or NoFit) as kept with the file's live windows (a restart goes on
@@ -84,16 +85,21 @@ func (c ownCheck) saved() *ownSaved {
 	return s
 }
 
-// check is a saved check again; false for one that knows nothing.
-func (s ownSaved) check() (ownCheck, bool) {
+// check is a saved check again, with the stretches it counts as done from (checkN); false for
+// one that knows nothing. A timed check kept before its offsets were is done again with the next
+// fit (0 stretches).
+func (s ownSaved) check() (ownCheck, int, bool) {
 	if s.State != ownTimed && s.State != ownOther && !(s.State == "" && s.NoFit) {
-		return ownCheck{}, false
+		return ownCheck{}, 0, false
 	}
 	c := ownCheck{State: s.State, Tight: s.Tight && s.State == ownTimed, Pairs: s.Pairs, NoFit: s.NoFit && s.State == "", Lag: s.Lag}
 	if c.State == ownTimed {
 		c.Fit.Segments = s.Offsets
+		if len(s.Offsets) == 0 {
+			return c, 0, true
+		}
 	}
-	return c, true
+	return c, c.Pairs, true
 }
 
 func sameSaved(a, b *ownSaved) bool {
@@ -106,8 +112,7 @@ func sameSaved(a, b *ownSaved) bool {
 
 // onSpeech moves the own track's windows by the offsets the check found to the speech (timed;
 // NoFit: its best lag, for the windows set aside), so they time subtitles to the speech, not to
-// the track's lead: The Mentalist S03E09 (NF) starts its lines 0.53 s before their speech, and
-// every fit with them served the lines 0.45-0.87 s early.
+// the track's lead.
 func (c ownCheck) onSpeech(ws []refWindow) []refWindow {
 	if !hasOwnWindows(ws) {
 		return ws
@@ -177,25 +182,38 @@ func checkOwn(pairs []ownPair) ownCheck {
 	if len(pairs) >= ownChanceMin && c.Near < ownChanceShare {
 		c.State, c.NoFit = ownOther, false
 	}
-	if c.NoFit && c.Near >= ownChanceShare && len(fit.Segments) == 1 && fit.Segments[0].Offset >= ownLagLo && fit.Segments[0].Offset <= ownLagHi {
-		c.Lag = fit.Segments[0].Offset
+	if c.NoFit {
+		c.Lag = noFitLag(pairs, fit)
 	}
 	return c
 }
 
+// noFitLag is the offset a fit that missed (NoFit) moves the track's windows by: its one offset
+// when that lies within the lag and more line starts than by chance are on an onset there, else 0.
+func noFitLag(pairs []ownPair, fit syncFit) float64 {
+	if len(fit.Segments) != 1 {
+		return 0
+	}
+	off := fit.Segments[0].Offset
+	if off < ownLagLo || off > ownLagHi {
+		return 0
+	}
+	if near, _ := nearShare(pairs, off); near < ownChanceShare {
+		return 0
+	}
+	return off
+}
+
 // onLag reports a fit that missed only the peak bar, at one offset within the lag and above
 // chance by the gain bar: with most line starts on a speech onset there (the caller), the track
-// is timed to the file. Westworld S01E06's PGS track (DEMAND): +0.05 to +0.09 s with 71-81 % of
-// its line starts on one, but peak 0.10-0.11 under the 0.12 of fewer than 8 stretches, and the
-// speech alone (gain 0.10-0.14) did not fit: the whole viewing was served 1 s late.
+// is timed to the file.
 func onLag(f syncFit) bool {
 	return len(f.Segments) == 1 && f.Score-f.Base >= syncMinGain && f.Segments[0].Offset >= ownLagLo && f.Segments[0].Offset <= ownLagHi
 }
 
-// localOffsets are a loose timed track's offsets to the speech per stretch (within 0.4 s of the
-// check's; the median of the pairs within 150 s): its lead changes by stretch (The Mentalist
-// S03E09: 0.45 to 0.87 s, steps the fit's offsets do not take), and its lines are no exact
-// reference there anyway. nil for a tight track.
+// localOffsets are a loose timed track's offsets to the speech per stretch (within syncMaxLag of
+// the check's; the median of the pairs within 150 s): its lead changes by stretch, by steps the
+// fit's offsets do not take. nil for a tight track.
 func localOffsets(pairs []ownPair, c ownCheck) map[float64]float64 {
 	if c.State != ownTimed || c.Tight || len(c.Fit.Segments) == 0 {
 		return nil
