@@ -1629,6 +1629,40 @@ that change at splits), simplified:
   until the TV shows a timing right for 90 % of them, p90 58 s → 50 s → 28 s. Pre-timing helps most where the played
   audio alone fits late: the Turkish subtitles of The Mentalist S03E01 / S03E02 need 440 s of audio for their first
   live fit (~80 s on the TV), so their first minutes went from 84-89 % to 98-100 % within 0.5 s.
+  A file above the byte budget (Cost below) reads no windows, so its pre-timing had nothing to fit, and a muxed 4K
+  stream's tap hears only ~30 s ahead of the picture: the episode showed its subtitle untimed until 120 s of its
+  audio were heard (Westworld S01E05 4K, 2.8 MB/s, played from 105 s past its intro: the Turkish subtitle 0.8 s late
+  from 105 to 218 s; S01E04 0.4 s late from 100 to 181 s). Its pre-timing now reads, once per file (`start` in the
+  reference), the speech of up to 3 contiguous windows within the same 800 MB (2 at 40 Mbit/s, none where fewer
+  than the 2 a live fit needs fit), from 15 s before the subtitle's first stretch of dialogue (5 lines within a
+  minute; a title or credit line before it does not count), where an episode opened at 0 or past its intro needs
+  its first cues. Only the audio: an own track's windows would wait for its check against the speech. They are
+  fitted by the live rules (contiguous, like the early own-track windows below) and the fit is pre-timed as above,
+  shown once the first played window (20 s heard) backs it. The reads stop once the file plays, a running one too
+  (checked every second: its tap hears that stretch then, and a read beside a playing stream of such a file would
+  take its line); a timing that is not a pre-timing still reads nothing of such a file. The first pass that places
+  the windows keeps their places (`start_at`), so a later pass (another subtitle's pre-timing, after one cut by the
+  playing streams or with failed reads) reads only what is missing there, never more than the 3 windows. The file
+  is done (`start`) once all are read, it plays, or a pass that ran through has 2 of them (else after 3 such
+  passes); a file the budget allows none of at once; a subtitle whose lines are too sparse to place them leaves it
+  to the next pre-timing. Start windows count only while the played audio lies within 5 minutes of them: a viewing
+  resumed mid-episode would otherwise be timed by the start's offset (3 minutes of them outweigh its first played
+  window: a subtitle +0.8 s at the start and +3.5 s after an act break was served at +0.8 s at 1500 s), so it is
+  timed from the audio played there, as before. The early own-track read at the play position (below) still runs
+  beside them. Replayed on the snapshot (`TestSnapshotBigStart`: the files above
+  the budget played from their start point, the tap 30 s ahead of the picture, a re-fit every 10 s of audio, the
+  start windows taken from the played audio of the same stretch; truth: the fit over every played window): S01E05
+  first timed at 220 s → 120 s of the picture (dialogue from 107 s: 113 s untimed → 13 s), its Turkish subtitle's
+  cues of the first 3 minutes within 0.3 s 23 % → 90 %; S01E04 215 s → 115 s (109 s → 9 s untimed, 29 % → 94 %);
+  all 26 pairs within 0.3 s 57 % → 75 %, dialogue untimed median 118 s → 13 s. Of 355 subtitles that fit no file
+  over the whole of it, none is shown on another episode's lines either way; 5 (2 before) are shown on this
+  episode's (Westworld S01E01's Turkish subtitles made for a shorter cut, right at the start within 0.05 s of its
+  English one). Resumed at 30:00 (16 pairs), the pre-timed files are timed exactly as those without start windows
+  (before the 5-minute rule E05's English subtitle showed the start's fit at once, right only because its offset
+  is the same all through). Tried and not taken: an earlier first live fit (below 120 s of
+  audio other episodes' subtitles fit, see Live timing) and showing an untimed subtitle moved by the previous
+  episode's offset (a prior; the teaser and act breaks of another episode differ, and the real cases changed
+  subtitle source between episodes).
 - Same cut (`sameCut`): a subtitle first asked for a file that it was served for on another file within the last
   minutes (a step down or sidegrade during playback) takes that file's fit at once (provisional, `same_cut` in the
   result, logged `the fit on <hash8>:<index> (same cut: …)`) when both probed lengths agree within 0.05 s and the
@@ -1662,7 +1696,9 @@ that change at splits), simplified:
 - Cost: the windows of one file are planned within 800 MB (each counted as its share of the file + 28 MB for the TorBox
   proxy's first chunk and read-ahead) and need at least 8 windows, so files above about 10 Mbit/s (1080p WEB-DLs of
   The Mentalist S02E10 at 13.6 Mbit/s, every 4K file) read none and are timed from the played audio (the first
-  provisional timing after 2 minutes of audio with 30 line starts, i.e. about 30 s into playback). One exception:
+  provisional timing after 2 minutes of audio with 30 line starts, i.e. about 30 s into playback on a split stream,
+  about 2 minutes on a muxed 4K stream that plays at its pace), except the speech of their start for a pre-timing
+  (Next episode above: 3 windows, ~620 MB for a 4K episode at 23.7 Mbit/s). One more exception:
   when the first play stream of such a file opens (`readEarly`, once per file), the cues of its own subtitle track
   (text or PGS, if it has one) in the 2 minutes from the play position are read, after the same 20 s delay and
   through the same byte cap: the player fetches those bytes anyway, so they come from TorrServer's cache, and exact
@@ -1679,7 +1715,9 @@ that change at splits), simplified:
   windows finished` when a play stream ends (`own track of <hash8>:<index> (<codec>) from …: <n> cues, <s> read; <n>
   own windows finished` for the cue tap), and `subtitles: timing of … (provisional) (… offsets …, score …; live
   reference, <n> windows (<n> live, <s> played) …)` whenever a re-fit changes what is served (state, offsets by
-  0.05 s, splits by 1 s); `timing reference of …: … no read, timed from the played audio` for files above the budget,
+  0.05 s, splits by 1 s); `timing reference of …: … no read, timed from the played audio` for files above the budget
+  (`… the speech of its start (above the byte budget), <n> of <m> windows from <t>s, <MB> MB read in <s>` when a
+  pre-timing reads their start),
   `timing reference of …: subs (PGS), …` / `… early windows of its own PGS track …` naming the own track's kind,
   `read the speech of its own-track windows, <n> of <m> windows` / `read its own PGS track where its speech was
   read, …` for a reference saved before (`(cut: the rest next time)`); the own-track check's line above. When what

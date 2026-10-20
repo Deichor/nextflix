@@ -501,8 +501,8 @@ func (y *syncer) readEarly(hash string, index int, start float64) {
 			time.Sleep(5 * time.Second)
 		}
 	}
-	if f := y.liveFile(hash, index); !r.Skipped || len(r.Windows) > 0 || f.ownTapping() || f.ownState() == ownOther {
-		return // (the play stream's cue tap brings those cues; not timed to the file: no use)
+	if f := y.liveFile(hash, index); !r.Skipped || hasOwnWindows(r.Windows) || f.ownTapping() || f.ownState() == ownOther {
+		return // (read before; the play stream's cue tap brings those cues; not timed to the file: no use)
 	}
 	url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
 	if !r.Probe.subsKnown() {
