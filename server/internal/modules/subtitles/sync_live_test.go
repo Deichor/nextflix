@@ -583,27 +583,47 @@ func TestMergeWindows(t *testing.T) {
 
 // A stream that hears less than a minute ahead of the viewer (muxed 4K plays at its pace) re-fits
 // every 10 s of audio, like an untimed viewing's first minutes; one far ahead (the TV's split
-// stream), a closed one or an old position every 30 s.
+// stream), a closed one or an old position every 30 s. The player's position is the one its
+// subtitle requests sent; with two streams the one nearest to the viewer counts, whichever heard last.
 func TestNearViewerRefitsSooner(t *testing.T) {
 	y := newLiveTest(t, episode).sync
 	f := y.liveFile(syncHash, 1)
-	y.noteViewer(syncFileKey(syncHash, 1), 960)
+	y.noteServed("k", "sub", syncHash, 1, 960)
+	step := func() float64 {
+		v := y.fileViewer(f.fk)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.growStep(v)
+	}
+	hear := func(s *SpeechSink, at float64) {
+		f.add(s, []liveFrame{{at: int(at * syncRate), v: 1}}, -1, -1)
+	}
+	near, far := &SpeechSink{}, &SpeechSink{}
+	hear(near, 1000)
+	if got := step(); got != livePendingGrowth {
+		t.Fatalf("40 s ahead: %.0f s", got)
+	}
+	hear(far, 1100)
+	if got := step(); got != livePendingGrowth {
+		t.Fatalf("40 and 140 s ahead: %.0f s", got)
+	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.taps, f.tapAt = 1, 1000
-	if f.growStep() != livePendingGrowth {
-		t.Fatalf("40 s ahead: %.0f s", f.growStep())
+	delete(f.heads, near)
+	f.mu.Unlock()
+	if got := step(); got != liveRefitGrowth {
+		t.Fatalf("140 s ahead: %.0f s", got)
 	}
-	f.viewer = 900
-	if f.growStep() != liveRefitGrowth {
-		t.Fatalf("100 s ahead: %.0f s", f.growStep())
+	f.mu.Lock()
+	delete(f.heads, far)
+	f.mu.Unlock()
+	if got := step(); got != liveRefitGrowth {
+		t.Fatalf("no stream: %.0f s", got)
 	}
-	f.viewer, f.taps = 960, 0
-	if f.growStep() != liveRefitGrowth {
-		t.Fatalf("no stream: %.0f s", f.growStep())
-	}
-	f.taps, f.viewerAt = 1, time.Now().Add(-3*time.Minute)
-	if f.growStep() != liveRefitGrowth {
-		t.Fatalf("an old position: %.0f s", f.growStep())
+	hear(near, 1000)
+	y.mu.Lock()
+	y.served["k"].last = time.Now().Add(-3 * time.Minute)
+	y.mu.Unlock()
+	if got := step(); got != liveRefitGrowth {
+		t.Fatalf("an old position: %.0f s", got)
 	}
 }
