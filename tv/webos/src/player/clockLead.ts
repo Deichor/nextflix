@@ -32,21 +32,60 @@ export function leadOf(samples: number[], fallback: number): number {
   return s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
 }
 
-const KEY = 'nfx-tv:clock-lead';
+/**
+ * What restarted the clock: a seek inside the buffer (the playing pipeline only jumps), or a new muxed or
+ * split stream. Seeks are measured cleanest, so their samples win; a new stream's own count only without them.
+ */
+export type LeadKind = 'seek' | 'muxed' | 'split';
+export type LeadSamples = Record<LeadKind, number[]>;
 
-export function loadSamples(): number[] {
+const KINDS: LeadKind[] = ['seek', 'muxed', 'split'];
+
+export function addKindSample(all: LeadSamples, kind: LeadKind, x: number): LeadSamples {
+  return { ...all, [kind]: addSample(all[kind], x) };
+}
+
+/** The lead for a stream of this mode: the seeks' median, else the mode's own, else the fallback */
+export function leadFor(all: LeadSamples, mode: Exclude<LeadKind, 'seek'>, fallback: number): number {
+  return leadOf(all.seek.length ? all.seek : all[mode], fallback);
+}
+
+const valid = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter(x => typeof x === 'number' && x >= 0 && x <= MAX_LEAD_S).slice(-KEEP) : [];
+
+/** Stored samples by kind (anything else read as none) */
+export function parseSamples(raw: unknown): LeadSamples {
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  return { seek: valid(o.seek), muxed: valid(o.muxed), split: valid(o.split) };
+}
+
+// Samples by kind; the older key held untagged samples taken when the `playing` handler ran (late under load)
+const KEY = 'nfx-tv:clock-lead2';
+const OLD_KEY = 'nfx-tv:clock-lead';
+
+export function loadSamples(): LeadSamples {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) || '[]');
-    return Array.isArray(v) ? v.filter(x => typeof x === 'number' && x >= 0 && x <= MAX_LEAD_S).slice(-KEEP) : [];
+    localStorage.removeItem(OLD_KEY);
+    return parseSamples(JSON.parse(localStorage.getItem(KEY) || '{}'));
   } catch {
-    return [];
+    return parseSamples(null);
   }
 }
 
-export function saveSamples(samples: number[]): void {
+export function saveSamples(all: LeadSamples): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(samples));
+    const out: Partial<LeadSamples> = {};
+    for (const k of KINDS) if (all[k].length) out[k] = all[k];
+    localStorage.setItem(KEY, JSON.stringify(out));
   } catch {
     /* storage full or off */
   }
+}
+
+/**
+ * When an event happened on the performance.now() clock: its timeStamp (a handler may run well after it on a
+ * busy TV), else now when the engine stamps events otherwise (epoch ms on old engines, or 0).
+ */
+export function eventTime(timeStamp: number, now: number): number {
+  return timeStamp > 0 && timeStamp <= now ? timeStamp : now;
 }

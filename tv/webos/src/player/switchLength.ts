@@ -19,3 +19,20 @@ export function timeScale(playing: number, next: number): number {
   if (playing <= 0 || next <= 0 || Math.abs(next - playing) <= KEEP_TIME_S) return 1;
   return next / playing;
 }
+
+/** A switch this far in never starts over: a file that cannot take over sends the player back */
+const GUARD_FROM_S = 30;
+/** The new file has to reach the position by this much */
+const END_MARGIN_S = 10;
+
+/**
+ * Where a switch (upgrade, sidegrade, step down) from the playing file at `at` starts in the new one, or
+ * null when the new file cannot take over (it does not reach the moment, or it is not the same length:
+ * a pack's wrong file, another cut) and the player goes back to the file it came from at `at`.
+ */
+export function switchStart(playing: number, next: number, at: number): number | null {
+  const same = lengthsMatch(playing, next);
+  const start = same ? at * timeScale(playing, next) : at;
+  if (at > GUARD_FROM_S && next > 0 && (start >= next - END_MARGIN_S || !same)) return null;
+  return start;
+}
