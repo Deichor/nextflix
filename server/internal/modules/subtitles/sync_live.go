@@ -96,7 +96,7 @@ type liveSaved struct {
 	Windows  map[int]liveWin `json:"windows"`
 	Own      map[int]liveWin `json:"own,omitempty"`
 	Complete bool            `json:"complete,omitempty"`
-	Check    *ownSaved       `json:"check,omitempty"` // the own-track check, once decided
+	Check    *ownSaved       `json:"check,omitempty"` // the own-track check, once decided (or NoFit)
 }
 
 func newLiveFile(hash string, index int) *liveFile {
@@ -555,9 +555,10 @@ func (y *syncer) liveFile(hash string, index int) *liveFile {
 				}
 			}
 			f.complete = saved.Complete
-			if c := saved.Check; c != nil && (c.State == ownTimed || c.State == ownOther) {
-				f.check = ownCheck{State: c.State, Tight: c.Tight && c.State == ownTimed, Pairs: c.Pairs}
-				f.checkN = c.Pairs
+			if s := saved.Check; s != nil {
+				if c, ok := s.check(); ok {
+					f.check, f.checkN = c, c.Pairs
+				}
 			}
 		}
 	}
@@ -613,9 +614,7 @@ func (y *syncer) saveLive(f *liveFile) {
 			saved.Own[w] = d
 		}
 	}
-	if f.check.State != "" {
-		saved.Check = &ownSaved{State: f.check.State, Tight: f.check.Tight, Pairs: f.check.Pairs}
-	}
+	saved.Check = f.check.saved()
 	f.dirty = false
 	f.mu.Unlock()
 	if b, err := json.Marshal(saved); err == nil {

@@ -172,12 +172,15 @@ func (y *syncer) sameCutWindows(inner, hash string, index int, ref syncRef, live
 	}
 	for _, o := range y.servedElsewhere(inner, syncFileKey(hash, index)) {
 		other, ok := y.knownRef(o.hash, o.index)
-		if !ok || !sameLength(ref.Probe, other.Probe) || !hasOwnWindows(other.Windows) || y.liveFile(o.hash, o.index).ownState() != ownTimed ||
-			!speechMatches(fileSpeech(ref, live), y.speechOf(o.hash, o.index, other)) {
+		if !ok || !sameLength(ref.Probe, other.Probe) || !hasOwnWindows(other.Windows) {
+			continue
+		}
+		oc := y.liveFile(o.hash, o.index).ownChecked()
+		if oc.State != ownTimed || !speechMatches(fileSpeech(ref, live), y.speechOf(o.hash, o.index, other)) {
 			continue
 		}
 		var ws []refWindow
-		for _, w := range other.Windows {
+		for _, w := range oc.onSpeech(other.Windows) { // on the speech, as that file's fits use them
 			if w.Kind == "subs" {
 				ws = append(ws, w)
 			}

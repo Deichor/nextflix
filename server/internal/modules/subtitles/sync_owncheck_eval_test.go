@@ -23,6 +23,7 @@ var ownCheckCases = []struct{ file, times, note string }{
 	{"555f0556", "s02e22_own3.times", "Mentalist S02E22 NF track 3 (roll-up captions)"},
 	{"555f0556", "s02e22_own4.times", "Mentalist S02E22 NF track 4 (roll-up captions)"},
 	{"75c5beae", "s02e16_own2.times", "Mentalist S02E16 Code Red ASS (another cut)"},
+	{"21b66acc", "s03e09_own3.vtt", "Mentalist S03E09 NF d1fa8946 track 3 (on the file, 0.53 s early, loose)"},
 }
 
 // speechAt is the played speech of [start, start+frames) from the live grid windows, when they

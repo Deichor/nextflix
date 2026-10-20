@@ -219,7 +219,8 @@ type syncMeta struct {
 // asked for (served as it is meanwhile): final results are never re-fitted otherwise, so fixes of
 // the timing would not reach them. 1: rates compared net of their offset changes and searched
 // again, changes placed over undecided windows (The Mentalist S03E02 kept 24/23.976 for good).
-const syncVersion = 1
+// 2: own-track windows on the speech's timeline (The Mentalist S03E09 was served 0.5 s early).
+const syncVersion = 2
 
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }
 
@@ -683,8 +684,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	m, vtt, r := y.fitOne(ctx, inner, hash, index, r, base, read, prev, complete)
 	if r.ref.OwnAside && !m.fits() {
 		// The speech does not time it: the set-aside own track's windows may (as before the check)
-		as := fitRefs{ref: r.own, live: r.ownLive, own: r.own, ownLive: r.ownLive}
-		if om, ovtt, or := y.fitOne(ctx, inner, hash, index, as, base, false, prev, complete); om.fits() {
+		if om, ovtt, or := y.fitOne(ctx, inner, hash, index, r.aside(), base, false, prev, complete); om.fits() {
 			m, vtt, r = om, ovtt, or
 		}
 	}
@@ -944,6 +944,15 @@ type fitRefs struct {
 	ownLive []refWindow
 }
 
+// aside are the windows of an own track set aside (OwnAside), as read and played, moved onto the
+// speech by the check's best lag.
+func (r fitRefs) aside() fitRefs {
+	c := r.ref.Own
+	a := fitRefs{ref: r.own, live: c.onSpeech(r.ownLive), own: r.own, ownLive: r.ownLive}
+	a.ref.Windows = c.onSpeech(r.own.Windows)
+	return a
+}
+
 // fitRef builds the windows a fit uses from the file's reference and live windows: own-track
 // windows only as the own-track check allows (checkOwnTrack; a set-aside track's while there is
 // too little speech), with the timed own-track windows of a file of the same cut (sameCutWindows).
@@ -953,7 +962,8 @@ func (y *syncer) fitRef(inner, hash string, index int, ref syncRef, live []refWi
 	r.ref, r.live = y.checkOwnTrack(hash, index, ref, live)
 	r.own.Own = r.ref.Own
 	if r.ref.OwnAside && tooLittleRef(r.ref, r.live) {
-		r.ref, r.live = r.own, r.ownLive // too little speech yet: the own track's windows, as before the check
+		a := r.aside() // too little speech yet: the own track's windows, as before the check
+		r.ref, r.live = a.ref, a.live
 	}
 	r.ref = y.sameCutWindows(inner, hash, index, r.ref, r.live)
 	return r

@@ -73,31 +73,35 @@ func TestOwnTrackWithoutAFitGivesWay(t *testing.T) {
 	}
 }
 
-// A text track set aside (no fit to the speech) still times a subtitle that the speech does not:
-// the speech may be what does not tell (music, noise), as before the check.
+// A track set aside (no fit to the speech) still times a subtitle that the speech does not: the
+// speech may be what does not tell (music, noise), as before the check. A PGS track's too
+// (Westworld S01E06: its PGS track found no fit from 3-5 stretches, and the speech alone did
+// not time the subtitle, so it was served untimed).
 func TestOwnTrackAsideTimesWhatTheSpeechDoesNot(t *testing.T) {
-	svc := newLiveTest(t, 1500)
-	y := svc.sync
-	file := dialogue(72, 1500)
-	starts := windowStarts(1500, syncWindowLen, 6)
-	noise := speechWindows(dialogue(91, 1500), starts, 0.15, 0.08, 0.1, 3) // speech that does not tell
-	for i := range noise {
-		noise[i].Kind = "audio"
-	}
-	ref := syncRef{Probe: mediaProbe{Duration: 1500, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"},
-		Windows: truthWindows(file, starts, 0, 0, 1), Speech: noise, Paired: true}
-	if got, _ := y.checkOwnTrack(syncHash, 1, ref, nil); !got.OwnAside || hasOwnWindows(got.Windows) {
-		t.Fatalf("not set aside: %+v", got.Own)
-	}
-	ctx := context.Background()
-	inner := cacheProviderSub(t, svc, "1|aside|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
-	base, _ := svc.File(ctx, inner)
-	key, _ := syncKey(inner, syncHash, 1)
-	if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
-		t.Fatal("too little to tell")
-	}
-	if m := y.meta(key); m == nil || !m.fits() || m.Ref != "subs" || math.Abs(m.Fit.Segments[0].Offset-2) > 0.15 {
-		t.Fatalf("%+v", m)
+	for _, codec := range []string{"subrip", "hdmv_pgs_subtitle"} {
+		svc := newLiveTest(t, 1500)
+		y := svc.sync
+		file := dialogue(72, 1500)
+		starts := windowStarts(1500, syncWindowLen, 6)
+		noise := speechWindows(dialogue(91, 1500), starts, 0.15, 0.08, 0.1, 3) // speech that does not tell
+		for i := range noise {
+			noise[i].Kind = "audio"
+		}
+		ref := syncRef{Probe: mediaProbe{Duration: 1500, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: codec},
+			Windows: truthWindows(file, starts, 0, 0, 1), Speech: noise, Paired: true}
+		if got, _ := y.checkOwnTrack(syncHash, 1, ref, nil); !got.OwnAside || hasOwnWindows(got.Windows) {
+			t.Fatalf("%s not set aside: %+v", codec, got.Own)
+		}
+		ctx := context.Background()
+		inner := cacheProviderSub(t, svc, "1|aside|2|7|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+		base, _ := svc.File(ctx, inner)
+		key, _ := syncKey(inner, syncHash, 1)
+		if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
+			t.Fatalf("%s: too little to tell", codec)
+		}
+		if m := y.meta(key); m == nil || !m.fits() || m.Ref != "subs" || math.Abs(m.Fit.Segments[0].Offset-2) > 0.15 {
+			t.Fatalf("%s: %+v", codec, m)
+		}
 	}
 }
 
