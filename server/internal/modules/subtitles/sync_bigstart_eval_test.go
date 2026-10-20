@@ -30,6 +30,9 @@ const (
 	bigPoll  = 5.0   // seconds until the TV shows a stored timing
 	bigUpto  = 400.0 // seconds of audio replayed after the start
 	bigScore = 180.0 // cues within this long after the start are scored
+	// bigResume is where a resumed viewing starts (30:00): pre-timed, the start windows lie far
+	// from what it plays
+	bigResume = 1800.0
 )
 
 // bigStarts are the play starts of the viewings in the snapshot (server log 2026-10-18: "live audio
@@ -187,7 +190,7 @@ func TestSnapshotBigStart(t *testing.T) {
 		falseAccepts  int
 		otherCut      int // shown, and on this episode's lines (a subtitle of it made for another cut)
 	}
-	groups := map[string]*agg{"before": {}, "pre": {}}
+	groups := map[string]*agg{"before": {}, "pre": {}, "before resume": {}, "pre resume": {}}
 	for _, f := range files {
 		if !f.ref.Skipped || len(f.live) < 10 || only != "" && !strings.Contains(f.name, only) {
 			continue
@@ -290,6 +293,23 @@ func TestSnapshotBigStart(t *testing.T) {
 					}
 				}
 			}
+			// A viewing resumed mid-episode: the start windows lie far from the played audio
+			if q := bigResume; right && played[int(q/syncWindowLen)] && played[int(q/syncWindowLen)+1] && played[int(q/syncWindowLen)+2] {
+				for _, mode := range []string{"before", "pre"} {
+					steps := replayBig(t, f, s.spans, q, mode == "pre")
+					r := evalBig(steps, s.spans, truth, q)
+					g := groups[mode+" resume"]
+					g.pairs++
+					g.untimed = append(g.untimed, r.untimed)
+					for i, c := range s.spans {
+						if T := truth[i]; !math.IsNaN(T) && T >= q && T < q+bigScore {
+							g.errs = append(g.errs, math.Abs(shownAt(steps, T).mapTime(c.start)-T))
+						}
+					}
+					line = append(line, fmt.Sprintf("%s resumed at %.0f s: first timing shown at %4.0f s, %3.0f s of dialogue untimed, cues %.0f-%.0f s %s",
+						mode, q, r.firstShow, r.untimed, q, q+bigScore, r.errs))
+				}
+			}
 			if right {
 				t.Logf("%s from %.0f s %-24s truth %s\n    %s", f.label(), p, s.name, how, strings.Join(line, "\n    "))
 			}
@@ -297,9 +317,9 @@ func TestSnapshotBigStart(t *testing.T) {
 	}
 	t.Logf("SUMMARY start of files above the byte budget (tap %.0f s ahead, re-fit every 10 s, poll %.0f s; cues of the first %.0f s)",
 		bigAhead, bigPoll, bigScore)
-	for _, mode := range []string{"before", "pre"} {
+	for _, mode := range []string{"before", "pre", "before resume", "pre resume"} {
 		g := groups[mode]
-		t.Logf("%-7s pairs %2d | cues %s | dialogue untimed: median %3.0f s, max %3.0f s | not fitting the whole file: %d, shown %d on this episode's lines, %d otherwise (false)",
+		t.Logf("%-13s pairs %2d | cues %s | dialogue untimed: median %3.0f s, max %3.0f s | not fitting the whole file: %d, shown %d on this episode's lines, %d otherwise (false)",
 			mode, g.pairs, statsOf(g.errs), quant(g.untimed, 0.5), quant(g.untimed, 1), g.others, g.otherCut, g.falseAccepts)
 	}
 }
