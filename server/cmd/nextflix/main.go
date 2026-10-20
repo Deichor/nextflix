@@ -103,6 +103,7 @@ func run() error {
 	catalogSvc := catalog.NewService(tm)
 	catalogSvc.StartSearchIndex(ctx, envOr("SEARCH_INDEX_DIR", "/app/data"))
 	catalogSvc.SetRatings(searchRatings(ratingsSvc))
+	catalogSvc.SetProfiles(profilesSvc.Exists)
 	ratingsSvc.OnChange(catalogSvc.InvalidateTaste)
 	catalogSvc.SetLocalSignals(localSignals(profilesSvc, progressSvc, ratingsSvc))
 	catalogSvc.SetTop10(func(region, mediaType, lang string) (any, bool) {

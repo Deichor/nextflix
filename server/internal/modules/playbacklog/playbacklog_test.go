@@ -137,3 +137,49 @@ func TestStdoutOnlyHeaderWithFiles(t *testing.T) {
 		t.Fatalf("file:\n%s", data)
 	}
 }
+
+func TestFileBudgetPerClientAndDay(t *testing.T) {
+	var out bytes.Buffer
+	log.SetOutput(&out)
+	defer log.SetOutput(os.Stderr)
+
+	dir := t.TempDir()
+	f := newFileLog(dir)
+	f.ipCap, f.dayCap = 1000, 3000
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	line := []string{strings.Repeat("x", 79)} // 100 bytes with the stamp
+	for range 30 {
+		f.write(now, "10.0.0.9", line)
+	}
+	size := func() int64 {
+		st, err := os.Stat(filepath.Join(dir, "2026-10-10.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Size()
+	}
+	if n := size(); n != 1000 {
+		t.Fatalf("one client wrote %d bytes, want its 1000", n)
+	}
+	f.write(now, "10.0.0.7", line)
+	if n := size(); n != 1100 {
+		t.Fatalf("another client was dropped (%d bytes)", n)
+	}
+	for i := range 40 {
+		f.write(now, fmt.Sprintf("10.0.1.%d", i), line)
+	}
+	if n := size(); n > 3000+100 {
+		t.Fatalf("day file grew to %d bytes", n)
+	}
+	if c := strings.Count(out.String(), "dropping the rest of today's logs"); c != 1 {
+		t.Fatalf("day cap logged %d times:\n%s", c, out.String())
+	}
+	if c := strings.Count(out.String(), "10.0.0.9 wrote"); c != 1 {
+		t.Fatalf("client cap logged %d times:\n%s", c, out.String())
+	}
+	// A new day starts with fresh budgets
+	f.write(now.AddDate(0, 0, 1), "10.0.0.9", line)
+	if _, err := os.Stat(filepath.Join(dir, "2026-10-11.log")); err != nil {
+		t.Fatal(err)
+	}
+}

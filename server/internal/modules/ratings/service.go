@@ -111,15 +111,16 @@ func (u Update) apply(row *TitleRating, now time.Time) bool {
 // Put applies a partial update. A row left with no rating and no favorite is deleted;
 // the returned value then shows that cleared state.
 func (s *Service) Put(u Update) (*TitleRating, error) {
-	ok, err := profileExists(s.db, u.ProfileID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrUnknownProfile
-	}
 	var out TitleRating
-	err = s.db.Transaction(func(tx *gorm.DB) error {
+	// Check and write in one (immediate) transaction so a concurrent profile delete cannot leave orphans
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		ok, err := profileExists(tx, u.ProfileID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrUnknownProfile
+		}
 		row, err := findByKey(tx, u.ProfileID, u.MediaType, u.TmdbID)
 		exists := err == nil
 		if errors.Is(err, gorm.ErrRecordNotFound) {
