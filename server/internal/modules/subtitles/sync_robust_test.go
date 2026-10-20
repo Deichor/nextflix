@@ -46,7 +46,8 @@ func speechWindows(file []span, starts []float64, lag, jitter, miss float64, see
 // (0.00 by the file's own English track). The played audio's speech starts 0.25 s after the
 // track's lines, and the old Viterbi bridged that gap through one live window 10-14 s away,
 // serving minutes of cues 10-14 s off. Every re-fit must now serve offsets within 0.35 s of the
-// truth, with and without the read windows.
+// track, with and without the read windows, and the last one with them lies on the speech (the
+// own windows taken 0.2-0.3 s later by the fitted lag).
 func TestAvatarLiveNoFalseSegments(t *testing.T) {
 	f, sub := loadFixture(t, "avatar_s01e02.json")
 	for _, withRead := range []bool{true, false} {
@@ -64,7 +65,7 @@ func TestAvatarLiveNoFalseSegments(t *testing.T) {
 			}
 		}
 		last := steps[len(steps)-1]
-		if fitted < len(steps)-2 || withRead && math.Abs(last.served.Segments[0].Offset) > 0.05 {
+		if fitted < len(steps)-2 || withRead && (last.served.Lag < 0.2 || math.Abs(last.served.Segments[0].Offset-last.served.Lag) > 0.05) {
 			t.Fatalf("read=%v: %d of %d steps fitted, last %s", withRead, fitted, len(steps), describeFit(last.served))
 		}
 	}
@@ -73,9 +74,9 @@ func TestAvatarLiveNoFalseSegments(t *testing.T) {
 // Avatar: Seven Havens S01E02 (real data): from the played audio alone the subtitle lands
 // 0.25-0.3 s late against the file's own track, whose lines lead the speech (the detector is not
 // late: its onsets match the acoustic ones within 0.02 s on 9 measured files; the lead is the
-// track's style, 0-0.35 s by file). Two own-track windows, as readEarly reads them, carry that
-// style over to every live window through the fitted lag.
-func TestAvatarOwnWindowsAnchorTheSpeechLag(t *testing.T) {
+// track's style, 0-0.35 s by file). Two own-track windows, as readEarly reads them, do not carry
+// that lead over: the fitted lag takes them onto the speech, where the audio alone put it.
+func TestAvatarOwnWindowsFollowTheSpeech(t *testing.T) {
 	f, sub := loadFixture(t, "avatar_s01e02.json")
 	two := &snapFile{name: f.name, live: f.live, ref: syncRef{Probe: f.ref.Probe, Skipped: true}}
 	for _, w := range f.ref.Windows[:2] {
@@ -87,8 +88,27 @@ func TestAvatarOwnWindowsAnchorTheSpeechLag(t *testing.T) {
 	if math.Abs(lastOnly.Segments[0].Offset) < 0.2 {
 		t.Fatalf("audio only: %s (expected the speech lag)", describeFit(lastOnly))
 	}
-	if len(last.Segments) != 1 || math.Abs(last.Segments[0].Offset) > 0.05 || last.Lag < 0.2 {
+	if len(last.Segments) != 1 || math.Abs(last.Segments[0].Offset-lastOnly.Segments[0].Offset) > 0.1 || last.Lag < 0.2 {
 		t.Fatalf("with 2 own windows: %s lag %.2f", describeFit(last), last.Lag)
+	}
+}
+
+// Westworld S01E06 (real data, testdata/sync/westworld_s01e06.json: DEMAND, above the byte
+// budget, 8 played minutes with the cue tap of its PGS track): the track lies on the speech
+// (+0.05 to +0.09 s, 71-81 % of its line starts on a speech start) but missed the check's peak
+// bar, the speech alone does not fit the subf2m subtitle, and the viewing was served untimed,
+// 1 s late. Its windows now time it from 5 minutes (set aside, then timed to the file from 6):
+// -0.99 s on the track's lines, about -0.9 s on the speech.
+func TestWestworldPGSTrackTimesTheSubtitle(t *testing.T) {
+	f, sub := loadFixture(t, "westworld_s01e06.json")
+	steps := replayLive(t, f, sub, false, nil)
+	for _, st := range steps {
+		if st.heard < 360 {
+			continue
+		}
+		if !st.fits || len(st.served.Segments) != 1 || math.Abs(st.served.Segments[0].Offset+0.97) > 0.15 {
+			t.Fatalf("minute %d (%.0f s heard): fits=%v %s", st.minute, st.heard, st.fits, describeFit(st.served))
+		}
 	}
 }
 
@@ -201,7 +221,8 @@ func TestAlignLiveOtherRateRejectsAnotherEpisode(t *testing.T) {
 }
 
 // Speech that starts a constant lag after the lines of the file's own track does not turn into
-// offset changes between the two kinds of windows: the lag is fitted.
+// offset changes between the two kinds of windows: the lag is fitted, and the subtitle lies on
+// the speech.
 func TestAlignMixedKindsFitsTheLag(t *testing.T) {
 	file := dialogue(800, episode)
 	sub := subtitleFor(file, 1, func(float64) float64 { return -2 })
@@ -215,7 +236,7 @@ func TestAlignMixedKindsFitsTheLag(t *testing.T) {
 		}
 	}
 	f, ok := alignLive(sub, ws, syncScales)
-	if !ok || !f.good() || len(f.Segments) != 1 || math.Abs(f.Segments[0].Offset+2) > 0.05 || math.Abs(f.Lag-0.3) > 0.05 {
+	if !ok || !f.good() || len(f.Segments) != 1 || math.Abs(f.Segments[0].Offset+2-0.3) > 0.05 || math.Abs(f.Lag-0.3) > 0.05 {
 		t.Fatalf("%s lag %.2f", describeFit(f), f.Lag)
 	}
 }

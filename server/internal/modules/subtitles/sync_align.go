@@ -118,7 +118,7 @@ type syncFit struct {
 	Score    float64       `json:"score"`         // the result: matched lines per reference line start
 	Base     float64       `json:"base"`          // the same averaged over all offsets (chance)
 	Peak     float64       `json:"peak"`          // how far the result beats the best offset away from it (same unit)
-	Lag      float64       `json:"lag,omitempty"` // seconds speech windows were taken earlier (own track and speech mixed)
+	Lag      float64       `json:"lag,omitempty"` // seconds own-track windows were taken later (own track and speech mixed)
 	// per reference window (sorted by start): the offset it ended up with
 	windowOffsets []float64
 	windows       []refWindow
@@ -312,7 +312,8 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 		}
 	}
 	// Detected speech starts a little after the lines of the file's own track (0-0.4 s, by file):
-	// with windows of both, that lag is fitted too, else the two kinds look like an offset change
+	// with windows of both, that lag is fitted too, else the two kinds look like an offset change.
+	// The own track's windows move onto the speech: subtitles are timed to what is said.
 	lags := []int{0}
 	if subs >= 2 && speech >= 2 {
 		for l := syncLagStep; l <= syncMaxLag; l += syncLagStep {
@@ -330,7 +331,7 @@ func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChang
 	return best
 }
 
-// alignLag fits with speech windows taken lag frames earlier.
+// alignLag fits with the own track's windows taken lag frames later.
 func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d, lag int, penalty float64, maxChanges int) (syncFit, float64) {
 	ws := orig
 	curves := unshifted
@@ -339,12 +340,12 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 		curves = make([][]float64, len(unshifted))
 		for m, w := range orig {
 			ws[m], curves[m] = w, unshifted[m]
-			if w.Kind == "subs" {
+			if w.Kind != "subs" {
 				continue
 			}
-			ws[m].Start -= float64(lag) / syncRate
+			ws[m].Start += float64(lag) / syncRate
 			c := make([]float64, len(unshifted[m]))
-			copy(c, unshifted[m][lag:])
+			copy(c[lag:], unshifted[m])
 			curves[m] = c
 		}
 	}
@@ -604,8 +605,8 @@ func splitPoint(cues []span, k float64, ws []prepared, d1, d2 float64) float64 {
 func rescore(cues []span, windows []refWindow, f syncFit) (raw, lines float64) {
 	ws := prepare(windows)
 	for i := range ws {
-		if ws[i].Kind != "subs" {
-			ws[i].Start -= f.Lag
+		if ws[i].Kind == "subs" {
+			ws[i].Start += f.Lag
 		}
 		lines += ws[i].lines
 	}

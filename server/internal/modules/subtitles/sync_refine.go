@@ -146,8 +146,19 @@ func refineMoved(cues, timed []liveCue) bool {
 	return false
 }
 
-// refineFit times the cues with the fit and refines them.
+// refineFit times the cues with the fit and refines them, onto the own lines where the fit put
+// them (moved by its lag).
 func refineFit(cues []liveCue, f syncFit, windows []refWindow) []liveCue {
+	if f.Lag != 0 {
+		moved := make([]refWindow, len(windows))
+		for i, w := range windows {
+			if w.Kind == "subs" {
+				w.Start += f.Lag
+			}
+			moved[i] = w
+		}
+		windows = moved
+	}
 	timed := make([]liveCue, 0, len(cues))
 	clock := make([]float64, 0, len(cues))
 	for _, c := range cues {

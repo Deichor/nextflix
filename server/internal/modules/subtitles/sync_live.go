@@ -46,6 +46,7 @@ const (
 	livePendingGrowth = 10.0                          // seconds of new audio that re-fit a file with an untimed served subtitle
 	livePendingGap    = 5 * time.Second               // between re-fits of such a file (syncer.pendingGap)
 	livePendingFor    = 5 * time.Minute               // of a viewing, in which an untimed subtitle is re-fitted that often
+	liveNearViewer    = 60.0                          // seconds a stream hears ahead of the viewer below which it re-fits that often too
 	liveNearFor       = 2 * time.Minute               // a player position this recent counts for the move log
 	liveNearAhead     = 300.0                         // seconds ahead of the viewer whose cue moves are logged
 )
@@ -81,7 +82,12 @@ type liveFile struct {
 	lastFit  time.Time
 	// pending: a subtitle served in a viewing's first minutes is untimed (re-fit sooner)
 	pending bool
-	wake    chan struct{} // the re-fit loop's wait is computed again
+	// tapAt: seconds of the file the play streams heard up to; viewer: the player's position at
+	// viewerAt (nearViewer)
+	tapAt    float64
+	viewer   float64
+	viewerAt time.Time
+	wake     chan struct{} // the re-fit loop's wait is computed again
 }
 
 // liveWin is a finished window: its speech frames (own-track windows: frames a cue shows), one
@@ -96,7 +102,7 @@ type liveSaved struct {
 	Windows  map[int]liveWin `json:"windows"`
 	Own      map[int]liveWin `json:"own,omitempty"`
 	Complete bool            `json:"complete,omitempty"`
-	Check    *ownSaved       `json:"check,omitempty"` // the own-track check, once decided
+	Check    *ownSaved       `json:"check,omitempty"` // the own-track check, once decided (or NoFit)
 }
 
 func newLiveFile(hash string, index int) *liveFile {
@@ -107,10 +113,34 @@ func newLiveFile(hash string, index int) *liveFile {
 
 // growStep is the new audio (or own track) in seconds that re-fits the file (f.mu held).
 func (f *liveFile) growStep() float64 {
-	if f.pending {
+	if f.pending || f.nearViewer() {
 		return livePendingGrowth
 	}
 	return liveRefitGrowth
+}
+
+// nearViewer reports a play stream that hears less than liveNearViewer ahead of the viewer (a
+// muxed 4K stream plays at its pace): a re-fit every 30 s of audio then lands up to a minute after
+// the stretch was shown (Westworld S01E01 took an offset change 48 s late), so it goes every 10 s
+// (f.mu held).
+func (f *liveFile) nearViewer() bool {
+	if f.taps == 0 || f.viewerAt.IsZero() || time.Since(f.viewerAt) > liveNearFor {
+		return false
+	}
+	return f.tapAt-(f.viewer+time.Since(f.viewerAt).Seconds()) < liveNearViewer
+}
+
+// noteViewer keeps the player's position t (seconds of the file) for a file with a live reference.
+func (y *syncer) noteViewer(fk string, t float64) {
+	y.mu.Lock()
+	f := y.lives[fk]
+	y.mu.Unlock()
+	if f == nil || !(t > 0) {
+		return
+	}
+	f.mu.Lock()
+	f.viewer, f.viewerAt = t, time.Now()
+	f.mu.Unlock()
 }
 
 // setPending marks whether an untimed subtitle is served in a viewing's first minutes.
@@ -232,6 +262,9 @@ func (f *liveFile) add(frames []liveFrame, prev int) bool {
 	}
 	f.checkComplete()
 	f.heard += float64(len(frames)) / syncRate
+	if n := len(frames); n > 0 {
+		f.tapAt = float64(frames[n-1].at) / syncRate
+	}
 	if f.grown >= f.growStep() {
 		f.grown = 0
 		return true
@@ -555,9 +588,10 @@ func (y *syncer) liveFile(hash string, index int) *liveFile {
 				}
 			}
 			f.complete = saved.Complete
-			if c := saved.Check; c != nil && (c.State == ownTimed || c.State == ownOther) {
-				f.check = ownCheck{State: c.State, Tight: c.Tight && c.State == ownTimed, Pairs: c.Pairs}
-				f.checkN = c.Pairs
+			if s := saved.Check; s != nil {
+				if c, ok := s.check(); ok {
+					f.check, f.checkN = c, c.Pairs
+				}
 			}
 		}
 	}
@@ -613,9 +647,7 @@ func (y *syncer) saveLive(f *liveFile) {
 			saved.Own[w] = d
 		}
 	}
-	if f.check.State != "" {
-		saved.Check = &ownSaved{State: f.check.State, Tight: f.check.Tight, Pairs: f.check.Pairs}
-	}
+	saved.Check = f.check.saved()
 	f.dirty = false
 	f.mu.Unlock()
 	if b, err := json.Marshal(saved); err == nil {
@@ -666,13 +698,14 @@ func (y *syncer) scheduleRefit(f *liveFile) {
 }
 
 // waitRefit waits refitDelay (a burst of audio is one re-fit) and refitGap since the file's last
-// re-fit (pendingGap while it has an untimed subtitle); a nudge computes the wait again.
+// re-fit (pendingGap while it has an untimed subtitle or plays near the viewer); a nudge computes
+// the wait again.
 func (y *syncer) waitRefit(f *liveFile) {
 	start := time.Now()
 	for {
 		f.mu.Lock()
 		gap := y.refitGap
-		if f.pending {
+		if f.pending || f.nearViewer() {
 			gap = y.pendingGap
 		}
 		due := start.Add(y.refitDelay)
@@ -940,11 +973,12 @@ func (y *syncer) kickLive(hash string, index int) {
 }
 
 // mergeWindows combines read and live windows: a window of the file's own subtitle track
-// beats a live one, a live one an audio window read for the same stretch.
+// beats a live one, a live one an audio window read for the same stretch; one window per
+// stretch (two timings that read the same extra window kept it twice: The Mentalist S03E09).
 func mergeWindows(read, live []refWindow) []refWindow {
 	var out []refWindow
 	for _, w := range read {
-		if w.Kind == "subs" {
+		if w.Kind == "subs" && !overlapsHalf(w, out) {
 			out = append(out, w)
 		}
 	}
@@ -954,9 +988,8 @@ func mergeWindows(read, live []refWindow) []refWindow {
 			out = append(out, w)
 		}
 	}
-	chosen := len(out)
 	for _, w := range read {
-		if w.Kind != "subs" && !overlapsHalf(w, out[:chosen]) {
+		if w.Kind != "subs" && !overlapsHalf(w, out) {
 			out = append(out, w)
 		}
 	}

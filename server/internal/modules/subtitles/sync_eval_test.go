@@ -26,6 +26,9 @@ type snapFile struct {
 	name string
 	ref  syncRef
 	live []refWindow // finished live windows (synclive), sorted
+	// tap: the cue tap's own-track windows by grid window (a fixture's; replayLive then checks the
+	// track instead of trusting it)
+	tap map[int]liveWin
 }
 
 type snapSub struct {
@@ -613,7 +616,9 @@ func replayLive(t *testing.T, f *snapFile, sub []span, withRead bool, order []in
 	base, _ := svc.File(context.Background(), inner)
 	lf := y.liveFile(hash, 1)
 	lf.setDuration(ref.Probe.Duration)
-	trustOwnTrack(lf) // replays of the aligner with the file's own windows as they were used
+	if f.tap == nil {
+		trustOwnTrack(lf) // replays of the aligner with the file's own windows as they were used
+	}
 	if order == nil {
 		for i := range f.live {
 			order = append(order, i)
@@ -625,10 +630,14 @@ func replayLive(t *testing.T, f *snapFile, sub []span, withRead bool, order []in
 			continue
 		}
 		lf.mu.Lock()
-		lf.done = map[int]liveWin{}
+		lf.done, lf.ownDone = map[int]liveWin{}, map[int]liveWin{}
 		for _, j := range order[:i+1] {
 			w := f.live[j]
-			lf.done[int(math.Round(w.Start/syncWindowLen))] = liveWin{Bits: packBits(w.Speech), Frames: len(w.Speech)}
+			g := int(math.Round(w.Start / syncWindowLen))
+			lf.done[g] = liveWin{Bits: packBits(w.Speech), Frames: len(w.Speech)}
+			if o, ok := f.tap[g]; ok {
+				lf.ownDone[g] = o
+			}
 		}
 		lf.complete = false
 		lf.checkComplete()
@@ -1137,6 +1146,9 @@ type syncFixture struct {
 	// Speech read with the own-track windows of Subs; Other: a file of the same cut
 	Speech []fixtureWindow `json:"speech,omitempty"`
 	Other  *syncFixture    `json:"other,omitempty"`
+	// Own: the cue tap's own-track windows (grid starts) of the Live stretches; Codec: the track's
+	Own   []fixtureWindow `json:"own,omitempty"`
+	Codec string          `json:"codec,omitempty"`
 }
 
 // fixtureWindow is a read window as runs of frames [from, to) where a cue shows; the third
@@ -1203,9 +1215,26 @@ func loadFixtureAlt(t *testing.T, name string) (*snapFile, []span, []span) {
 	if err := json.Unmarshal(b, &fx); err != nil {
 		t.Fatal(err)
 	}
-	f := &snapFile{name: syncHash, ref: syncRef{Probe: mediaProbe{Duration: fx.Duration, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"}}}
+	codec := fx.Codec
+	if codec == "" {
+		codec = "subrip"
+	}
+	f := &snapFile{name: syncHash, ref: syncRef{Probe: mediaProbe{Duration: fx.Duration, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: codec}}}
 	for _, w := range fx.Subs {
 		f.ref.Windows = append(f.ref.Windows, w.window())
+	}
+	for _, fw := range fx.Own {
+		if f.tap == nil {
+			f.tap = map[int]liveWin{}
+		}
+		w := fw.window()
+		var starts []int
+		for i, v := range w.Speech {
+			if v == 2 {
+				starts = append(starts, i)
+			}
+		}
+		f.tap[int(math.Round(w.Start/syncWindowLen))] = liveWin{Bits: packBits(w.Speech), Frames: len(w.Speech), Starts: starts}
 	}
 	for _, l := range fx.Live {
 		f.live = append(f.live, refWindow{Start: l.Start, Kind: "live", Speech: unpackBits(l.Bits, l.N)})

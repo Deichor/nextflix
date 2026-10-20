@@ -1,6 +1,8 @@
 package subtitles
 
 import (
+	"context"
+	"math"
 	"math/rand"
 	"testing"
 )
@@ -187,5 +189,130 @@ func TestCheckOwnTrackWindows(t *testing.T) {
 	}
 	if _, s := y2.openOwnCues(syncHash, 1, 0, []OwnTrack{{Stream: 2, Lang: "eng", Codec: "subrip"}}); s != nil {
 		t.Fatal("a cue tap of a track not timed to the file")
+	}
+}
+
+// The Mentalist S03E09 (NF): a text track timed to the file whose lines start 0.5 s before their
+// speech. Its windows time subtitles on the speech, not 0.5 s early, and the timing stays when
+// the check calls the track another cut (the speech of the same stretches stands in).
+func TestOwnTrackLeadIsNotServed(t *testing.T) {
+	file := dialogue(74, 1500)
+	starts := windowStarts(1500, syncWindowLen, 8)
+	speech := speechWindows(file, starts, 0, 0.05, 0.1, 4)
+	for i := range speech {
+		speech[i].Kind = "audio"
+	}
+	ref := syncRef{Probe: mediaProbe{Duration: 1500, FPS: 23.976, Audio: 1, OwnSub: 2, SubCodec: "subrip"},
+		Windows: truthWindows(shiftSpans(file, -0.5), starts, 0, 0, 1), Speech: speech, Paired: true}
+	sub := subtitleFor(file, 1, func(float64) float64 { return 2 })
+	fit := func(state string) (syncMeta, ownCheck) {
+		svc := newLiveTest(t, 1500)
+		y := svc.sync
+		f := y.liveFile(syncHash, 1)
+		if state != "" {
+			f.mu.Lock()
+			f.check, f.checkN = ownCheck{State: state, Pairs: 1 << 20}, 1<<20
+			f.mu.Unlock()
+		}
+		ctx := context.Background()
+		inner := cacheProviderSub(t, svc, "1|lead|2|9|1", sub)
+		base, _ := svc.File(ctx, inner)
+		key, _ := syncKey(inner, syncHash, 1)
+		if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
+			t.Fatal("too little to tell")
+		}
+		m := y.meta(key)
+		if m == nil || !m.fits() {
+			t.Fatalf("%s: %+v", state, m)
+		}
+		return *m, f.ownChecked()
+	}
+	timed, c := fit("")
+	if c.State != ownTimed || math.Abs(c.Fit.Segments[0].Offset-0.5) > 0.1 {
+		t.Fatalf("check %+v", c)
+	}
+	other, _ := fit(ownOther)
+	for _, m := range []syncMeta{timed, other} {
+		if len(m.Fit.Segments) != 1 || math.Abs(m.Fit.Segments[0].Offset-2) > 0.1 {
+			t.Fatalf("%s reference: %s", m.Ref, describeFit(m.Fit))
+		}
+	}
+	if timed.Ref != "subs" || other.Ref != "audio" || math.Abs(timed.Fit.Segments[0].Offset-other.Fit.Segments[0].Offset) > 0.1 {
+		t.Fatalf("timed %s (%s), other %s (%s)", describeFit(timed.Fit), timed.Ref, describeFit(other.Fit), other.Ref)
+	}
+}
+
+// A loose track's lead changes by stretch (S03E09: 0.45 to 0.87 s); its windows move by their
+// own offsets to the speech of the same stretch, a tight track's by the check's.
+func TestLooseTrackStretchOffsets(t *testing.T) {
+	file := dialogue(76, 1500)
+	starts := gridStarts(0, 1500)
+	rng := rand.New(rand.NewSource(8))
+	var own []span
+	for _, c := range file {
+		d := 0.4 + (rng.Float64()*2-1)*0.4 // loose
+		if c.start >= 900 {
+			d += 0.25 // a stretch that leads more, by less than an offset change
+		}
+		own = append(own, span{c.start - d, c.end - d})
+	}
+	pairs := checkPairs(own, file, starts, 0, 0.05, 6)
+	c := checkOwn(pairs)
+	if c.State != ownTimed || c.Tight {
+		t.Fatalf("check %s tight=%v near %.2f: %s", c.State, c.Tight, c.Near, describeFit(c.Fit))
+	}
+	c.local = localOffsets(pairs, c)
+	var early, late []float64
+	for _, w := range c.onSpeech(ownWindows(own, starts)) {
+		if _, n := w.lineStarts(); n < ownMinStarts {
+			continue // (no use to a fit)
+		}
+		at := math.Round(w.Start/syncWindowLen) * syncWindowLen
+		if at < 900 {
+			early = append(early, w.Start-at)
+		} else {
+			late = append(late, w.Start-at)
+		}
+	}
+	if m := median(early); math.Abs(m-0.4) > 0.12 {
+		t.Errorf("before 900 s: moved %.2f s (median), want 0.4", m)
+	}
+	if m := median(late); math.Abs(m-0.65) > 0.12 {
+		t.Errorf("after 900 s: moved %.2f s (median), want 0.65", m)
+	}
+	c.Tight = true
+	if l := localOffsets(pairs, c); l != nil {
+		t.Errorf("a tight track: %v", l)
+	}
+}
+
+// A check that found no fit (NoFit) is kept with the live windows like a decided one, a timed
+// track's offsets too: after a restart (or the live file dropped from memory) a stand-in
+// reference (its read runs) takes them, and the track's windows stay set aside.
+func TestOwnCheckNoFitKept(t *testing.T) {
+	svc := newLiveTest(t, 1500)
+	y := svc.sync
+	f := y.liveFile(syncHash, 1)
+	f.mu.Lock()
+	f.check, f.checkN, f.dirty = ownCheck{NoFit: true, Pairs: 6, Lag: 0.3}, 6, true
+	f.mu.Unlock()
+	y.saveLive(f)
+	again := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync
+	if g := again.liveFile(syncHash, 1); g.check.State != "" || !g.check.NoFit || g.check.Pairs != 6 || g.check.Lag != 0.3 || g.checkN != 6 {
+		t.Fatalf("reloaded %+v (n %d)", g.check, g.checkN)
+	}
+	file := dialogue(75, 1500)
+	ref := syncRef{Probe: mediaProbe{Duration: 1500, OwnSub: 2, SubCodec: "subrip", Audio: 1},
+		Windows: truthWindows(file, windowStarts(1500, syncWindowLen, 6), 0, 0, 1), Busy: true}
+	if got, _ := again.checkOwnTrack(syncHash, 1, ref, nil); !got.Own.NoFit || !got.OwnAside || hasOwnWindows(got.Windows) {
+		t.Fatalf("stand-in: %+v, %s", got.Own, refKind(got, got.Windows))
+	}
+	f.mu.Lock()
+	f.check, f.dirty = ownCheck{State: ownTimed, Pairs: 8, Fit: syncFit{Segments: []syncSegment{{Offset: 0.42}}}}, true
+	f.mu.Unlock()
+	y.saveLive(f)
+	g := NewService(nil, Config{CacheDir: svc.cfg.CacheDir, LiveTiming: true}).sync.liveFile(syncHash, 1)
+	if c := g.ownChecked(); c.State != ownTimed || len(c.Fit.Segments) != 1 || c.Fit.Segments[0].Offset != 0.42 || c.NoFit {
+		t.Fatalf("timed reloaded %+v", c)
 	}
 }

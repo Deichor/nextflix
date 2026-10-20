@@ -219,7 +219,8 @@ type syncMeta struct {
 // asked for (served as it is meanwhile): final results are never re-fitted otherwise, so fixes of
 // the timing would not reach them. 1: rates compared net of their offset changes and searched
 // again, changes placed over undecided windows (The Mentalist S03E02 kept 24/23.976 for good).
-const syncVersion = 1
+// 2: own-track windows on the speech's timeline (The Mentalist S03E09 was served 0.5 s early).
+const syncVersion = 2
 
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }
 
@@ -379,6 +380,7 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t flo
 	}
 	fk := syncFileKey(hash, index)
 	first, fresh := y.noteServed(key, inner, hash, index, t)
+	y.noteViewer(fk, t)
 	// Live audio may still come: keep the players asking
 	listening := func() bool { return y.svc.cfg.LiveTiming && (fresh || y.livePlaying(fk)) }
 	pending := func() FileAnswer {
@@ -668,7 +670,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 		complete = f.complete
 		f.mu.Unlock()
 	}
-	r := y.fitRef(inner, hash, index, ref, live)
+	r := y.fitRef(inner, hash, index, ref, live, nil)
 	if f != nil {
 		y.saveLive(f) // the file has a timed subtitle: keep its live windows (and the own-track check)
 	}
@@ -680,18 +682,20 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	if prev.stale() {
 		prev = nil // an older timing's result holds back nothing (rate, hysteresis)
 	}
-	m, vtt, r := y.fitOne(ctx, inner, hash, index, r, base, read, prev, complete)
-	if r.ref.OwnAside && !m.fits() {
-		// The speech does not time it: the set-aside own track's windows may (as before the check)
-		as := fitRefs{ref: r.own, live: r.ownLive, own: r.own, ownLive: r.ownLive}
-		if om, ovtt, or := y.fitOne(ctx, inner, hash, index, as, base, false, prev, complete); om.fits() {
-			m, vtt, r = om, ovtt, or
-		}
-	}
+	m, vtt, r := y.fitAside(ctx, inner, hash, index, r, base, read, prev, complete)
 	ref, live = r.ref, r.live
 	provisional := !ref.Full && y.svc.cfg.LiveTiming && !complete
-	if provisional && !m.fits() && takesCopy(prev) && y.copySameCut(ctx, key, inner, hash, index, base, ref, live, liveSecs, served, prev, m) {
-		return true
+	if provisional && !m.fits() && takesCopy(prev) {
+		copied, unmatched := y.copySameCut(ctx, key, inner, hash, index, base, r, liveSecs, served, prev, m)
+		if copied {
+			return true
+		}
+		if unmatched && prev.SameSpeech {
+			// its file's speech no longer matches: the copy is held against this file's windows
+			p := *prev
+			p.SameSpeech = false
+			prev = &p
+		}
 	}
 	if y.keepAccepted(key, base, prev, m, ref.Probe.Duration, complete) {
 		y.keepRates(key, prev, m)
@@ -750,7 +754,7 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			}
 			if am == nil {
 				var a syncMeta
-				a, altVTT, r = y.fitOne(ctx, inner, hash, index, r, altBase, read, altPrev, complete)
+				a, altVTT, r = y.fitAside(ctx, inner, hash, index, r, altBase, read, altPrev, complete)
 				ref, live = r.ref, r.live
 				if y.keepAccepted(altKey, altBase, altPrev, a, ref.Probe.Duration, complete) {
 					y.keepRates(altKey, altPrev, a)
@@ -942,20 +946,35 @@ type fitRefs struct {
 	// (a set-aside track's windows, decide's fallback)
 	own     syncRef
 	ownLive []refWindow
+	same    map[string]bool // the speech matched with files of the same cut, by file key (sameSpeech)
+}
+
+// aside are the windows of an own track set aside (OwnAside), as read and played, moved onto the
+// speech by the check's best lag.
+func (r fitRefs) aside() fitRefs {
+	c := r.ref.Own
+	a := fitRefs{ref: r.own, live: c.onSpeech(r.ownLive), own: r.own, ownLive: r.ownLive, same: r.same}
+	a.ref.Windows = c.onSpeech(r.own.Windows)
+	return a
 }
 
 // fitRef builds the windows a fit uses from the file's reference and live windows: own-track
 // windows only as the own-track check allows (checkOwnTrack; a set-aside track's while there is
 // too little speech), with the timed own-track windows of a file of the same cut (sameCutWindows).
-// Every fit builds them so, the first timing's after reading more windows too (fitOne).
-func (y *syncer) fitRef(inner, hash string, index int, ref syncRef, live []refWindow) fitRefs {
-	r := fitRefs{own: ref, ownLive: live}
+// Every fit builds them so, the first timing's after reading more windows too (fitOne). same
+// keeps the speech matches with other files for one decide (nil: a new one).
+func (y *syncer) fitRef(inner, hash string, index int, ref syncRef, live []refWindow, same map[string]bool) fitRefs {
+	if same == nil {
+		same = map[string]bool{}
+	}
+	r := fitRefs{own: ref, ownLive: live, same: same}
 	r.ref, r.live = y.checkOwnTrack(hash, index, ref, live)
 	r.own.Own = r.ref.Own
 	if r.ref.OwnAside && tooLittleRef(r.ref, r.live) {
-		r.ref, r.live = r.own, r.ownLive // too little speech yet: the own track's windows, as before the check
+		a := r.aside() // too little speech yet: the own track's windows, as before the check
+		r.ref, r.live = a.ref, a.live
 	}
-	r.ref = y.sameCutWindows(inner, hash, index, r.ref, r.live)
+	r.ref = y.sameCutWindows(inner, hash, index, r)
 	return r
 }
 
@@ -1005,7 +1024,7 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 		if err != nil || len(more.Windows) == len(r.own.Windows) {
 			break
 		}
-		r = y.fitRef(inner, hash, index, more, r.ownLive) // as every fit builds it
+		r = y.fitRef(inner, hash, index, more, r.ownLive, r.same) // as every fit builds it
 		ref, live = r.ref, r.live
 		fit, ok = fitTo()
 	}
@@ -1025,6 +1044,19 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	}
 	m.State = syncStateSynced
 	return m, renderVTT(served, false), r
+}
+
+// fitAside is fitOne and, when the speech does not time the subtitle, a fit to the windows of an
+// own track set aside (OwnAside: no fit to the speech; as before the check), for the subtitle and
+// each alternative alike. It returns the windows of the fit with the speech.
+func (y *syncer) fitAside(ctx context.Context, inner, hash string, index int, r fitRefs, vtt []byte, read bool, prev *syncMeta, final bool) (syncMeta, []byte, fitRefs) {
+	m, out, r := y.fitOne(ctx, inner, hash, index, r, vtt, read, prev, final)
+	if r.ref.OwnAside && !m.fits() {
+		if om, ovtt, _ := y.fitOne(ctx, inner, hash, index, r.aside(), vtt, false, prev, final); om.fits() {
+			return om, ovtt, r
+		}
+	}
+	return m, out, r
 }
 
 // lengthFits rejects a subtitle that runs past the end of the video or covers too little of it
@@ -1390,6 +1422,9 @@ func (y *syncer) addWindows(ctx context.Context, hash string, index int, starts 
 	for _, at := range starts {
 		if len(r.Windows) >= r.windowCap() {
 			break
+		}
+		if slices.ContainsFunc(r.Windows, func(w refWindow) bool { return math.Abs(w.Start-at) < syncWindowLen/2 }) {
+			continue // read meanwhile by another subtitle's timing
 		}
 		w, speech, err := y.readWindow(ctx, hash, url, r.Probe, at, r.bytesRead())
 		if err != nil {

@@ -562,12 +562,14 @@ func TestMergeWindows(t *testing.T) {
 	w := func(start float64, kind string) refWindow {
 		return refWindow{Start: start, Kind: kind, Speech: make([]byte, liveWindowFrames)}
 	}
-	got := mergeWindows([]refWindow{w(20, "audio"), w(400, "audio"), w(130, "subs")}, []refWindow{w(0, "live"), w(120, "live"), w(180, "live")})
+	got := mergeWindows([]refWindow{w(20, "audio"), w(400, "audio"), w(130, "subs"), w(130, "subs"), w(400, "audio")},
+		[]refWindow{w(0, "live"), w(120, "live"), w(180, "live")})
 	var kinds []string
 	for _, x := range got {
 		kinds = append(kinds, x.Kind+":"+string(rune('0'+int(x.Start/60))))
 	}
-	// audio@20 loses to live@0, live@120 to subs@130, audio@400 has no live window
+	// audio@20 loses to live@0, live@120 to subs@130, audio@400 has no live window; a window
+	// read twice counts once
 	want := []string{"live:0", "subs:2", "live:3", "audio:6"}
 	if len(kinds) != len(want) {
 		t.Fatalf("%v", kinds)
@@ -576,5 +578,32 @@ func TestMergeWindows(t *testing.T) {
 		if kinds[i] != want[i] {
 			t.Fatalf("%v", kinds)
 		}
+	}
+}
+
+// A stream that hears less than a minute ahead of the viewer (muxed 4K plays at its pace) re-fits
+// every 10 s of audio, like an untimed viewing's first minutes; one far ahead (the TV's split
+// stream), a closed one or an old position every 30 s.
+func TestNearViewerRefitsSooner(t *testing.T) {
+	y := newLiveTest(t, episode).sync
+	f := y.liveFile(syncHash, 1)
+	y.noteViewer(syncFileKey(syncHash, 1), 960)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.taps, f.tapAt = 1, 1000
+	if f.growStep() != livePendingGrowth {
+		t.Fatalf("40 s ahead: %.0f s", f.growStep())
+	}
+	f.viewer = 900
+	if f.growStep() != liveRefitGrowth {
+		t.Fatalf("100 s ahead: %.0f s", f.growStep())
+	}
+	f.viewer, f.taps = 960, 0
+	if f.growStep() != liveRefitGrowth {
+		t.Fatalf("no stream: %.0f s", f.growStep())
+	}
+	f.taps, f.viewerAt = 1, time.Now().Add(-3*time.Minute)
+	if f.growStep() != liveRefitGrowth {
+		t.Fatalf("an old position: %.0f s", f.growStep())
 	}
 }

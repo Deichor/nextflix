@@ -584,9 +584,13 @@ func TestAddWindowsAfterEviction(t *testing.T) {
 		_, r := svc.sync.refState(strconv.Itoa(i))
 		r()
 	}
-	more, err := svc.sync.addWindows(ctx, syncHash, 1, []float64{1000})
+	more, err := svc.sync.addWindows(ctx, syncHash, 1, []float64{1230})
 	if err != nil || len(more.Windows) != len(ref.Windows)+1 {
 		t.Fatalf("%d -> %d windows: %v", len(ref.Windows), len(more.Windows), err)
+	}
+	// a window read meanwhile (another subtitle's timing asked for the same one) is not read twice
+	if again, err := svc.sync.addWindows(ctx, syncHash, 1, []float64{1230, 1000}); err != nil || len(again.Windows) != len(more.Windows) {
+		t.Fatalf("read again: %d -> %d windows: %v", len(more.Windows), len(again.Windows), err)
 	}
 }
 

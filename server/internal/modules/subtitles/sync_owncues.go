@@ -111,19 +111,23 @@ func (f *liveFile) knownDuration() float64 {
 }
 
 // ownState is what the own-track check found for the file so far ("" not known).
-func (f *liveFile) ownState() string {
+func (f *liveFile) ownState() string { return f.ownChecked().State }
+
+// ownChecked is the file's own-track check so far.
+func (f *liveFile) ownChecked() ownCheck {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.check.State
+	return f.check
 }
 
 // checkOwnTrack applies the own-track check (sync_owncheck.go) to the windows a fit uses (ref
-// read, live played): the own track's windows stay when it is timed to the file, a text track's
+// read, live played): the own track's windows stay when it is timed to the file (moved onto the
+// speech by the offsets the check found, onSpeech), a text track's
 // also while that is not known (as before the check: its speech may not tell, music or noise)
 // unless its lines found no fit in speech that had the lines for one (NoFit), else the speech of
 // the same stretches stands in (read with each window, heard while playing). Set aside for NoFit
-// (ref.OwnAside), the track's windows may still time a subtitle the speech does not (decide).
-// ref.Own tells the line refinement whether the track is tight.
+// (ref.OwnAside; a PGS track's too), the track's windows may still time a subtitle the speech
+// does not (decide). ref.Own tells the line refinement whether the track is tight.
 func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWindow) (syncRef, []refWindow) {
 	if ref.Full {
 		return ref, live
@@ -139,10 +143,15 @@ func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWi
 	pairs := ownPairsOf(ref, f)
 	c := checkOwnCached(f, pairs, !ref.Busy, hash, index)
 	ref.Own = c
-	if c.State == ownTimed || c.State == "" && !picture && !c.NoFit {
+	if c.State == ownTimed {
+		c.local = localOffsets(pairs, c)
+		ref.Windows = c.onSpeech(ref.Windows)
+		return ref, c.onSpeech(live)
+	}
+	if c.State == "" && !picture && !c.NoFit {
 		return ref, live
 	}
-	ref.OwnAside = c.State == "" && !picture && (hasOwnWindows(ref.Windows) || hasOwnWindows(live))
+	ref.OwnAside = c.State == "" && c.NoFit && (hasOwnWindows(ref.Windows) || hasOwnWindows(live))
 	if hasOwnWindows(ref.Windows) {
 		ws := make([]refWindow, 0, len(ref.Windows))
 		for _, w := range ref.Windows {
@@ -180,7 +189,7 @@ func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index 
 	}
 	c := settleOwn(prev, checkOwn(pairs))
 	f.mu.Lock()
-	if c.State != f.check.State || c.Tight != f.check.Tight || c.Pairs != f.check.Pairs {
+	if !sameSaved(c.saved(), f.check.saved()) {
 		f.dirty = true
 	}
 	f.check, f.checkN = c, len(pairs)
