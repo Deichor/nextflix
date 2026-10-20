@@ -42,6 +42,8 @@ const (
 	syncRetryAfter    = 10 * time.Minute // a failed timing is not tried again before this
 	syncAlternatives  = 3                // other subtitles tried when one does not fit
 	syncReads         = 2                // files whose reference is read at the same time
+	syncStartWindows  = 3                // speech windows a pre-timing reads at the start of a file above the byte budget
+	syncStartLead     = 15.0             // seconds the first of them starts before the subtitle's dialogue
 )
 
 // A file request waits this long for a quick timing result (tests shorten it).
@@ -85,6 +87,9 @@ func (p *preTiming) givenUp() bool {
 	return p.gaveUp
 }
 
+// startReadKey marks the reads of readStart: they stop once the file plays.
+type startReadKey struct{}
+
 type readRateKey struct{}
 
 // readRate is the bytes/s a window read under ctx may pull (0: no cap; cappedURL keeps to it).
@@ -105,6 +110,9 @@ func (y *syncer) readRoom(ctx context.Context, bitrate float64) (float64, bool) 
 	}
 	for {
 		if y.viewing(p.hash, p.index) {
+			if ctx.Value(startReadKey{}) != nil {
+				return 0, false // the start of a file above the byte budget: its tap hears it now
+			}
 			return 0, ctx.Err() == nil // the episode opened: its timing reads like any other
 		}
 		if r := room.RoomToRead(p.hash); r > 0 && r >= bitrate {
@@ -236,6 +244,8 @@ type syncRef struct {
 	MaxWindows int `json:"max_windows"`
 	// Skipped: no windows are read (too few fit the byte budget); only the played audio times it
 	Skipped bool `json:"skipped,omitempty"`
+	// Start: the speech of its first minutes of dialogue was read for a pre-timing (readStart)
+	Start bool `json:"start,omitempty"`
 	// Speech read with the own-track windows (same starts): checks the track, stands in for it
 	Speech []refWindow `json:"speech,omitempty"`
 	// Paired: the reads that pair the windows (own track and speech) were tried; a pair that
@@ -596,6 +606,9 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 	ref, err := y.reference(ctx, hash, index)
 	if err != nil {
 		return err
+	}
+	if ref.Skipped && ctx.Value(preTimingKey{}) != nil {
+		ref = y.startRef(ctx, hash, index, base, ref)
 	}
 	key, err := syncKey(inner, hash, index)
 	if err != nil {
@@ -1391,6 +1404,142 @@ func (y *syncer) readPairs(ctx context.Context, hash string, index int) {
 	y.saveRef(fk, st, c)
 }
 
+// startRef completes the reference of a file above the byte budget for a pre-timing job (the
+// next episode, which does not play yet): the speech of its first minutes of dialogue is read
+// once per file (readStart; callers join a running pass), so the episode does not open untimed
+// for the two minutes its first live fit needs (Westworld S01E05 4K: 0.8 s late from 105 s to
+// 218 s). Those windows are fitted by the live rules, like the early own-track windows. It
+// returns the reference after the pass (ref when ctx ended first).
+func (y *syncer) startRef(ctx context.Context, hash string, index int, base []byte, ref syncRef) syncRef {
+	if ref.Start || ref.Probe.Audio < 0 {
+		return ref
+	}
+	fk := syncFileKey(hash, index)
+	for range 2 { // a pass joined as it ended cut (its job gave up) goes on with this job
+		call := y.svc.flights.start("syncstart|"+fk, func() (any, error) {
+			y.readStart(ctx, hash, index, base)
+			return nil, nil
+		})
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return ref
+		}
+		st, release := y.refState(fk)
+		st.mu.Lock()
+		if y.loadRef(fk, st) {
+			ref = *st.ref
+		}
+		st.mu.Unlock()
+		release()
+		if ref.Start || ctx.Err() != nil {
+			break
+		}
+	}
+	return ref
+}
+
+// readStart reads the speech windows of startWindows (only the audio: an own track would wait
+// for its check against the speech) without holding the reference's lock, within the pre-timing's
+// room, and stops once the file plays: its tap hears that stretch then, and a read ahead of a
+// playing stream of such a file would take its line. A pass cut by the job's end keeps what it
+// read and is tried again by the next pre-timing.
+func (y *syncer) readStart(ctx context.Context, hash string, index int, base []byte) {
+	fk := syncFileKey(hash, index)
+	st, release := y.refState(fk)
+	defer release()
+	st.mu.Lock()
+	ok := y.loadRef(fk, st)
+	var r syncRef
+	if ok {
+		r = *st.ref
+	}
+	st.mu.Unlock()
+	if !ok || !r.Skipped || r.Start {
+		return
+	}
+	var todo []float64
+	for _, at := range startWindows(r.Probe, vttCues(base)) {
+		if !slices.ContainsFunc(r.Windows, func(w refWindow) bool { return math.Abs(w.Start-at) < syncWindowLen/2 }) {
+			todo = append(todo, at)
+		}
+	}
+	var got []refWindow
+	began := time.Now()
+	if len(todo) > 0 {
+		select {
+		case y.sem <- struct{}{}:
+			defer func() { <-y.sem }()
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-time.After(syncReadDelay):
+		case <-ctx.Done():
+			return
+		}
+		url := torrFileURL(y.svc.cfg.TorrServerURL, hash, index)
+		speechOnly := r.Probe
+		speechOnly.OwnSub = -1
+		sctx := context.WithValue(ctx, startReadKey{}, true)
+		for _, at := range todo {
+			if !y.waitLine(sctx, hash) || y.viewing(hash, index) {
+				break
+			}
+			if w, err := y.readOne(sctx, url, speechOnly, at); err == nil && w.Kind == "audio" {
+				got = append(got, w)
+			} else if ctx.Err() != nil {
+				break
+			}
+		}
+	}
+	cut := ctx.Err() != nil
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !y.loadRef(fk, st) {
+		return
+	}
+	c := *st.ref
+	c.Windows = append(append([]refWindow(nil), c.Windows...), got...)
+	c.Start = c.Start || !cut
+	if len(todo) > 0 {
+		extra := ""
+		if cut {
+			extra = " (cut: the rest next time)"
+		}
+		log.Printf("subtitles: timing reference of %s:%d: the speech of its start (above the byte budget), %d of %d windows from %.0fs, %d MB read in %s%s",
+			hash[:8], index, len(got), len(todo), todo[0], readBytes(got)>>20, time.Since(began).Round(100*time.Millisecond), extra)
+	}
+	y.saveRef(fk, st, c)
+}
+
+// startWindows are the starts of the speech windows read at the start of a file above the byte
+// budget: contiguous ones, as many as syncByteBudget allows (syncStartWindows at most, none when
+// fewer than a live fit needs), the first syncStartLead before the subtitle's first stretch of
+// dialogue (5 lines within a minute; a title or credit line before it does not count), where an
+// episode opened at 0 or past its intro needs its first cues.
+func startWindows(p mediaProbe, cues []liveCue) []float64 {
+	n := syncStartWindows
+	if p.Bitrate > 0 {
+		n = min(n, int(syncByteBudget/(p.Bitrate*syncWindowLen+syncWindowExtra)))
+	}
+	if float64(n)*syncWindowLen < liveMinCover || p.Duration < float64(n)*syncWindowLen {
+		return nil
+	}
+	for i := 0; i+4 < len(cues); i++ {
+		if cues[i+4].start-cues[i].start > syncWindowLen {
+			continue
+		}
+		at := math.Max(0, math.Min(math.Floor(cues[i].start-syncStartLead), p.Duration-float64(n)*syncWindowLen))
+		out := make([]float64, n)
+		for j := range out {
+			out[j] = at + float64(j)*syncWindowLen
+		}
+		return out
+	}
+	return nil
+}
+
 // updateRefSubs puts the own-track choice of a fresh probe p into the file's saved reference
 // (saved before picture tracks counted) and returns the reference's probe.
 func (y *syncer) updateRefSubs(fk string, st *syncRefState, p mediaProbe) mediaProbe {
@@ -1486,7 +1635,10 @@ func (y *syncer) readWindow(ctx context.Context, hash, url string, p mediaProbe,
 func (y *syncer) readOne(ctx context.Context, url string, p mediaProbe, at float64) (refWindow, error) {
 	rate, ok := y.readRoom(ctx, p.Bitrate)
 	if !ok {
-		return refWindow{}, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return refWindow{}, err
+		}
+		return refWindow{}, errors.New("the file plays")
 	}
 	timeout := syncWindowTimeout
 	if rate > 0 {

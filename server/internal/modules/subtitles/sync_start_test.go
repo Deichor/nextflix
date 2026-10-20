@@ -6,7 +6,9 @@ import (
 	"errors"
 	"log"
 	"math"
+	"math/rand"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -292,6 +294,227 @@ func TestPreTimingReadsOnceTheFilePlays(t *testing.T) {
 	waitFlight(t, svc, "sync|"+key)
 	if m := svc.sync.meta(key); m == nil || !m.fits() || *reads == 0 {
 		t.Fatalf("opened: %+v, %d reads", m, *reads)
+	}
+}
+
+// bigStartFile is an episode whose busy dialogue starts after a 100 s intro, with a title line
+// at 60 s.
+func bigStartFile(seed int64) []span {
+	rng := rand.New(rand.NewSource(seed))
+	out := []span{{60, 63}}
+	for t := 100.0; t < episode-60; {
+		d := 1 + rng.Float64()*1.5
+		out = append(out, span{t, t + d})
+		t += d + 0.8 + rng.Float64()*1.2
+		if rng.Float64() < 0.03 {
+			t += 20
+		}
+	}
+	return out
+}
+
+// newBigPreTest is a service with live timing whose file is above the byte budget (4K: 2.8 MB/s,
+// with a PGS track); its reads come from the file's true lines and are recorded.
+func newBigPreTest(t *testing.T, file []span) (*Service, *[]mediaProbe, *[]float64) {
+	svc, _ := newPreTest(t, file)
+	svc.sync.probe = func(context.Context, string) (mediaProbe, error) {
+		return mediaProbe{Duration: episode, FPS: 23.976, Audio: 1, Center: true, OwnSub: 2, SubCodec: "hdmv_pgs_subtitle",
+			Bitrate: 2.8 * (1 << 20)}, nil
+	}
+	var mu sync.Mutex
+	var probes []mediaProbe
+	var starts []float64
+	svc.sync.read = func(_ context.Context, _ string, p mediaProbe, start, _ float64) (refWindow, error) {
+		mu.Lock()
+		probes, starts = append(probes, p), append(starts, start)
+		mu.Unlock()
+		w := liveWindowsOf(file, []float64{start}, 0, 0)[0]
+		w.Kind = "audio"
+		return w, nil
+	}
+	return svc, &probes, &starts
+}
+
+// The next episode's file above the byte budget: its pre-timing reads the speech of 3 minutes
+// from just before the subtitle's dialogue (not the own track, which waits for its check) and
+// the subtitle is pre-timed from them; it shows once the played audio backs it. Nothing is read
+// again, and a timing that is not a pre-timing never reads such a file.
+func TestPreTimingReadsTheStartOfABigFile(t *testing.T) {
+	file := bigStartFile(89)
+	svc, probes, starts := newBigPreTest(t, file)
+	ctx := context.Background()
+	sub := subtitleFor(file, 1, func(float64) float64 { return 0.8 })
+	inner := cacheProviderSub(t, svc, "1|big|2|8|1", sub)
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+
+	if state, err := svc.PreTime(ctx, id); err != nil || state != syncStatePending {
+		t.Fatalf("pre-timing: %q %v", state, err)
+	}
+	waitFlight(t, svc, "sync|"+key)
+	want := []float64{44, 104, 164} // the title line at 60 s - 0.8 s starts the first 5 lines within a minute
+	if !slices.Equal(*starts, want) {
+		t.Fatalf("read at %v, want %v", *starts, want)
+	}
+	for _, p := range *probes {
+		if p.OwnSub >= 0 {
+			t.Fatal("the own track was read")
+		}
+	}
+	m := svc.sync.meta(key)
+	if m == nil || !m.fits() || !m.Pre || !m.Live || math.Abs(m.Fit.Segments[0].Offset-0.8) > 0.15 {
+		t.Fatalf("not pre-timed: %+v", m)
+	}
+	fk := syncFileKey(syncHash, 1)
+	st, release := svc.sync.refState(fk)
+	st.mu.Lock()
+	ref := *st.ref
+	st.mu.Unlock()
+	release()
+	if !ref.Skipped || !ref.Start || len(ref.Windows) != 3 {
+		t.Fatalf("reference: skipped %v start %v, %d windows", ref.Skipped, ref.Start, len(ref.Windows))
+	}
+
+	// Another subtitle's pre-timing and the viewing's own timing read nothing more
+	other := cacheProviderSub(t, svc, "1|big2|2|8|1", subtitleFor(file, 1, func(float64) float64 { return -1.5 }))
+	otherKey, _ := syncKey(other, syncHash, 1)
+	svc.PreTime(ctx, wrapSyncID(other, syncHash, 1))
+	waitFlight(t, svc, "sync|"+otherKey)
+	if len(*starts) != 3 {
+		t.Fatalf("read again: %v", *starts)
+	}
+
+	// The episode opens: the subtitle as it is until the played audio backs the fit
+	a, _ := svc.FileFor(ctx, id, 0)
+	if a.Sync != syncStatePending || !startsNear(vttCues(a.VTT), sub, 40) {
+		t.Fatalf("open: %q", a.Sync)
+	}
+	f := svc.sync.liveFile(syncHash, 1)
+	injectLive(f, file, []int{2})
+	svc.sync.refitFile(f)
+	a, _ = svc.FileFor(ctx, id, 100)
+	if a.Sync != syncStateLive || !startsNear(vttCues(a.VTT), file, 40) || svc.sync.meta(key).Pre {
+		t.Fatalf("backed: %q", a.Sync)
+	}
+	if len(*starts) != 3 {
+		t.Fatalf("read while it plays: %v", *starts)
+	}
+}
+
+// A first timing that is not a pre-timing does not read the start of a file above the byte budget
+// (a read beside its own playing stream would take its line); a later pre-timing still does.
+func TestOnlyPreTimingReadsTheStartOfABigFile(t *testing.T) {
+	file := bigStartFile(97)
+	svc, _, starts := newBigPreTest(t, file)
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|first|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 2 }))
+	key, _ := syncKey(inner, syncHash, 1)
+	base, _ := svc.File(ctx, inner)
+	svc.sync.startTiming(inner, syncHash, 1, base, false)
+	waitFlight(t, svc, "sync|"+key)
+	if len(*starts) != 0 || svc.sync.meta(key) != nil {
+		t.Fatalf("read at %v, meta %+v", *starts, svc.sync.meta(key))
+	}
+	svc.PreTime(ctx, wrapSyncID(inner, syncHash, 1))
+	waitFlight(t, svc, "sync|"+key)
+	if len(*starts) != 3 {
+		t.Fatalf("pre-timing read at %v", *starts)
+	}
+}
+
+// The start reads stop once the file plays: its tap hears that stretch, and a read beside its own
+// stream would take its line. The pass is not tried again.
+func TestStartReadsStopWhenTheFilePlays(t *testing.T) {
+	file := bigStartFile(101)
+	svc, _, starts := newBigPreTest(t, file)
+	svc.sync.roomPoll = 10 * time.Millisecond
+	svc.cfg.ReadRoom = roomFake(0)
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|stop|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	svc.PreTime(ctx, id)
+	time.Sleep(100 * time.Millisecond)
+	if len(*starts) != 0 || !svc.flights.running("sync|"+key) {
+		t.Fatalf("no room: read at %v, waiting %v", *starts, svc.flights.running("sync|"+key))
+	}
+	svc.FileFor(ctx, id, 0)
+	waitFlight(t, svc, "sync|"+key)
+	if len(*starts) != 0 {
+		t.Fatalf("read at %v while the file plays", *starts)
+	}
+	st, release := svc.sync.refState(syncFileKey(syncHash, 1))
+	defer release()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.ref.Start || len(st.ref.Windows) != 0 {
+		t.Fatalf("reference: start %v, %d windows", st.ref.Start, len(st.ref.Windows))
+	}
+}
+
+// A start read cut when the playing streams take the line keeps its windows; the next pre-timing
+// reads only the rest.
+func TestCutStartReadGoesOnNextTime(t *testing.T) {
+	file := bigStartFile(103)
+	svc, _, starts := newBigPreTest(t, file)
+	svc.sync.roomWait, svc.sync.roomPoll = 50*time.Millisecond, 10*time.Millisecond
+	room := &roomVar{rate: 4 << 20}
+	svc.cfg.ReadRoom = room
+	truth := svc.sync.read
+	svc.sync.read = func(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, error) {
+		room.set(0)
+		return truth(ctx, url, p, start, length)
+	}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|cut|2|8|1", subtitleFor(file, 1, func(float64) float64 { return 1 }))
+	id := wrapSyncID(inner, syncHash, 1)
+	key, _ := syncKey(inner, syncHash, 1)
+	svc.PreTime(ctx, id)
+	waitFlight(t, svc, "sync|"+key)
+	if len(*starts) != 1 || svc.sync.recentlyFailed(key) {
+		t.Fatalf("cut: read at %v, failed %v", *starts, svc.sync.recentlyFailed(key))
+	}
+	room.set(4 << 20)
+	svc.sync.read = truth
+	svc.PreTime(ctx, id)
+	waitFlight(t, svc, "sync|"+key)
+	if len(*starts) != 3 || (*starts)[1] == (*starts)[0] || (*starts)[2] == (*starts)[0] {
+		t.Fatalf("next time: read at %v", *starts)
+	}
+	if m := svc.sync.meta(key); m == nil || !m.fits() || !m.Pre {
+		t.Fatalf("not pre-timed: %+v", m)
+	}
+}
+
+// The start windows begin just before the subtitle's first stretch of dialogue (a lone credit
+// line before it does not count), as many as the byte budget allows, none below what a live fit
+// needs.
+func TestStartWindows(t *testing.T) {
+	cues := func(starts ...float64) []liveCue {
+		var out []liveCue
+		for _, s := range starts {
+			out = append(out, liveCue{start: s, end: s + 2})
+		}
+		return out
+	}
+	fourK := mediaProbe{Duration: 3393, Bitrate: 2.82 * (1 << 20)}
+	for _, c := range []struct {
+		name string
+		p    mediaProbe
+		cues []liveCue
+		want []float64
+	}{
+		{"after the intro", fourK, cues(90.6, 94, 108.2, 113.5, 119.9, 123, 127), []float64{75, 135, 195}},
+		{"a credit line first", fourK, cues(1, 100, 104, 108, 112, 116), []float64{85, 145, 205}},
+		{"from the start", fourK, cues(3, 5, 8, 11, 14), []float64{0, 60, 120}},
+		{"near the end", mediaProbe{Duration: 400, Bitrate: 2.82 * (1 << 20)}, cues(300, 302, 304, 306, 308), []float64{220, 280, 340}},
+		{"two fit the budget", mediaProbe{Duration: 3393, Bitrate: 5 * (1 << 20)}, cues(10, 12, 14, 16, 18), []float64{0, 60}},
+		{"one fits: none", mediaProbe{Duration: 3393, Bitrate: 8 * (1 << 20)}, cues(10, 12, 14, 16, 18), nil},
+		{"no dialogue", fourK, cues(10, 100, 200, 300, 400, 500), nil},
+	} {
+		if got := startWindows(c.p, c.cues); !slices.Equal(got, c.want) {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
