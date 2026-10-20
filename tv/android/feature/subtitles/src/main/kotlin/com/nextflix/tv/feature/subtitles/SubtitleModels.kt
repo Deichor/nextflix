@@ -95,6 +95,8 @@ data class CueFile(
     val failed: Boolean = false,
     /** HTTP status (0: network error) */
     val status: Int = 200,
+    /** the AI translation cannot be used now (502 or 409 with `ai: true`: no credit, a bad key, turned off) */
+    val ai: Boolean = false,
     /** X-Subtitle-Holes ("2 holes, 40 lines, 38 filled"), "" without */
     val holes: String = "",
 )
@@ -114,6 +116,8 @@ data class SubtitleState(
     val searching: Boolean = false,
     /** an AI translation is being made at the position for the selected subtitle (show a note) */
     val translating: Boolean = false,
+    /** the selected AI translation just turned out unusable (a short toast) */
+    val aiUnavailable: Boolean = false,
     /** subtitle timing in seconds (+ shows them later), kept per file */
     val delaySeconds: Double = 0.0,
     /** X-Subtitle-Sync of the last cue answer ("" before one) */

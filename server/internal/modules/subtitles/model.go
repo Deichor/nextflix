@@ -85,6 +85,10 @@ type SettingsView struct {
 		Languages []AILanguage `json:"languages"`
 		Model     string       `json:"model"`
 		Usage     AIUsageView  `json:"usage"`
+		// The key or account error that holds the translation (empty without one)
+		Error     string `json:"error,omitempty"`
+		ErrorKind string `json:"error_kind,omitempty"`
+		ErrorAt   string `json:"error_at,omitempty"`
 	} `json:"ai_translate"`
 	DefaultLangs []string `json:"default_langs"`
 }

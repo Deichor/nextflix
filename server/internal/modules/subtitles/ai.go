@@ -184,7 +184,7 @@ func (s *Service) aiTitle(m aiMeta) string {
 
 // aiPrefetchNext translates the opening of the next episode once, so it starts without a wait.
 func (s *Service) aiPrefetchNext(m aiMeta, lang AILanguage) {
-	if s.cfg.NextEpisode == nil {
+	if acct, _ := s.ai.accountError(); s.cfg.NextEpisode == nil || acct != nil {
 		return
 	}
 	key := m.String() + "|" + lang.Code
@@ -278,7 +278,9 @@ func containsString(list []string, s string) bool {
 }
 
 // addAI lists a translation for every target without a usable subtitle, in its language's place.
+// While the key or account cannot be used only translations with stored lines are listed.
 func (s *Service) addAI(subs []Sub, q Query, targets []string) []Sub {
+	acct, _ := s.ai.accountError()
 	for _, lang := range targets {
 		human := false
 		for _, x := range subs {
@@ -291,7 +293,7 @@ func (s *Service) addAI(subs []Sub, q Query, targets []string) []Sub {
 			continue
 		}
 		src := s.pickAISource(subs, lang)
-		if src == nil {
+		if src == nil || (acct != nil && !s.ai.has(rawSubID(src.ID)+"|"+lang)) {
 			continue
 		}
 		meta := aiMeta{q.MediaType, q.TmdbID, q.Season, q.Episode}
@@ -503,15 +505,29 @@ func (t *aiTranslator) usage() AIUsageView {
 
 // TestAIKey sends a tiny request with key (empty: the stored one).
 func (s *Service) TestAIKey(ctx context.Context, key string) error {
-	if strings.TrimSpace(key) == "" {
-		key = s.settings.get().AnthropicAPIKey
+	stored := s.settings.get().AnthropicAPIKey
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = stored
 	}
 	if key == "" {
-		return AIKeyError{"no Claude API key is set"}
+		return AIKeyError{"no Claude API key is set", aiErrNoKey}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	_, used, err := s.ai.call(ctx, strings.TrimSpace(key), "Answer with an empty \"lines\" list.", "Test.")
+	_, used, err := s.ai.call(ctx, key, "Answer with an empty \"lines\" list.", "Test.")
 	s.ai.recordUsage(used, 0)
+	// A test of the stored key tells the translations whether it can be used (e.g. after a top-up)
+	var keyErr AIKeyError
+	switch {
+	case key != stored:
+	case err == nil:
+		s.ai.resetKeyErrors()
+	case errors.As(err, &keyErr):
+		s.ai.noteAccountError(keyErr, time.Now())
+	}
 	return err
 }
+
+// AIAccountError is the key or account error that holds the AI translation (nil without one).
+func (s *Service) AIAccountError() (*AIKeyError, time.Time) { return s.ai.accountError() }

@@ -2,8 +2,9 @@ package subtitles
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -29,9 +30,50 @@ type aiTokens struct{ In, Out int64 }
 type aiCallFunc func(ctx context.Context, apiKey, system, user string) (string, aiTokens, error)
 
 // AIKeyError means the key or the account cannot be used (bad key, no credit): retrying soon is pointless.
-type AIKeyError struct{ Msg string }
+// Kind names it for the clients' texts (aiErr*).
+type AIKeyError struct {
+	Msg  string
+	Kind string
+}
 
 func (e AIKeyError) Error() string { return "AI translation: " + e.Msg }
+
+const (
+	aiErrNoKey    = "no_key"
+	aiErrKey      = "key"      // the key is not valid
+	aiErrCredit   = "credit"   // the account's credit balance is too low
+	aiErrRejected = "rejected" // another refused request
+)
+
+// claudeAPIError maps an error answer of the API to a key or account error (ok false: another error).
+func claudeAPIError(status int, text string) (AIKeyError, bool) {
+	switch status {
+	case 401, 403:
+		return AIKeyError{"the Claude API key is not valid", aiErrKey}, true
+	case 400:
+		msg := claudeMessage(text)
+		if strings.Contains(strings.ToLower(msg), "credit balance") {
+			return AIKeyError{"the Claude account has no credit left", aiErrCredit}, true
+		}
+		return AIKeyError{"Claude rejected the request: " + truncateString(msg, 300), aiErrRejected}, true
+	}
+	return AIKeyError{}, false
+}
+
+var claudeMessageRe = regexp.MustCompile(`"message"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+
+// claudeMessage is the message of an API error answer, without the request line and its ids.
+func claudeMessage(text string) string {
+	m := claudeMessageRe.FindStringSubmatch(text)
+	if m == nil {
+		return text
+	}
+	var s string
+	if json.Unmarshal([]byte(`"`+m[1]+`"`), &s) != nil {
+		return m[1]
+	}
+	return s
+}
 
 func claudeCall(ctx context.Context, apiKey, system, user string) (string, aiTokens, error) {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(4))
@@ -50,12 +92,8 @@ func claudeCall(ctx context.Context, apiKey, system, user string) (string, aiTok
 	if err != nil {
 		var apiErr *anthropic.Error
 		if errors.As(err, &apiErr) {
-			switch apiErr.StatusCode {
-			case 401, 403:
-				return "", aiTokens{}, AIKeyError{"the Claude API key is not valid"}
-			case 400:
-				// e.g. a credit balance that is too low
-				return "", aiTokens{}, AIKeyError{fmt.Sprintf("Claude rejected the request: %s", truncateString(apiErr.Error(), 600))}
+			if keyErr, ok := claudeAPIError(apiErr.StatusCode, apiErr.Error()); ok {
+				return "", aiTokens{}, keyErr
 			}
 		}
 		return "", aiTokens{}, err

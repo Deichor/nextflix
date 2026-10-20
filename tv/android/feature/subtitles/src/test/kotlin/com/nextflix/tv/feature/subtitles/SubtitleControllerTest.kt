@@ -204,6 +204,49 @@ class SubtitleControllerTest {
     }
 
     @Test
+    fun anUnusableAiTranslationEndsTheNoteAndIsAskedRarely() = runTest {
+        val backend = FakeBackend().apply {
+            lists.add(listOf(sub("ai1", "tr", source = "ai")))
+            files["ai1"] = ArrayDeque(
+                listOf(
+                    file("bir", partial = true, translating = true),
+                    CueFile(emptyList(), sync = SubsLog.SYNC_NONE, failed = true, status = 502, ai = true),
+                ),
+            )
+        }
+        val c = controller(backend)
+        c.start(trQuery, "en")
+        runCurrent()
+        assertTrue(c.state.value.translating)
+        advanceTimeBy(SubtitleRepository.AI_CUES_POLL_MS + 1)
+        assertFalse(c.state.value.translating)
+        assertTrue(c.state.value.aiUnavailable)
+        assertEquals(2, backend.cueCalls.size)
+        // No 15 s poll: the next ask comes after AI_OFF_RETRY_MS
+        advanceTimeBy(SubtitleRules.AI_OFF_RETRY_MS - 1000)
+        assertEquals(2, backend.cueCalls.size)
+        assertFalse(c.state.value.aiUnavailable)
+        advanceTimeBy(2000)
+        assertEquals(3, backend.cueCalls.size)
+    }
+
+    @Test
+    fun aMissingFileAfterEarlierAnswersStopsPolling() = runTest {
+        val backend = FakeBackend().apply {
+            lists.add(listOf(sub("tr1", "tr"), sub("tr2", "tr")))
+            files["tr1"] = ArrayDeque(listOf(file("bir", partial = true), CueFile(emptyList(), status = 404)))
+        }
+        val c = controller(backend)
+        c.start(trQuery, "en")
+        runCurrent()
+        advanceTimeBy(SubtitleRepository.LIVE_CUES_POLL_MS + 1)
+        assertEquals(2, backend.cueCalls.size)
+        advanceTimeBy(SubtitleRepository.LIVE_CUES_POLL_MS * 10)
+        assertEquals(2, backend.cueCalls.size)
+        assertEquals(listOf("bir"), c.state.value.cues.map { it.text })
+    }
+
+    @Test
     fun untimedAnswersArePolledEvery5sInTheFirstMinutes() = runTest {
         val backend = FakeBackend().apply {
             lists.add(listOf(sub("tr1", "tr")))

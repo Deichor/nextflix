@@ -47,6 +47,10 @@ var (
 	aiPauseBase     = 10 * time.Second // after a failed request (network, overload); doubles up to aiPauseMax
 	aiPauseMax      = 5 * time.Minute
 	aiWaitMax       = 30 * time.Second // a worker waiting for retries looks again at least this often
+
+	// aiAccountHold: after a key or account error no translation asks Claude, and lists offer no new
+	// AI item, for this long (a new key or a passing key test ends it sooner)
+	aiAccountHold = 30 * time.Minute
 )
 
 type aiLine struct {
@@ -81,7 +85,7 @@ type aiJob struct {
 	opening  float64 // > 0: only lines before this second (a prefetched next episode)
 	watched  bool    // a player asked for it: the whole file is translated
 	apiKey   string
-	keyErr   error
+	keyErr   error // an AIKeyError
 	keyErrAt time.Time
 	lastUsed time.Time
 
@@ -97,6 +101,34 @@ type aiTranslator struct {
 	mu         sync.Mutex
 	jobs       map[string]*aiJob
 	prefetched map[string]time.Time
+
+	// The last key or account error of any translation (the key belongs to all of them)
+	acctMu    sync.Mutex
+	acctErr   *AIKeyError
+	acctErrAt time.Time
+}
+
+// noteAccountError keeps a key or account error for every translation.
+func (t *aiTranslator) noteAccountError(err AIKeyError, at time.Time) {
+	t.acctMu.Lock()
+	t.acctErr, t.acctErrAt = &err, at
+	t.acctMu.Unlock()
+}
+
+// accountError is the key or account error of the last aiAccountHold, nil without one.
+func (t *aiTranslator) accountError() (*AIKeyError, time.Time) {
+	t.acctMu.Lock()
+	defer t.acctMu.Unlock()
+	if t.acctErr == nil || time.Since(t.acctErrAt) >= aiAccountHold {
+		return nil, time.Time{}
+	}
+	return t.acctErr, t.acctErrAt
+}
+
+func (t *aiTranslator) clearAccountError() {
+	t.acctMu.Lock()
+	t.acctErr = nil
+	t.acctMu.Unlock()
 }
 
 func newAITranslator(db *gorm.DB, dir string) *aiTranslator {
@@ -177,8 +209,9 @@ func (t *aiTranslator) has(key string) bool {
 	return t.store.has(aiStoreKind, key, ".json")
 }
 
-// resetKeyErrors lets the translations try again at once (a new key).
+// resetKeyErrors lets the translations try again at once (a new key, a passing key test).
 func (t *aiTranslator) resetKeyErrors() {
+	t.clearAccountError()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, j := range t.jobs {
@@ -316,10 +349,18 @@ func (j *aiJob) takeLocked(now time.Time) (batch []aiLine, wait time.Duration) {
 }
 
 func (t *aiTranslator) kick(j *aiJob, apiKey string) {
+	acct, at := t.accountError()
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if apiKey != "" {
 		j.apiKey = apiKey
+	}
+	if acct != nil {
+		// The key or account cannot be used: nothing is asked, the answers say why
+		if j.keyErr == nil {
+			j.keyErr, j.keyErrAt = *acct, at
+		}
+		return
 	}
 	for j.running < aiWorkers {
 		batch, wait := j.takeLocked(time.Now())
@@ -430,12 +471,15 @@ func (t *aiTranslator) translate(j *aiJob, batch []aiLine) {
 	now := time.Now()
 	if errors.As(err, &keyErr) || (err != nil && !errors.Is(err, errAIRefused) && !errors.Is(err, errAITruncated)) {
 		// The request itself failed: the lines are asked again later, no try is counted
+		if errors.As(err, &keyErr) {
+			t.noteAccountError(keyErr, now) // before the job's answers can tell
+		}
 		j.mu.Lock()
 		for _, l := range batch {
 			delete(j.inflight, l.text)
 		}
 		if errors.As(err, &keyErr) {
-			j.keyErr, j.keyErrAt = err, now
+			j.keyErr, j.keyErrAt = keyErr, now
 		} else {
 			j.apiErrs++
 			j.paused = now.Add(min(aiPauseBase<<min(j.apiErrs-1, 8), aiPauseMax))
@@ -445,6 +489,7 @@ func (t *aiTranslator) translate(j *aiJob, batch []aiLine) {
 		t.recordUsage(used, 0)
 		return
 	}
+	t.clearAccountError() // the request went through
 
 	var v aiVerdict
 	switch {

@@ -171,6 +171,7 @@ internal fun BoxScope.PlayerOverlays(
     val toast = s.toast
     when {
         toast != null -> Toast(t.msg(toast))
+        subs.aiUnavailable -> Toast(t.aiUnavailable)
         subs.translating -> Toast(t.aiTranslating, spinner = true)
     }
 

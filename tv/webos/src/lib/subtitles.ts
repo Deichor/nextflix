@@ -227,8 +227,9 @@ export interface CueFile {
   sync: string;
   /** AI translation: the lines at the position are still being translated */
   translating?: boolean;
-  /** No cues because of a server or network error (often over in seconds), not a missing file */
-  failed?: 'error';
+  /** No cues because of a server or network error (often over in seconds), not a missing file; 'ai': the AI
+   * translation cannot be used now (502 or 409 with `ai: true`) */
+  failed?: 'error' | 'ai';
 }
 
 export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
@@ -246,6 +247,7 @@ export function fetchCueFile(id: string, at?: number): Promise<CueFile> {
       const text = res.ok ? await res.text() : '';
       const f: CueFile = { cues: parseVtt(text), partial: text.indexOf(PARTIAL_NOTE) >= 0, sync, translating: text.indexOf(AI_NOTE) >= 0 };
       if (res.status >= 500) f.failed = 'error';
+      if (!res.ok && (await res.json().catch(() => null) as { ai?: boolean } | null)?.ai) f.failed = 'ai';
       return f;
     })
     .catch((): CueFile => ({ cues: [], partial: false, sync: SYNC_NONE, failed: 'error' }));

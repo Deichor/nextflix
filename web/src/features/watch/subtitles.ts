@@ -232,8 +232,9 @@ export function bestSubtitleOf(items: SubtitleItem[], lang: string, failed?: Rea
 }
 
 // Why a subtitle file could not be loaded: quota = OpenSubtitles' daily download limit,
-// limited = another 429, error = a server or provider error (5xx, network), missing = 404 and the like
-export type SubtitleFailure = 'quota' | 'limited' | 'error' | 'missing';
+// limited = another 429, error = a server or provider error (5xx, network), missing = 404 and the like,
+// ai = the AI translation cannot be used now (no credit, bad key, turned off)
+export type SubtitleFailure = 'quota' | 'limited' | 'error' | 'missing' | 'ai';
 
 /**
  * The subtitle to try after `failedId` could not be loaded: the next one of its language that
@@ -249,7 +250,7 @@ export function nextSubtitleAfterFailure(
   const bad = items.find(s => s.id === failedId);
   if (!bad) return null;
   const l = normLang(bad.language);
-  const blocked = why === 'quota' || why === 'limited';
+  const blocked = why === 'quota' || why === 'limited' || why === 'ai';
   const pool = items.filter(s =>
     s.id !== failedId && !failed.has(s.id) && normLang(s.language) === l && s.forced === bad.forced && !s.quota &&
     !(blocked && s.source === bad.source));
@@ -327,9 +328,11 @@ export function fetchSubtitleFile(id: string, at?: number, poll = false): Promis
         failedFiles.delete(id);
         return { cues: parseVtt(text), partial: text.includes(PARTIAL_NOTE), sync, translating: text.includes(AI_NOTE) };
       }
-      const body = await res.json().catch(() => null) as { quota?: boolean; reset_at?: string } | null;
-      const why: SubtitleFailure = res.status === 429 ? (body?.quota ? 'quota' : 'limited') : res.status >= 500 ? 'error' : 'missing';
-      if (!poll) rememberFailure(id, why, body?.reset_at ? Date.parse(body.reset_at) : NaN);
+      const body = await res.json().catch(() => null) as { quota?: boolean; reset_at?: string; ai?: boolean } | null;
+      const why: SubtitleFailure = body?.ai ? 'ai'
+        : res.status === 429 ? (body?.quota ? 'quota' : 'limited') : res.status >= 500 ? 'error' : 'missing';
+      // An unusable AI translation is not asked again for FAILED_FILE_MS, even while polling
+      if (!poll || why === 'ai') rememberFailure(id, why, body?.reset_at ? Date.parse(body.reset_at) : NaN);
       return { cues: [], partial: false, sync, failed: why };
     })
     .catch((): SubtitleFile => {

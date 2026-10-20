@@ -115,7 +115,7 @@ func fileError(c *gin.Context, err error) bool {
 	case errors.Is(err, ErrAIOff):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "ai": true})
 	case errors.As(err, &ke):
-		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true})
+		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true, "error_kind": ke.Kind})
 	case errors.Is(err, ErrRateLimited):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
 	default:
