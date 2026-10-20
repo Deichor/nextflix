@@ -125,6 +125,17 @@ function toUnified(responseData: any): UnifiedMediaDetails {
   return { ...responseData, media_type: 'movie' };
 }
 
+// TMDB data is external: only plain http(s) links are rendered (no javascript: or data: URLs)
+function httpUrl(raw?: string): string | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function findBestTrailer(videos: VideoItem[]) {
   const yt = videos.filter(v => v.site === 'YouTube');
   return (
@@ -439,6 +450,7 @@ const TMDBMoviePage: React.FC = () => {
     ? (mediaDetails.number_of_seasons ? t('detail.seasons', { count: mediaDetails.number_of_seasons }) : '')
     : (mediaDetails.runtime || 0) > 0 ? f.duration(mediaDetails.runtime!) : '';
   const backdrop = mediaDetails.backdrop_path;
+  const homepage = httpUrl(mediaDetails.homepage);
   const rateItem = {
     id: mediaDetails.id,
     mediaType: mediaDetails.media_type,
@@ -506,9 +518,9 @@ const TMDBMoviePage: React.FC = () => {
               item={{ type: mediaDetails.media_type, tmdb_id: mediaDetails.id, title: mediaDetails.title, year }}
             />
             <RatingButtons item={rateItem} size="md" />
-            {!!mediaDetails.homepage && (
+            {!!homepage && (
               <a
-                href={mediaDetails.homepage}
+                href={homepage}
                 target="_blank"
                 rel="noopener noreferrer"
                 title={t('detail.officialSite')}
