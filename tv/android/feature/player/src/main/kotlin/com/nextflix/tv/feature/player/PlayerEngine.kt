@@ -160,6 +160,8 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
     // session wide
     private val played = LinkedHashSet<String>()
     private var current = ""
+    /** the torrent a running switch replaces: dropped once the new source probed well */
+    private var replaced: String? = null
     private var nextWarm: ResolveParams? = null
     // the next episode's subtitle timed before it opens; cancelled when the player moves on
     private var nextPretime: Job? = null
@@ -267,8 +269,9 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
 
     private val hasMedia: Boolean get() = exo.currentMediaItem != null
 
-    /** Exact playback position in the file (seconds). */
-    fun positionNow(): Double = max(0.0, offset + (if (hasMedia) exo.currentPosition else 0L) / 1000.0)
+    /** Exact playback position in the file (seconds); a stream stopped in the background keeps its position. */
+    fun positionNow(): Double =
+        parkedAt ?: max(0.0, offset + (if (hasMedia) exo.currentPosition else 0L) / 1000.0)
 
     /** Seconds buffered ahead of the position. */
     private fun ahead(): Double = if (hasMedia) max(0.0, (exo.bufferedPosition - exo.currentPosition) / 1000.0) else 0.0
@@ -406,6 +409,11 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
 
     // ---- source: probe, then stream ----
 
+    private fun dropTorrent(h: String) {
+        api.releaseTorrents(listOf(h))
+        played -= h
+    }
+
     private fun openSource(src: StreamSource, startAtIn: Double, from: Origin, reason: String = "open") {
         val prev = source?.takeIf { !it.hash.equals(src.hash, ignoreCase = true) }?.let { Previous(it, origin, s.duration) }
         // Sent first: queued events belong to the previous source's context
@@ -419,11 +427,11 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         source = src
         origin = from
         val h = src.hash.lowercase()
-        // A replaced torrent (upgrade, sidegrade, step down) is dropped at once
-        if (current.isNotEmpty() && current != h) {
-            api.releaseTorrents(listOf(current))
-            played -= current
-        }
+        // A switch (upgrade, sidegrade, step down) keeps the torrent it replaces until the new one probed well, so a
+        // failed switch can go back to it; one left by an earlier switch that never got there is dropped now
+        val left = replaced
+        replaced = current.takeIf { it.isNotEmpty() && it != h }
+        if (left != null && left != h && left != replaced) dropTorrent(left)
         current = h
         played += h
         hash = h
@@ -439,6 +447,14 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         }
         scope.launch {
             var start = startAtIn
+            val switching = reason != "open" && reason != "revert" && prev != null
+            // A switch never starts over: back to the source it came from, at its own position (its torrent was kept)
+            fun revert(why: String) {
+                val back = prev ?: return
+                Log.i(TAG, "[restart] guard: ${h.take(8)}:${src.index} $why: back to ${back.src.hash.take(8)}")
+                api.releaseTorrents(listOf(h))
+                openSource(back.src, startAtIn, back.origin, "revert")
+            }
             // TorrServer may have dropped a saved torrent since
             src.magnet?.let {
                 api.files(it)
@@ -451,13 +467,19 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
                 throw e
             } catch (e: Exception) {
                 if (stale(session)) return@launch
-                if (!sourceFailed(start, true)) {
+                if (switching) {
+                    revert("could not be read")
+                } else if (!sourceFailed(start, true)) {
                     set { copy(fatal = e.message?.takeIf { it.isNotEmpty() }?.let { PlayerError.Text(it) } ?: PlayerError.Key(Msg.CouldNotRead)) }
                 }
                 return@launch
             }
             if (stale(session)) return@launch
-            // Not the whole title (e.g. 86 of 173 minutes): look for a complete version
+            // Not the whole title (e.g. 86 of 173 minutes): look for a complete version (a switch goes back)
+            if (probe.durationMismatch && switching) {
+                revert("is not the whole title")
+                return@launch
+            }
             if (probe.durationMismatch && lengthRetries < MAX_LENGTH_RETRIES) {
                 lengthRetries++
                 avoid += h
@@ -466,20 +488,21 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
             }
             val duration = probe.duration
             val tracks = probe.audioTracks
-            val switching = reason != "open" && reason != "revert" && prev != null
             // Another cut of the title (a WEB-DL vs a BluRay): the same moment, mapped by the lengths
             if (switching && prev.duration > 0 && duration > 0 && lengthsMatch(prev.duration, duration)) {
                 start *= timeScale(prev.duration, duration)
             }
-            // A switch never starts over: a file that does not reach the position (a pack's wrong file, another
-            // cut) sends the player back to the source it came from (its torrent is kept 60 s after its stream)
+            // A file that does not reach the position (a pack's wrong file, another cut) goes back too
             if (switching && start > 30 && duration > 0 &&
                 (start >= duration - 10 || (prev.duration > 0 && abs(duration - prev.duration) > 60))
             ) {
-                Log.i(TAG, "[restart] guard: ${h.take(8)}:${src.index} lasts ${duration.roundToInt()} s, position ${start.roundToInt()}: back to ${prev.src.hash.take(8)}")
-                api.releaseTorrents(listOf(h))
-                openSource(prev.src, start, prev.origin, "revert")
+                revert("lasts ${duration.roundToInt()} s, position ${start.roundToInt()}")
                 return@launch
+            }
+            // The switch holds: the torrent it replaced goes
+            replaced?.let {
+                replaced = null
+                dropTorrent(it)
             }
             // Resumes (Continue Watching) carry no original language; the default track needs it
             if (meta.originalLanguage == null && tracks.size > 1) {
@@ -555,7 +578,7 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         offset = target
         exact = target <= 0
         hasPlayed = false
-        set { copy(buffering = true, ended = false, position = target) }
+        set { copy(buffering = true, ended = false, position = target, seekPending = !exact) }
         val length = if (s.duration > 0) s.duration - target + 60 else 6 * 3600.0
         exo.setMediaSource(media.create(api.playUrl(hash, index, target, s.audio), seq.toString(), length))
         exo.prepare()
@@ -590,7 +613,9 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
             if (t == null) Log.i(TAG, "[restart] no seek point for t=${"%.1f".format(target)}: positions may be off by a keyframe interval")
             plog.note("seekpoint", mapOf("at" to target, "fix" to (t?.let { it - target } ?: "none"), "attempt" to attempt))
             offset = t ?: target
+            // Without an answer the requested time stands (best effort): progress is saved and subtitles show from it
             exact = true
+            set { copy(seekPending = false) }
         }
     }
 
@@ -604,6 +629,7 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         seekJob?.cancel()
         seekJob = null
         seekSeq++
+        if (s.seekPending) set { copy(seekPending = false) }
         stall = null
         stallTimes.clear()
         hasPlayed = false
@@ -732,7 +758,7 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
                 if (i > 0) delay(PRETIME_POLL_MS)
                 val src = api.cached(params) ?: return@repeat
                 val title = src.torrentTitle?.takeIf { it.isNotEmpty() } ?: src.fileName
-                subtitles.pretime(SubtitleQuery.of(next, src.hash.lowercase(), src.index, language, title)).join()
+                subtitles.pretime(SubtitleQuery.of(next, src.hash.lowercase(), src.index, language, title))
                 return@launch
             }
         }
@@ -1165,6 +1191,7 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
             seekTarget = target
             exo.seekTo((rel * 1000).toLong())
             set { copy(position = target) }
+            subtitles.onSeek(target)
             return
         }
         deferredUpgrade?.let { (src, msg) ->
@@ -1175,6 +1202,7 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
             return
         }
         restartAt(target, if (why == "user") "seek" else "seek $why")
+        subtitles.onSeek(target)
     }
 
     /** Stream time [rel] is inside what Media3 holds (ahead, or in the back buffer). */
@@ -1265,6 +1293,8 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
                 resumeLoad = lastLoad
             }
             s.phase != Phase.Ready || s.fatal != null || s.ended || hash.isEmpty() -> Unit
+            // Stopped by an earlier trip to the background: Play starts it at the same position
+            parkedAt != null -> Unit
             hasMedia -> {
                 val pos = positionNow()
                 session++
@@ -1441,7 +1471,8 @@ internal class PlayerEngine(private val core: Core, request: PlayRequest) {
         // duration is reset while a new source opens, so a late pause never saves a mix of two sources
         if (destroyed || pid == null || hash.isEmpty() || s.phase != Phase.Ready) return
         // Nothing of this item played yet: the saved progress stays (a failed start never overwrites it)
-        val pos = progressToSave(finished, itemPlayed, duration, exact, positionNow(), offset) ?: return
+        // A parked position is where playback stopped, not the start of the stopped stream
+        val pos = progressToSave(finished, itemPlayed, duration, exact || parkedAt != null, positionNow(), offset) ?: return
         val tv = m.type == MediaType.Tv
         val progress = StreamProgress(
             profileId = pid, mediaType = m.type, tmdbId = m.tmdbId, title = m.title,

@@ -88,6 +88,9 @@ class HomeSnapshotStore internal constructor(
     private fun write(file: File, body: JsonElement) {
         runCatching {
             dir.mkdirs()
+            // Snapshots too old to be read (other servers, languages, profiles) and stray temp files go
+            val now = System.currentTimeMillis()
+            dir.listFiles()?.forEach { if (now - it.lastModified() > MAX_AGE_MS) it.delete() }
             val tmp = File.createTempFile(file.name, ".tmp", dir)
             try {
                 tmp.writeText(json.encodeToString(JsonElement.serializer(), body))

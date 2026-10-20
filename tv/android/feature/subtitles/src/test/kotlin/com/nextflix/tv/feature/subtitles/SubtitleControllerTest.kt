@@ -3,6 +3,7 @@ package com.nextflix.tv.feature.subtitles
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.prefs.SubtitleChoice
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -21,6 +22,7 @@ class SubtitleControllerTest {
     private class FakeBackend : SubtitleBackend {
         val lists = ArrayDeque<List<SubtitleTrack>>()
         var listCalls = 0
+        var listDelayMs = 0L
         var refreshCalls = 0
         val files = HashMap<String, ArrayDeque<CueFile>>()
         val cueCalls = ArrayList<Pair<String, Double?>>()
@@ -29,6 +31,7 @@ class SubtitleControllerTest {
         val delays = HashMap<String, Double>()
 
         override suspend fun list(query: SubtitleQuery, refresh: Boolean): List<SubtitleTrack> {
+            if (listDelayMs > 0) delay(listDelayMs)
             listCalls++
             if (refresh) refreshCalls++
             return if (lists.size > 1) lists.removeFirst() else lists.firstOrNull().orEmpty()
@@ -237,6 +240,63 @@ class SubtitleControllerTest {
         runCurrent()
         assertEquals(listOf("tr3"), backend.pretimed)
         assertTrue(backend.cueCalls.isEmpty())
+    }
+
+    @Test
+    fun pretimeStopsWithItsCaller() = runTest {
+        val backend = FakeBackend().apply {
+            lists.add(listOf(sub("tr3", "tr")))
+            listDelayMs = 1000
+        }
+        val c = controller(backend)
+        val job = launch { c.pretime(trQuery.copy(hash = "def", index = 2)) }
+        advanceTimeBy(500)
+        job.cancel()
+        advanceTimeBy(5000)
+        assertTrue(backend.pretimed.isEmpty())
+    }
+
+    @Test
+    fun theSameSubtitleAfterTheBackgroundIsPolledAgain() = runTest {
+        val backend = FakeBackend().apply {
+            lists.add(listOf(sub("tr1", "tr")))
+            files["tr1"] = ArrayDeque(listOf(file("bir", partial = true)))
+        }
+        val c = controller(backend)
+        c.start(trQuery, "en")
+        runCurrent()
+        assertEquals(1, backend.cueCalls.size)
+        c.stop()
+        advanceTimeBy(SubtitleRepository.LIVE_CUES_POLL_MS * 2)
+        assertEquals(1, backend.cueCalls.size)
+        c.restart(trQuery, "en")
+        runCurrent()
+        assertEquals("tr1", c.state.value.selectedId)
+        assertEquals(2, backend.cueCalls.size)
+        advanceTimeBy(SubtitleRepository.LIVE_CUES_POLL_MS + 1)
+        assertEquals(3, backend.cueCalls.size)
+    }
+
+    @Test
+    fun aSeekAsksForCuesThatAreNotFinalAtOnce() = runTest {
+        val backend = FakeBackend().apply {
+            lists.add(listOf(sub("tr1", "tr")))
+            files["tr1"] = ArrayDeque(listOf(file("bir", partial = true), file("bir", "iki")))
+        }
+        val c = controller(backend)
+        c.onPosition(10.0)
+        c.start(trQuery, "en")
+        runCurrent()
+        assertEquals(listOf("tr1" to 10.0), backend.cueCalls)
+        advanceTimeBy(1000)
+        c.onSeek(600.0)
+        runCurrent()
+        assertEquals("tr1" to 600.0, backend.cueCalls.last())
+        assertEquals(2, c.state.value.cues.size)
+        // Final now: a seek asks nothing
+        c.onSeek(900.0)
+        advanceTimeBy(SubtitleRepository.PROVISIONAL_CUES_POLL_MS * 2)
+        assertEquals(2, backend.cueCalls.size)
     }
 
     @Test

@@ -320,7 +320,8 @@ private fun PlayerContent(engine: PlayerEngine, onClose: () -> Unit) {
             keepContentOnReset = true,
         )
 
-        if (playable && ((subs.selectedId != null && subs.cues.isNotEmpty()) || ui.styling)) {
+        // Cues wait for the stream's real start: until then they would show early
+        if (playable && ((subs.selectedId != null && subs.cues.isNotEmpty() && !s.seekPending) || ui.styling)) {
             if (ui.styling) {
                 val text = subtitleStyleStrings.current().sample
                 val sample = remember(text) { listOf(Cue(0.0, Double.MAX_VALUE, text)) }

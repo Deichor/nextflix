@@ -106,9 +106,15 @@ internal class HomeViewModel(private val core: Core) : LoadingViewModel() {
         val rv = core.ratings.version.value
         val before = listOf(_home.value.data, _cw.value.data, _recs.value.data, _favs.value.data)
         val fresh = BooleanArray(4)
+        var homeComplete = false
         val jobs = listOf(
             // The billboard is picked before the rows show, so focus restore sees both at once
-            _home.load { core.catalog.home().also { fresh[0] = true }.over(_home.value.data).also(::pickBillboard) },
+            _home.load {
+                core.catalog.home().also {
+                    fresh[0] = true
+                    homeComplete = it.complete
+                }.over(_home.value.data).also(::pickBillboard)
+            },
             _cw.load { core.progress.continueWatchingCached(pid).also { fresh[1] = true } },
             _recs.load { core.catalog.homeRecommendations(pid, pv, rv).also { fresh[2] = true } },
             _favs.load { core.catalog.homeFavorites(pid, rv).also { fresh[3] = true } },
@@ -119,7 +125,8 @@ internal class HomeViewModel(private val core: Core) : LoadingViewModel() {
             // Saved when a load brought something new (not again for an answer from the memory cache)
             fun changed(i: Int, now: Any?) = fresh[i] && now != null && now !== before[i]
             val home = _home.value.data
-            if (home != null && changed(0, home)) core.homeSnapshots.writeHome(server, language, home)
+            // Only a complete answer: one merged over older sections would save them as new
+            if (home != null && homeComplete && changed(0, home)) core.homeSnapshots.writeHome(server, language, home)
             val profile = ProfileSnapshot(_cw.value.data, _recs.value.data, _favs.value.data)
             if (pid != 0 && (changed(1, profile.cw) || changed(2, profile.recs) || changed(3, profile.favs))) {
                 core.homeSnapshots.writeProfile(server, pid, language, profile)
