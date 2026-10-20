@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -19,8 +20,10 @@ import (
 // picks (taken from the played audio of the same stretch: the snapshot keeps the finished grid
 // windows, so a window starts where that audio does). A fit shows once it fits and is not
 // pre-timed, bigPoll after the re-fit (the TV's poll while pending). Truth: the fit over every
-// played window. Subtitles of about the file's length that fit nowhere over the whole file are
-// other episodes': any fit shown in the replay counts as a false accept.
+// played window. A subtitle of about the file's length that does not fit the whole file is
+// another episode's, or this episode's made for another cut (Westworld S01E01's Turkish ones for
+// a shorter cut): a fit shown in the replay counts as false unless it puts half of its lines of
+// the scored stretch within 0.3 s of a right pair's lines.
 
 const (
 	bigAhead = 30.0  // seconds the tap hears ahead of the picture
@@ -139,11 +142,11 @@ func shownAt(steps []bigStep, v float64) syncFit {
 type bigReport struct {
 	errs      errStats
 	untimed   float64 // seconds of dialogue (first cue after the start to the first timed one shown)
-	firstShow float64 // picture position of the first timing shown (-1: none)
+	firstShow float64 // picture position of the first timing shown (NaN: none)
 }
 
 func evalBig(steps []bigStep, sub []span, truth []float64, p float64) bigReport {
-	r := bigReport{firstShow: -1}
+	r := bigReport{firstShow: math.NaN()}
 	var errs []float64
 	first := math.NaN()
 	for i, c := range sub {
@@ -157,17 +160,15 @@ func evalBig(steps []bigStep, sub []span, truth []float64, p float64) bigReport 
 		fit := shownAt(steps, T)
 		errs = append(errs, math.Abs(fit.mapTime(c.start)-T))
 	}
+	end := p + bigScore
 	for _, s := range steps {
 		if !untimed(s.shown) {
 			r.firstShow = s.heard + bigPoll - bigAhead
+			end = r.firstShow
 			break
 		}
 	}
 	if !math.IsNaN(first) {
-		end := r.firstShow
-		if end < 0 {
-			end = p + bigScore
-		}
 		r.untimed = math.Max(0, end-first)
 	}
 	r.errs = statsOf(errs)
@@ -184,6 +185,7 @@ func TestSnapshotBigStart(t *testing.T) {
 		untimed       []float64
 		pairs, others int
 		falseAccepts  int
+		otherCut      int // shown, and on this episode's lines (a subtitle of it made for another cut)
 	}
 	groups := map[string]*agg{"before": {}, "pre": {}}
 	for _, f := range files {
@@ -200,12 +202,45 @@ func TestSnapshotBigStart(t *testing.T) {
 			continue
 		}
 		d := f.ref.Probe.Duration
+		type cand struct {
+			s     *snapSub
+			truth []float64
+			how   string
+		}
+		var cands []cand
+		var anchors []float64 // true times of the right pairs' lines in the scored stretch
 		for _, s := range subs {
 			last := s.spans[len(s.spans)-1].end
 			if last < 0.75*d || last > 1.1*d {
 				continue
 			}
 			truth, how := firstTruth(t, f, s.spans)
+			cands = append(cands, cand{s, truth, how})
+			for _, T := range truth {
+				if T >= p && T < p+bigScore {
+					anchors = append(anchors, T)
+				}
+			}
+		}
+		// thisEpisode: a fit that puts half of the subtitle's lines of the stretch within 0.3 s of
+		// a right pair's line is this episode's subtitle made for another cut (no fit over the whole
+		// file), not another episode's
+		thisEpisode := func(sub []span, fit syncFit) bool {
+			n, near := 0, 0
+			for _, c := range sub {
+				x := fit.mapTime(c.start)
+				if x < p || x >= p+bigScore {
+					continue
+				}
+				n++
+				if slices.ContainsFunc(anchors, func(a float64) bool { return math.Abs(a-x) <= 0.3 }) {
+					near++
+				}
+			}
+			return n > 0 && 2*near >= n
+		}
+		for _, c := range cands {
+			s, truth, how := c.s, c.truth, c.how
 			right := truth != nil
 			if !right {
 				truth = make([]float64, len(s.spans))
@@ -220,11 +255,18 @@ func TestSnapshotBigStart(t *testing.T) {
 				if !right {
 					g.others++
 					for _, st := range steps {
-						if !untimed(st.shown) {
-							g.falseAccepts++
-							t.Logf("other episode: %s accepts %s (%s) at %.0f s heard: %s", f.name[:8], s.name, mode, st.heard, segText(st.shown))
-							break
+						if untimed(st.shown) {
+							continue
 						}
+						what := "other episode"
+						if thisEpisode(s.spans, st.shown) {
+							what = "this episode, another cut"
+							g.otherCut++
+						} else {
+							g.falseAccepts++
+						}
+						t.Logf("%s: %s shows %s (%s) at %.0f s heard: %s", what, f.name[:8], s.name, mode, st.heard, segText(st.shown))
+						break
 					}
 					continue
 				}
@@ -257,7 +299,7 @@ func TestSnapshotBigStart(t *testing.T) {
 		bigAhead, bigPoll, bigScore)
 	for _, mode := range []string{"before", "pre"} {
 		g := groups[mode]
-		t.Logf("%-7s pairs %2d | cues %s | dialogue untimed: median %3.0f s, max %3.0f s | other episodes' subtitles shown: %d of %d",
-			mode, g.pairs, statsOf(g.errs), quant(g.untimed, 0.5), quant(g.untimed, 1), g.falseAccepts, g.others)
+		t.Logf("%-7s pairs %2d | cues %s | dialogue untimed: median %3.0f s, max %3.0f s | not fitting the whole file: %d, shown %d on this episode's lines, %d otherwise (false)",
+			mode, g.pairs, statsOf(g.errs), quant(g.untimed, 0.5), quant(g.untimed, 1), g.others, g.otherCut, g.falseAccepts)
 	}
 }
