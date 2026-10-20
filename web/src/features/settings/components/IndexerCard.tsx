@@ -82,6 +82,12 @@ export default function IndexerCard() {
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!settings) return;
+    // The server keeps the stored key only for the saved URL (or the compose default)
+    const norm = (v: string) => v.trim().replace(/\/+$/, '').toLowerCase();
+    if (url.trim() && !apiKey.trim() && ![settings.jackett_url, 'http://jackett:9117'].map(norm).includes(norm(url))) {
+      setStatus({ kind: 'error', text: t('settings.indexerKeyForNewUrl') });
+      return;
+    }
     setSaving(true);
     setStatus(null);
     try {

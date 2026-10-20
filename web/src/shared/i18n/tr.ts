@@ -456,6 +456,7 @@ export const tr: Messages = {
   'settings.indexerTitle': 'Dizin sağlayıcı (Jackett)',
   'settings.indexerSummary': 'Oynat düğmesinin arkasındaki torrentleri bulur.',
   'settings.indexerKeyHint': 'Jackett panelinde yazar.',
+  'settings.indexerKeyForNewUrl': 'Yeni Jackett adresi için API anahtarını gir.',
   'settings.subtitleProviders': 'Altyazı sağlayıcıları',
   'settings.subtitleProvidersSummary': 'Oynatıcının altyazı aradığı ek kaynaklar.',
   'settings.status.connected': 'Bağlı',

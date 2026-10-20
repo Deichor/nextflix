@@ -471,6 +471,7 @@ export const en = {
   'settings.indexerTitle': 'Indexer (Jackett)',
   'settings.indexerSummary': 'Finds the torrents behind the Play button.',
   'settings.indexerKeyHint': 'Shown on the Jackett dashboard.',
+  'settings.indexerKeyForNewUrl': 'Enter the API key for the new Jackett URL.',
   'settings.subtitleProviders': 'Subtitle providers',
   'settings.subtitleProvidersSummary': 'Extra sources the player searches for subtitles.',
   'settings.status.connected': 'Connected',

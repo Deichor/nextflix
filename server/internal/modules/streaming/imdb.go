@@ -150,7 +150,7 @@ func (ts *TorrentSearcher) SearchIndexerIMDb(ctx context.Context, indexer, imdbI
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := jackettClient.Do(req)
 	if err != nil {
 		return nil, tsStripURL(err)
 	}
@@ -158,7 +158,7 @@ func (ts *TorrentSearcher) SearchIndexerIMDb(ctx context.Context, indexer, imdbI
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("jackett torznab returned status %d", resp.StatusCode)
 	}
-	return tsParseTorznab(resp.Body, imdbID)
+	return tsParseTorznab(io.LimitReader(resp.Body, jackettMaxBody), imdbID)
 }
 
 // tsParseTorznab reads a torznab feed of an IMDb id search. Items that name another IMDb id

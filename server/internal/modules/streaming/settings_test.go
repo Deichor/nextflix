@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -181,5 +182,82 @@ func TestPutRefusesAPublicJackettURL(t *testing.T) {
 	}
 	if st, err := s.UpdateSettings(SettingsInput{JackettURL: &local}); err != nil || st.JackettURL != "http://jackett:9117" {
 		t.Fatalf("default URL: %+v %v", st, err)
+	}
+}
+
+// Resolve's Jackett requests follow no redirect, so the key cannot be bounced to another host.
+func TestJackettSearchFollowsNoRedirect(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"Results":[{}]}`))
+	}))
+	defer target.Close()
+	bounce := httptest.NewServer(http.RedirectHandler(target.URL+"/x", http.StatusFound))
+	defer bounce.Close()
+
+	ts := NewTorrentSearcher(bounce.URL, "k", 0)
+	ctx := t.Context()
+	if _, err := ts.SearchJackettRaw(ctx, "q"); err == nil {
+		t.Error("SearchJackettRaw followed the redirect")
+	}
+	if _, err := ts.SearchIndexer(ctx, "all", "q"); err == nil {
+		t.Error("SearchIndexer followed the redirect")
+	}
+	if _, err := ts.Indexers(ctx); err == nil {
+		t.Error("Indexers followed the redirect")
+	}
+	if _, err := ts.SearchIndexerIMDb(ctx, "all", "tt0133093"); err == nil {
+		t.Error("SearchIndexerIMDb followed the redirect")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("redirect target got %d requests", hits)
+	}
+}
+
+// A new Jackett URL is saved only with its own key: resolve sends the stored key to the saved URL.
+func TestPutNewJackettURLNeedsItsKey(t *testing.T) {
+	db := memDB(t)
+	if err := db.Create(&IndexerSettings{JackettURL: "http://jackett:9117", JackettAPIKey: "s3cret-key", MinSeeders: 10}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(db, Config{JackettURL: "http://10.0.0.9:9117", JackettAPIKey: "env-key"})
+	stored := func() IndexerSettings {
+		t.Helper()
+		st, err := loadSettings(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *st
+	}
+	other := "http://192.168.1.50:9117"
+	for _, k := range []optString{{}, {Value: " "}, {Null: true}} {
+		var serr SettingsError
+		if _, err := s.UpdateSettings(SettingsInput{JackettURL: &other, JackettAPIKey: k}); !errors.As(err, &serr) {
+			t.Fatalf("new URL with key %+v: %v", k, err)
+		}
+		if st := stored(); st.JackettURL != "http://jackett:9117" || st.JackettAPIKey != "s3cret-key" {
+			t.Fatalf("refused update changed the row: %+v", st)
+		}
+	}
+	// The same URL, the env URL, the compose default and no URL keep the stored key
+	for _, u := range []string{"HTTP://Jackett:9117/", "http://10.0.0.9:9117", "http://jackett:9117", ""} {
+		if _, err := s.UpdateSettings(SettingsInput{JackettURL: &u}); err != nil {
+			t.Fatalf("%q: %v", u, err)
+		}
+		if st := stored(); st.JackettAPIKey != "s3cret-key" {
+			t.Fatalf("%q: key %q", u, st.JackettAPIKey)
+		}
+	}
+	if _, err := s.UpdateSettings(SettingsInput{JackettURL: &other, JackettAPIKey: optString{Value: "own-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := stored(); st.JackettURL != other || st.JackettAPIKey != "own-key" {
+		t.Fatalf("new URL with its key: %+v", st)
 	}
 }
