@@ -3,30 +3,30 @@ import RowsScreen from '../components/RowsScreen';
 import type { RowDef } from '../components/Row';
 import { langScoped } from '../lib/http';
 import { useT } from '../lib/i18n';
+import { allRowsLoaded, loadRows } from '../lib/rowLoad';
 import { useQuery } from '../lib/useQuery';
 import { useEntry } from '../nav/router';
-import { discoverMovies, homeFeedsCached, popularMovies, unique, type Title } from '../lib/catalog';
+import { discoverMovies, homeFeedsCached, popularMovies, unique } from '../lib/catalog';
 import { pickFeatured } from './HomeScreen';
 
-async function loadMovieRows() {
+function loadMovieRows() {
   const year = new Date().getFullYear();
-  const [popular, acclaimed, recent, action, comedy, scifi, horror] = await Promise.all([
-    popularMovies().catch(() => [] as Title[]),
-    discoverMovies({ sort_by: 'vote_average.desc', 'vote_count.gte': '3000' }).catch(() => [] as Title[]),
-    discoverMovies({ 'primary_release_date.gte': `${year - 1}-01-01`, 'vote_count.gte': '100' }).catch(() => [] as Title[]),
-    discoverMovies({ with_genres: '28|12', 'vote_count.gte': '300' }).catch(() => [] as Title[]),
-    discoverMovies({ with_genres: '35', 'vote_count.gte': '300' }).catch(() => [] as Title[]),
-    discoverMovies({ with_genres: '878|14', 'vote_count.gte': '300' }).catch(() => [] as Title[]),
-    discoverMovies({ with_genres: '27', 'vote_count.gte': '200' }).catch(() => [] as Title[]),
-  ]);
-  return { popular, acclaimed, recent, action, comedy, scifi, horror };
+  return loadRows({
+    popular: popularMovies(),
+    acclaimed: discoverMovies({ sort_by: 'vote_average.desc', 'vote_count.gte': '3000' }),
+    recent: discoverMovies({ 'primary_release_date.gte': `${year - 1}-01-01`, 'vote_count.gte': '100' }),
+    action: discoverMovies({ with_genres: '28|12', 'vote_count.gte': '300' }),
+    comedy: discoverMovies({ with_genres: '35', 'vote_count.gte': '300' }),
+    scifi: discoverMovies({ with_genres: '878|14', 'vote_count.gte': '300' }),
+    horror: discoverMovies({ with_genres: '27', 'vote_count.gte': '200' }),
+  });
 }
 
 export default function MoviesScreen() {
   const t = useT();
   const entry = useEntry();
   const feeds = useQuery(langScoped('feeds'), homeFeedsCached);
-  const more = useQuery(langScoped('movie-rows'), loadMovieRows);
+  const more = useQuery(langScoped('movie-rows'), loadMovieRows, undefined, 0, { keep: allRowsLoaded });
 
   const featured = useMemo(() => {
     if (!feeds.data) return null;
@@ -37,7 +37,7 @@ export default function MoviesScreen() {
 
   const rows = useMemo<RowDef[]>(() => {
     const f = feeds.data;
-    const m = more.data;
+    const m = more.data?.rows;
     const pending = (q: { failed: boolean }) => (q.failed ? [] : undefined);
     return [
       { id: 'top10', title: t('home.top10Movies'), variant: 'rank', items: f ? f.trendingMovies.slice(0, 10).map((x, i) => ({ ...x, rank: i + 1 })) : pending(feeds) },
