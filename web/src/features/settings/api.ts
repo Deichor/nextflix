@@ -99,6 +99,10 @@ export interface AITranslateSettings {
   languages: AILanguage[];
   model: string;
   usage: { month: string; lines: number; input_tokens: number; output_tokens: number; cost_usd: number };
+  /** The key or account error that pauses the translation (kind: credit, key, rejected, no_key) */
+  error?: string;
+  error_kind?: string;
+  error_at?: string;
 }
 
 // Empty strings keep the stored value, null clears it.

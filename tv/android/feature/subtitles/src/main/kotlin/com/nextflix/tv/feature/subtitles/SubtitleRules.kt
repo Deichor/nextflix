@@ -87,17 +87,28 @@ object SubtitleRules {
         return sorted.map { it.value }.filter { seen.add(Languages.norm(it.language).ifEmpty { it.language }) }
     }
 
-    enum class CueAnswer { Show, Fallback, Retry }
+    enum class CueAnswer { Show, Fallback, Retry, Stop, AiOff }
 
     /**
      * An answer of a subtitle file. Empty: another subtitle only when this one never answered (a quota or broken
-     * file); one that already answered asks again (a network error or 5xx while polling). [loads]: earlier answers.
+     * file); one that already answered asks again after a network error, 5xx or 429 while polling ([retryWaitMs]) and
+     * stops after another 4xx. [ai]: the AI translation cannot be used now (502 `ai: true`): another subtitle like
+     * after a quota, else the same one after AI_OFF_RETRY_MS. [loads]: earlier answers.
      */
-    fun cueAnswer(cues: Int, partial: Boolean, loads: Int): CueAnswer = when {
+    fun cueAnswer(cues: Int, partial: Boolean, loads: Int, status: Int = 200, ai: Boolean = false): CueAnswer = when {
         cues > 0 || partial -> CueAnswer.Show
+        ai -> CueAnswer.AiOff
         loads == 0 -> CueAnswer.Fallback
+        status in 400..499 && status != 429 -> CueAnswer.Stop
         else -> CueAnswer.Retry
     }
+
+    /** Wait before a [CueAnswer.Retry]: errors back off ([retryMs], [n]: errors in a row), an empty answer waits a live poll. */
+    fun retryWaitMs(failed: Boolean, status: Int, n: Int): Long =
+        if (failed || status == 429) retryMs(n) else SubtitleRepository.LIVE_CUES_POLL_MS
+
+    /** An unusable AI translation is asked again this late. */
+    const val AI_OFF_RETRY_MS = 5 * 60 * 1000L
 
     /** Wait before asking a file again after its n-th server or network error in a row: 5 s doubling up to 5 min. */
     fun retryMs(n: Int): Long = minOf(5 * 60 * 1000L, 5000L shl (n - 1).coerceIn(0, 20))

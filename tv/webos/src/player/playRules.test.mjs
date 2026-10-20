@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  AI_CUES_POLL_MS, LIVE_CUES_POLL_MS, PENDING_CUES_POLL_MS, PENDING_FAST_FOR_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs,
-  finalCues, handoverPlan, keepsLowerCap, openStart, progressToSave, subtitleRetryMs,
+  AI_CUES_POLL_MS, AI_OFF_RETRY_MS, LIVE_CUES_POLL_MS, PENDING_CUES_POLL_MS, PENDING_FAST_FOR_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs,
+  cueTranslating, finalCues, handoverPlan, keepsLowerCap, openStart, progressToSave, subtitleRetryMs,
 } from './playRules.ts';
 import { healthStarving } from './startBuffer.ts';
 
@@ -82,6 +82,26 @@ test('cueAnswer: an empty first answer tries another subtitle', () => {
 test('cueAnswer: an empty answer while a live track is polled (network error, 5xx) asks again', () => {
   assert.equal(cueAnswer(0, false, 1), 'retry');
   assert.equal(cueAnswer(0, false, 7), 'retry');
+});
+
+test('cueAnswer: a translating AI answer followed by a 502 ai:true ends the note and stops the 15 s poll', () => {
+  // The engine's sequence: loads counts the answers that got through
+  let loads = 0;
+  const first = cueAnswer(5, true, loads);
+  assert.equal(first, 'show');
+  assert.equal(cueTranslating(first, true), true);
+  loads++;
+  const off = cueAnswer(0, false, loads, 'ai');
+  assert.equal(off, 'ai-off');
+  assert.equal(cueTranslating(off, false), false);
+  assert.ok(AI_OFF_RETRY_MS >= 5 * 60 * 1000);
+  // Before any answer too, and whatever note an empty answer carries
+  assert.equal(cueAnswer(0, false, 0, 'ai'), 'ai-off');
+  // A plain 5xx while polling still asks again, but the note goes
+  const retry = cueAnswer(0, false, loads, 'error');
+  assert.equal(retry, 'retry');
+  assert.equal(cueTranslating(retry, true), false);
+  assert.equal(cueTranslating(cueAnswer(0, false, 0), true), false);
 });
 
 test('canSeek: only an opened source', () => {

@@ -120,6 +120,7 @@ class SubtitleController internal constructor(
     // Everything of the playing file: list, retries, late checks, cue polling
     private var session: Job? = null
     private var cueJob: Job? = null
+    private var aiNoticeJob: Job? = null
     private var list: List<SubtitleTrack> = emptyList()
     private var picked = false
     private var decided = false
@@ -393,9 +394,30 @@ class SubtitleController internal constructor(
         while (true) {
             val f = backend.cues(id, position)
             if (_state.value.selectedId != id) return
-            when (SubtitleRules.cueAnswer(f.cues.size, f.partial, loads)) {
+            val answer = SubtitleRules.cueAnswer(f.cues.size, f.partial, loads, f.status, f.ai)
+            // Only a shown answer can say its lines are still being translated
+            if (answer != SubtitleRules.CueAnswer.Show && _state.value.translating) _state.update { it.copy(translating = false) }
+            when (answer) {
                 SubtitleRules.CueAnswer.Retry -> {
-                    delay(SubtitleRepository.LIVE_CUES_POLL_MS)
+                    delay(SubtitleRules.retryWaitMs(f.failed, f.status, ++errors))
+                    continue
+                }
+                // 404 and the like after earlier answers: the cues shown stay, nothing more comes
+                SubtitleRules.CueAnswer.Stop -> return
+                SubtitleRules.CueAnswer.AiOff -> {
+                    // The AI translation cannot be used now (no credit, a bad key): another subtitle like after a quota,
+                    // else this one again much later
+                    failed.add(id)
+                    val alt = SubtitleRules.fallback(_state.value.tracks, id, failed)
+                    if (errors++ == 0) {
+                        noteAiUnavailable()
+                        if (alt == null) noteNone("ai-unavailable", mapOf("id" to SubsLog.idHash(id)))
+                    }
+                    if (alt != null) {
+                        apply(alt, SubsLog.Why.Fallback)
+                        return
+                    }
+                    delay(SubtitleRules.AI_OFF_RETRY_MS)
                     continue
                 }
                 SubtitleRules.CueAnswer.Fallback -> {
@@ -443,6 +465,16 @@ class SubtitleController internal constructor(
         }
     }
 
+    /** A short toast: the selected AI translation cannot be used now. */
+    private fun noteAiUnavailable() {
+        _state.update { it.copy(aiUnavailable = true) }
+        aiNoticeJob?.cancel()
+        aiNoticeJob = launchInSession {
+            delay(AI_NOTICE_MS)
+            _state.update { it.copy(aiUnavailable = false) }
+        }
+    }
+
     // ---- log ----
 
     private fun note(event: String, fields: Map<String, Any>) {
@@ -474,5 +506,7 @@ class SubtitleController internal constructor(
 
     private companion object {
         const val DELAY_SAVE_MS = 500L
+        /** as long as the player's toasts */
+        const val AI_NOTICE_MS = 4000L
     }
 }

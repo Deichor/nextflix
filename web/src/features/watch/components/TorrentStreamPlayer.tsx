@@ -2380,7 +2380,9 @@ function PlayerCore({
     const current = subIdRef.current === id;
     // Say whether another source took over; without one, which language is missing and when the quota resets
     const key: MessageKey = next ? 'player.subQuotaSwitched' : 'player.subQuotaNoOther';
-    if (why === 'quota' && current && quotaNoticeRef.current !== key) {
+    if (why === 'ai' && current) {
+      setSubNotice({ key: 'player.aiUnavailable' });
+    } else if (why === 'quota' && current && quotaNoticeRef.current !== key) {
       quotaNoticeRef.current = key;
       const loc = localeRef.current;
       const lang = (subsRef.current || []).find(s => s.id === id)?.language || '';
@@ -2428,17 +2430,21 @@ function PlayerCore({
       const answered = subShownRef.current?.id === subId;
       fetchSubtitleFile(subId, filePosRef.current, answered).then(f => {
         if (cancelled) return;
-        if (answered && (f.failed || (f.cues.length === 0 && !f.partial))) {
+        // Only an answer with cues (or a partial one) can say the lines are still being translated
+        const empty = !!f.failed || (f.cues.length === 0 && !f.partial);
+        if (empty) setAiTranslating(false);
+        if (answered && empty && f.failed !== 'ai') {
           timer = setTimeout(() => load(), LIVE_CUES_POLL_MS);
           return;
         }
         if (f.failed) {
           setCues([]);
           // Another subtitle takes over when there is one (this effect then ends); a server or network
-          // error is asked again after its short wait (5 s, doubling) instead of failing for minutes
+          // error is asked again after its short wait (5 s, doubling) instead of failing for minutes, an
+          // unusable AI translation after FAILED_FILE_MS
           if (errors++ === 0) subtitleFailed(subId, f.failed);
           const at = subtitleRetryAt(subId);
-          if (f.failed === 'error' && at) timer = setTimeout(() => load(), Math.max(1000, at - Date.now()));
+          if ((f.failed === 'error' || f.failed === 'ai') && at) timer = setTimeout(() => load(), Math.max(1000, at - Date.now()));
           return;
         }
         if (errors > 0 && failedSubsRef.current.has(subId)) {

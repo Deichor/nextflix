@@ -23,8 +23,8 @@ import { DEFAULT_LEAD_S, LEAD_SAMPLE_MS, addSample, leadOf, leadSample, loadSamp
 import { isWebOS } from '../lib/webos';
 import { checkNet, type NetState } from '../lib/netStatus';
 import {
-  LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs, handoverPlan, keepsLowerCap, lowerCap, openStart, progressToSave,
-  subtitleRetryMs,
+  AI_OFF_RETRY_MS, LIVE_CUES_POLL_MS, PROVISIONAL_CUES_POLL_MS, canSeek, cueAnswer, cuePollMs, cueTranslating, handoverPlan, keepsLowerCap,
+  lowerCap, openStart, progressToSave, subtitleRetryMs,
 } from './playRules';
 import {
   DELAY_SETTLE_MS, DelayLog, idHash, logToken, noneFields, subsChange, subsFields, type SubsFields, type SubsShown, type SubsWhy,
@@ -1821,7 +1821,21 @@ export class PlayerEngine {
     // and a subtitle the server still times to the file alike; then every minute while its timing is not final
     const load = () => fetchCueFile(id, this.positionNow()).then(f => {
       if (this.stale(session) || this.state.subId !== id) return;
-      const answer = cueAnswer(f.cues.length, f.partial, loads);
+      const answer = cueAnswer(f.cues.length, f.partial, loads, f.failed);
+      const translating = cueTranslating(answer, f.translating);
+      if (translating !== this.state.aiTranslating) this.set({ aiTranslating: translating });
+      if (answer === 'ai-off') {
+        // The AI translation cannot be used now (no credit, a bad key): another subtitle like after a quota,
+        // else this one again much later
+        const alt = this.subtitleFallback(id);
+        if (errors++ === 0) {
+          this.toast('player.aiUnavailable');
+          if (!alt) this.noteSubsNone('ai-unavailable', { id: idHash(id) });
+        }
+        if (alt) this.applySubtitle(alt, 'fallback');
+        else this.cueTimer = setTimeout(load, AI_OFF_RETRY_MS);
+        return;
+      }
       if (answer === 'retry') {
         this.cueTimer = setTimeout(load, LIVE_CUES_POLL_MS);
         return;
@@ -1852,7 +1866,6 @@ export class PlayerEngine {
         loggedAt = Date.now();
       }
       // The overlay looks the cue up again in the new list; the delay stays
-      if (!!f.translating !== this.state.aiTranslating) this.set({ aiTranslating: !!f.translating });
       if (f.cues.length > 0 || !f.partial) this.set({ cues: f.cues });
       const wait = cuePollMs(f, Date.now() - shownAt);
       if (wait !== null) this.cueTimer = setTimeout(f.partial ? load : whilePlaying, wait);

@@ -66,9 +66,11 @@ class SubtitleRepository(private val core: Core) {
         val file = try {
             val res = core.api.raw("GET", "/api/subtitles/file", mapOf("id" to id, "t" to t))
             // Read and closed off the main thread (closing an unread body may touch the socket), even when cancelled
-            val (code, text) = withContext(NonCancellable + Dispatchers.IO) {
-                res.use { it.code to if (it.isSuccessful) it.body.string() else "" }
+            val (code, body) = withContext(NonCancellable + Dispatchers.IO) {
+                res.use { it.code to it.body.string() }
             }
+            val ok = code in 200..299
+            val text = if (ok) body else ""
             val cues = if (text.isEmpty()) emptyList() else withContext(Dispatchers.Default) { Vtt.parse(text) }
             CueFile(
                 cues = cues,
@@ -77,6 +79,7 @@ class SubtitleRepository(private val core: Core) {
                 translating = Vtt.AI_NOTE in text,
                 failed = code >= 500,
                 status = code,
+                ai = !ok && AI_ERROR.containsMatchIn(body),
                 holes = res.header("X-Subtitle-Holes").orEmpty(),
             )
         } catch (e: CancellationException) {
@@ -125,5 +128,8 @@ class SubtitleRepository(private val core: Core) {
         const val SUBALT_RETRY_MAX = 4
 
         private const val CUE_CACHE_MAX = 5
+
+        /** `ai: true` in an error answer: the AI translation cannot be used now */
+        private val AI_ERROR = Regex("\"ai\"\\s*:\\s*true")
     }
 }
