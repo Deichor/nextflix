@@ -71,7 +71,7 @@ func tsStoredCapsMiss(r *tsResolveResult, q tsResolveQuery) string {
 
 // cachedProbe is the probe of a file when its header was read (nil otherwise).
 func (s *Service) cachedProbe(hash string, index int) *tsProbe {
-	if v, ok := s.probeCache.Load(fmt.Sprintf("%s:%d", hash, index)); ok {
+	if v, ok := s.probeCache.Load(s.probeKey(hash, index)); ok {
 		return v.(*tsProbe)
 	}
 	return nil

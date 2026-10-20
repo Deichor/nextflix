@@ -59,13 +59,27 @@ type thumbKey struct {
 	hash     string
 	index, t int
 	w        int
+	tb       bool // index is the file's place in TorBox's list, not TorrServer's file id (probeKey)
 }
 
-func (k thumbKey) id() string { return fmt.Sprintf("%s:%d:%d:%d", k.hash, k.index, k.t, k.w) }
+func (k thumbKey) kind() string {
+	if k.tb {
+		return "tb"
+	}
+	return "ts"
+}
+
+func (k thumbKey) id() string {
+	return fmt.Sprintf("%s:%s%d:%d:%d", k.hash, k.kind(), k.index, k.t, k.w)
+}
 
 func (k thumbKey) path(dir string) string {
-	return filepath.Join(dir, k.hash, strconv.Itoa(k.index), fmt.Sprintf("%d_%d.jpg", k.t, k.w))
+	return filepath.Join(dir, k.hash, k.kind()+strconv.Itoa(k.index), fmt.Sprintf("%d_%d.jpg", k.t, k.w))
 }
+
+// etag names the frame with the numbering its index uses: the same URL can be another
+// episode's file once a torrent falls back from TorBox to its swarm.
+func (k thumbKey) etag() string { return fmt.Sprintf(`"%s-%d-%d"`, k.kind(), k.t, k.w) }
 
 type thumbJob struct {
 	done     chan struct{}
@@ -251,10 +265,15 @@ func (th *thumbs) get(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "t is past the end of the file"})
 		return
 	}
-	k := thumbKey{hash: hash, index: index, t: thumbGridT(t), w: w}
+	k := thumbKey{hash: hash, index: index, t: thumbGridT(t), w: w, tb: th.s.debrid.listIndexed(hash, index)}
 	c.Header("X-Thumb-T", strconv.Itoa(k.t))
+	if c.GetHeader("If-None-Match") == k.etag() && th.hasCached(k) {
+		th.cacheHeaders(c, k)
+		c.Status(http.StatusNotModified)
+		return
+	}
 	if img, ok := th.cached(k); ok {
-		th.serve(c, img, "HIT")
+		th.serve(c, k, img, "HIT")
 		return
 	}
 	if th.failedRecently(k) {
@@ -273,7 +292,7 @@ func (th *thumbs) get(c *gin.Context) {
 	img, err := th.frame(c.Request.Context(), k, false, th.wait)
 	switch {
 	case err == nil:
-		th.serve(c, img, "MISS")
+		th.serve(c, k, img, "MISS")
 	case c.Request.Context().Err() != nil:
 		c.Status(499) // the viewer moved on
 	case errors.Is(err, errThumbSlow) || errors.Is(err, context.DeadlineExceeded):
@@ -289,8 +308,15 @@ func (th *thumbs) get(c *gin.Context) {
 	}
 }
 
-func (th *thumbs) serve(c *gin.Context, img []byte, cache string) {
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+// cacheHeaders: browsers keep a frame but ask again (304 while it is the same): the URL names
+// the file by hash and index only, and what index means can change (etag).
+func (th *thumbs) cacheHeaders(c *gin.Context, k thumbKey) {
+	c.Header("Cache-Control", "no-cache")
+	c.Header("ETag", k.etag())
+}
+
+func (th *thumbs) serve(c *gin.Context, k thumbKey, img []byte, cache string) {
+	th.cacheHeaders(c, k)
 	c.Header("X-Cache", cache)
 	c.Data(http.StatusOK, "image/jpeg", img)
 }
@@ -313,6 +339,7 @@ func (th *thumbs) prefetch(c *gin.Context) {
 		return
 	}
 	dur := th.knownDuration(hash, index)
+	tb := th.s.debrid.listIndexed(hash, index)
 	var keys []thumbKey
 	seen := map[int]bool{}
 	for _, p := range parts {
@@ -327,7 +354,7 @@ func (th *thumbs) prefetch(c *gin.Context) {
 		g := thumbGridT(t)
 		if !seen[g] {
 			seen[g] = true
-			keys = append(keys, thumbKey{hash: hash, index: index, t: g, w: w})
+			keys = append(keys, thumbKey{hash: hash, index: index, t: g, w: w, tb: tb})
 		}
 	}
 	if why := th.s.thumbGate(hash, true); why != "" {
@@ -349,7 +376,7 @@ func (th *thumbs) prefetch(c *gin.Context) {
 
 // knownDuration is the file length from a cached probe (0 = unknown; never probes).
 func (th *thumbs) knownDuration(hash string, index int) float64 {
-	if p, ok := th.s.probeCache.Load(fmt.Sprintf("%s:%d", hash, index)); ok {
+	if p, ok := th.s.probeCache.Load(th.s.probeKey(hash, index)); ok {
 		return p.(*tsProbe).duration()
 	}
 	return 0
@@ -492,7 +519,7 @@ func (th *thumbs) slots(ctx context.Context, hash string) (func(), error) {
 // videoInfo reads the HDR transfer and whether the container has an index from the probe
 // (cached by the player; otherwise a short probe, and without one the frame is made anyway).
 func (th *thumbs) videoInfo(ctx context.Context, k thumbKey) (tonemap string, small bool) {
-	p, ok := th.s.probeCache.Load(fmt.Sprintf("%s:%d", k.hash, k.index))
+	p, ok := th.s.probeCache.Load(th.s.probeKey(k.hash, k.index))
 	if !ok {
 		pr, err := th.s.probeFileTimeout(ctx, k.hash, k.index, 3*time.Second)
 		if err != nil {
@@ -567,7 +594,7 @@ func (th *thumbs) failedRecently(k thumbKey) bool {
 	return ok
 }
 
-// ---- Disk cache: <dir>/<hash>/<index>/<t>_<w>.jpg, least recently used files go first ----
+// ---- Disk cache: <dir>/<hash>/<ts|tb><index>/<t>_<w>.jpg, least recently used files go first ----
 
 func (th *thumbs) hasCached(k thumbKey) bool {
 	_, err := os.Stat(k.path(th.dir))

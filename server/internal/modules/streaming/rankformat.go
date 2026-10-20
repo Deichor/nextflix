@@ -227,7 +227,7 @@ func tsLogRanking(q tsResolveQuery, cands []tsCandidate) {
 // without ?dv=1, Hi10P / 4:4:4 video) is marked unfit, so tsChoose takes it only when nothing
 // else is left. True when the format changed the rank.
 func (s *Service) applyProbedFormat(r *tsResolveResult, c tsCandidate, q tsResolveQuery) bool {
-	v, ok := s.probeCache.Load(fmt.Sprintf("%s:%d", r.Hash, r.Index))
+	v, ok := s.probeCache.Load(s.probeKey(r.Hash, r.Index))
 	if !ok {
 		return false
 	}

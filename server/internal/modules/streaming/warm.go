@@ -62,7 +62,8 @@ type tsWarm struct {
 	hashes    map[string]bool // torrents added for this title and not dropped yet
 	source    string          // the picked / cached source
 	health    *tsHealth       // measured health of source (nil = unknown)
-	healthAt  time.Time       // when health was taken over (useSource)
+	healthAt  time.Time       // when health was measured (zero = unknown, e.g. a cached TorBox health)
+	healthCDN bool            // health was read from TorBox's CDN, not the swarm (sourceRate)
 	spares    map[string]*tsSpare
 	holdUntil time.Time
 	releaseAt time.Time // pending delayed release (zero = none)
@@ -145,14 +146,20 @@ func (s *Service) setSource(w *tsWarm, hash string) string {
 	return prev
 }
 
-// useSource is setSource with the source's measured health (compared by sidegrades).
+// useSource is setSource with the source's health, measured just now (compared by sidegrades).
 func (s *Service) useSource(w *tsWarm, r *tsResolveResult) string {
+	return s.useSourceAt(w, r, time.Now())
+}
+
+// useSourceAt is useSource with a health measured at at (zero = unknown: tsSideTrust never
+// applies to it).
+func (s *Service) useSourceAt(w *tsWarm, r *tsResolveResult, at time.Time) string {
 	prev := s.setSource(w, r.Hash)
 	if w != nil && r.Health != nil {
 		s.warmMu.Lock()
 		if w.source == r.Hash {
 			h := *r.Health
-			w.health, w.healthAt = &h, time.Now()
+			w.health, w.healthAt, w.healthCDN = &h, at, r.Debrid
 		}
 		s.warmMu.Unlock()
 	}
@@ -261,13 +268,20 @@ func tsFaster(r, cur *tsHealth) bool {
 // only once it is tsSideTrust old (the source may have slowed down since): a paused or
 // autoplay-blocked player drains too, and a switch restarts it on another encode whose
 // subtitle timing may not fit (The Mentalist S03E03 on an iPhone: a TorBox file at x3.05 was
-// left for one at x9.34 27 s after the pick).
+// left for one at x9.34 27 s after the pick). A health from before its verdict (a pick
+// answered at the cap) starves only below its need; otherwise only a draining poll leaves it.
 func tsSideWhy(cur *tsHealth, age time.Duration, opt tsSideOpts) string {
 	switch {
 	case cur == nil:
 		return "current not measured"
 	case cur.Dead:
 		return "current dead"
+	case cur.partial && cur.below(1):
+		return fmt.Sprintf("current starving at x%.2f before its verdict", cur.ratio())
+	case cur.partial && (opt.draining || opt.critical):
+		return fmt.Sprintf("current at x%.2f before its verdict, the player drains", cur.ratio())
+	case cur.partial:
+		return ""
 	case !cur.KeepsUp:
 		return fmt.Sprintf("current starving at x%.2f", cur.ratio())
 	case (opt.draining || opt.critical) && age >= tsSideTrust:
@@ -278,12 +292,16 @@ func tsSideWhy(cur *tsHealth, age time.Duration, opt tsSideOpts) string {
 
 // tsSidegradeWorthy: a measured spare of a fitting length that keeps up and, when the
 // playing source's last measurement (cur) kept up too, delivers tsClearlyFaster times its
-// rate / need. Against an unmeasured, starving or dead source keeping up is enough. A spare
+// rate / need. Against an unmeasured, starving or dead source keeping up is enough; against
+// one without its verdict yet the spare must at least be faster than it was so far. A spare
 // that does not keep up is never offered: a switch restarts or reloads the player.
 // Whether the source may be left at all is tsSideWhy's call.
 func tsSidegradeWorthy(r *tsResolveResult, cur *tsHealth) bool {
 	if r.Health == nil || !r.Health.KeepsUp || r.Health.Dead || !r.durationOK() {
 		return false
+	}
+	if cur != nil && cur.partial && !cur.Dead {
+		return r.Health.ratio() > cur.ratio()
 	}
 	return cur == nil || !cur.KeepsUp || cur.Dead || r.Health.ratio() >= tsClearlyFaster*cur.ratio()
 }
@@ -616,8 +634,25 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 	if opt.draining {
 		w.drainAt = now
 	}
+	// Spares the player found slow go whatever this poll answers
+	avoid := map[string]bool{}
+	for _, h := range q.avoid {
+		avoid[h] = true
+	}
+	var avoided []string
+	for h := range w.spares {
+		if avoid[h] {
+			avoided = append(avoided, h)
+		}
+	}
+	dropAvoided := func() {
+		for _, h := range avoided {
+			s.dropFrom(w, h)
+		}
+	}
 	if now.Sub(w.sideAt) < tsSidegradeEvery {
 		s.warmMu.Unlock()
+		dropAvoided()
 		return nil
 	}
 	var cur *tsHealth // the playing source's measured health
@@ -631,27 +666,30 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 		if logNo {
 			w.heldAt = now
 		}
+		healthAt := w.healthAt
 		s.warmMu.Unlock()
+		dropAvoided()
 		if logNo {
-			log.Printf("warm: no sidegrade from %s: it kept up at x%.2f %s ago (%s)", tsShortHash(current), cur.ratio(),
-				age.Round(time.Second), opt)
+			when := age.Round(time.Second).String() + " ago"
+			if healthAt.IsZero() {
+				when = "at an unknown time"
+			}
+			verdict := fmt.Sprintf("kept up at x%.2f", cur.ratio())
+			if cur.partial {
+				verdict = fmt.Sprintf("delivered x%.2f before its verdict", cur.ratio())
+			}
+			log.Printf("warm: no sidegrade from %s: it %s %s (%s)", tsShortHash(current), verdict, when, opt)
 		}
 		return nil
 	}
 	// Lower resolutions only for a starving source (or a nearly empty buffer), and only
-	// when they keep up
-	lowerOK := opt.critical || (cur != nil && !cur.KeepsUp)
-	avoid := map[string]bool{}
-	for _, h := range q.avoid {
-		avoid[h] = true
-	}
+	// when they keep up; a health without its verdict does not count as starving here
+	lowerOK := opt.critical || (cur != nil && !cur.KeepsUp && (!cur.partial || cur.Dead))
 	var best *tsResolveResult
 	var stale []tsResolveResult
-	var avoided []string
 	for h, sp := range w.spares {
 		r := sp.res
 		if avoid[h] {
-			avoided = append(avoided, h) // the player found it slow
 			continue
 		}
 		lower := tsQualityHeight(r.Quality) < curQ
@@ -692,7 +730,7 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 		held = "a player resolves the title"
 	case played <= 0:
 		held = "its stream has sent nothing yet"
-	case played < tsSideSearchAfter && (cur == nil || cur.ratio() >= tsRescueRatio):
+	case played < tsSideSearchAfter && !cur.below(tsRescueRatio):
 		held = "its stream has not played a minute yet"
 	}
 	if search = search && held == ""; search {
@@ -706,9 +744,7 @@ func (s *Service) sidegradeFor(key string, q tsResolveQuery, current string, cur
 	if logHeld {
 		log.Printf("warm: deferring the sidegrade search of %s: %s", key, held)
 	}
-	for _, h := range avoided {
-		s.dropFrom(w, h)
-	}
+	dropAvoided()
 	if best != nil {
 		log.Printf("warm: sidegrade from %s to %q (%s, %s): %s", tsShortHash(current), best.TorrentTitle, why, opt, best.Health)
 		s.storeSource(key, *best) // the next play starts with it, too

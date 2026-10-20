@@ -1,7 +1,6 @@
 package streaming
 
 import (
-	"fmt"
 	"path"
 	"sort"
 	"strings"
@@ -243,7 +242,7 @@ func tsHasLang(langs []string, lang string) bool {
 // the rank moved.
 func (s *Service) applyProbedSubs(r *tsResolveResult, c tsCandidate, q tsResolveQuery, files []tsFileStat, file tsFileStat) bool {
 	langs := tsTorrentSubLangs(files, file)
-	v, probed := s.probeCache.Load(fmt.Sprintf("%s:%d", r.Hash, r.Index))
+	v, probed := s.probeCache.Load(s.probeKey(r.Hash, r.Index))
 	if probed {
 		for _, l := range tsProbedSubLangs(v.(*tsProbe)) {
 			langs = tsAddLang(langs, l)

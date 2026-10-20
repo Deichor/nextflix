@@ -232,7 +232,7 @@ func (s *Service) applyProbedLanguage(r *tsResolveResult, q tsResolveQuery) bool
 	if r.unfit != "" {
 		return false
 	}
-	v, ok := s.probeCache.Load(fmt.Sprintf("%s:%d", r.Hash, r.Index))
+	v, ok := s.probeCache.Load(s.probeKey(r.Hash, r.Index))
 	if !ok {
 		return false
 	}

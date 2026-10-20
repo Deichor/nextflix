@@ -275,13 +275,14 @@ func (s *Service) RoomToRead(hash string) float64 {
 	return room
 }
 
-// sourceRate is the swarm rate measured for hash as a title's source (bytes/s, 0 = unknown).
+// sourceRate is the swarm rate measured for hash as a title's source (bytes/s, 0 = unknown). A
+// TorBox rate is not the swarm's: a file TorBox no longer serves plays from the swarm.
 func (s *Service) sourceRate(hash string) float64 {
 	s.warmMu.Lock()
 	defer s.warmMu.Unlock()
 	rate := 0.0
 	for _, w := range s.warms {
-		if strings.EqualFold(w.source, hash) && w.health != nil && !w.health.partial {
+		if strings.EqualFold(w.source, hash) && w.health != nil && !w.health.partial && !w.healthCDN {
 			rate = max(rate, float64(w.health.Rate))
 		}
 	}

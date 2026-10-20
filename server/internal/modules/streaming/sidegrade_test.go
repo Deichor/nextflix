@@ -64,6 +64,14 @@ func TestSidegradeKeepsSourceThatKeepsUp(t *testing.T) {
 		{"starving, draining", measured("cur", "1080p", 0.9, 1).Health, 0, drain, fast, true, true},
 		{"dead", &tsHealth{Need: tsMB, Dead: true}, 0, drain, fast, true, true},
 		{"not measured", nil, 0, drain, fast, true, true},
+		// A pick answered at the cap (before its verdict) at x2.00 is no starving source
+		{"before its verdict", early(2, 5*time.Second), 0, tsSideOpts{}, fast, false, false},
+		{"before its verdict, draining", early(2, 5*time.Second), 0, drain, fast, true, true},
+		{"before its verdict, draining, spare slower", early(2, 5*time.Second), 0, drain, measured(hx('b'), "1080p", 1.5, 1), false, true},
+		{"before its verdict, lower spare", early(2, 5*time.Second), 0, drain, measured(hx('b'), "720p", 5, 1), false, true},
+		{"below its need before its verdict", early(0.6, 5*time.Second), 0, tsSideOpts{}, fast, true, false},
+		{"below its need before its verdict, lower spare", early(0.6, 5*time.Second), 0, tsSideOpts{}, measured(hx('b'), "720p", 5, 1), false, false},
+		{"a second of samples", early(0.6, time.Second), 0, tsSideOpts{}, fast, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newWarmService(t)
@@ -336,5 +344,39 @@ func TestRescueEndsWhenStreamHealthy(t *testing.T) {
 	s.warmMu.Unlock()
 	if tsInBackground(s.rescueCtx(w, "spare measurement")) {
 		t.Fatal("a draining player does not count")
+	}
+}
+
+// early is a live health before its verdict: ratio x need so far, over sampled.
+func early(ratio float64, sampled time.Duration) *tsHealth {
+	h := newHealth(int64(ratio*mbps), int64(mbps), 3, 2)
+	h.partial, h.KeepsUp, h.sampled = true, false, sampled
+	return h
+}
+
+// A spare the player found slow is dropped also while the source is not left.
+func TestSidegradeDropsAvoidedSpareWhileSourceKeepsUp(t *testing.T) {
+	s, rec, key, w := drainService(t)
+	s.addSpare(w, result(hx('b'), "1080p", 5))
+	s.addSpare(w, result(hx('c'), "1080p", 5))
+	s.warmMu.Lock()
+	w.health, w.healthAt = measured(hx('a'), "1080p", 3, 1).Health, time.Now()
+	s.warmMu.Unlock()
+	q := tsResolveQuery{avoid: []string{hx('c')}}
+	if got := s.sidegradeFor(key, q, hx('a'), 1080, tsSideOpts{draining: true}); got != nil {
+		t.Fatalf("got %v, want none while the source keeps up", got)
+	}
+	if got := rec.list(); got != "c" {
+		t.Fatalf("dropped %q, want the avoided spare", got)
+	}
+}
+
+// A health of unknown age (a cached TorBox source) is never trusted as recent.
+func TestSidegradeUnknownHealthAgeGivesWayToDrain(t *testing.T) {
+	s, _, key, w := drainService(t)
+	s.addSpare(w, result(hx('b'), "1080p", 9))
+	s.useSourceAt(w, result(hx('a'), "1080p", 3), time.Time{})
+	if got := s.sidegradeFor(key, tsResolveQuery{}, hx('a'), 1080, tsSideOpts{draining: true}); got == nil || got.Hash != hx('b') {
+		t.Fatalf("got %v, want the faster spare", got)
 	}
 }
