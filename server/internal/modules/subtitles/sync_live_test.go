@@ -562,12 +562,14 @@ func TestMergeWindows(t *testing.T) {
 	w := func(start float64, kind string) refWindow {
 		return refWindow{Start: start, Kind: kind, Speech: make([]byte, liveWindowFrames)}
 	}
-	got := mergeWindows([]refWindow{w(20, "audio"), w(400, "audio"), w(130, "subs")}, []refWindow{w(0, "live"), w(120, "live"), w(180, "live")})
+	got := mergeWindows([]refWindow{w(20, "audio"), w(400, "audio"), w(130, "subs"), w(130, "subs"), w(400, "audio")},
+		[]refWindow{w(0, "live"), w(120, "live"), w(180, "live")})
 	var kinds []string
 	for _, x := range got {
 		kinds = append(kinds, x.Kind+":"+string(rune('0'+int(x.Start/60))))
 	}
-	// audio@20 loses to live@0, live@120 to subs@130, audio@400 has no live window
+	// audio@20 loses to live@0, live@120 to subs@130, audio@400 has no live window; a window
+	// read twice counts once
 	want := []string{"live:0", "subs:2", "live:3", "audio:6"}
 	if len(kinds) != len(want) {
 		t.Fatalf("%v", kinds)

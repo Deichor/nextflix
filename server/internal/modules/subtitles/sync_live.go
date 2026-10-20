@@ -939,11 +939,12 @@ func (y *syncer) kickLive(hash string, index int) {
 }
 
 // mergeWindows combines read and live windows: a window of the file's own subtitle track
-// beats a live one, a live one an audio window read for the same stretch.
+// beats a live one, a live one an audio window read for the same stretch; one window per
+// stretch (two timings that read the same extra window kept it twice: The Mentalist S03E09).
 func mergeWindows(read, live []refWindow) []refWindow {
 	var out []refWindow
 	for _, w := range read {
-		if w.Kind == "subs" {
+		if w.Kind == "subs" && !overlapsHalf(w, out) {
 			out = append(out, w)
 		}
 	}
@@ -953,9 +954,8 @@ func mergeWindows(read, live []refWindow) []refWindow {
 			out = append(out, w)
 		}
 	}
-	chosen := len(out)
 	for _, w := range read {
-		if w.Kind != "subs" && !overlapsHalf(w, out[:chosen]) {
+		if w.Kind != "subs" && !overlapsHalf(w, out) {
 			out = append(out, w)
 		}
 	}

@@ -1401,6 +1401,9 @@ func (y *syncer) addWindows(ctx context.Context, hash string, index int, starts 
 		if len(r.Windows) >= r.windowCap() {
 			break
 		}
+		if slices.ContainsFunc(r.Windows, func(w refWindow) bool { return math.Abs(w.Start-at) < syncWindowLen/2 }) {
+			continue // read meanwhile by another subtitle's timing
+		}
 		w, speech, err := y.readWindow(ctx, hash, url, r.Probe, at, r.bytesRead())
 		if err != nil {
 			if ctx.Err() != nil {
