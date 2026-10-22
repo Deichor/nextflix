@@ -166,6 +166,8 @@ export interface StreamProgress {
   position: number;
   duration: number;
   updated_at?: string;
+  /** YYYY-MM-DD: the next episode is not out yet (Continue Watching only) */
+  next_air_date?: string;
 }
 
 // Everything needed to open the player
@@ -660,7 +662,7 @@ export async function saveProgress(p: StreamProgress, opts: { keepalive?: boolea
 
 export async function getProgressList(profileId: number): Promise<StreamProgress[]> {
   try {
-    const res = await fetch(`${getApiUrl()}/api/stream-progress?profile_id=${profileId}`);
+    const res = await fetch(`${getApiUrl()}/api/stream-progress?profile_id=${profileId}&upcoming=1`);
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? data : [];

@@ -525,7 +525,11 @@ export interface StreamProgress {
   position: number;
   duration: number;
   updated_at?: string;
+  /** Set (YYYY-MM-DD) on the next episode of a show that is not out yet: nothing to play */
+  next_air_date?: string;
 }
+
+export const isUpcoming = (p: StreamProgress) => !!p.next_air_date;
 
 export const FINISHED_RATIO = 0.92;
 export const isFinished = (p: { position: number; duration: number }) => p.duration > 0 && p.position >= p.duration * FINISHED_RATIO;
@@ -545,7 +549,7 @@ export async function saveProgress(p: StreamProgress, keepalive = false): Promis
 
 /** `locale` given: for that profile rather than the active one (prefetch). */
 export async function progressList(profileId: number, locale?: Locale): Promise<StreamProgress[]> {
-  const data = await getJson<StreamProgress[]>(`/api/stream-progress?profile_id=${profileId}`, locale ? { profileId, locale } : {});
+  const data = await getJson<StreamProgress[]>(`/api/stream-progress?profile_id=${profileId}&upcoming=1`,locale ? { profileId, locale } : {});
   return Array.isArray(data) ? data : [];
 }
 

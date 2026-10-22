@@ -40,7 +40,8 @@ function store(profileId: number, list: StreamProgress[]) {
     const key = keyOf(p.media_type, p.tmdb_id);
     const old = prev?.get(key);
     const entry = old && JSON.stringify(old) === JSON.stringify(p) ? old : p;
-    if (!byKey.has(key)) byKey.set(key, entry);
+    // An episode that is not out yet has nothing to resume
+    if (!byKey.has(key) && !p.next_air_date) byKey.set(key, entry);
     return entry;
   });
   loaded.set(profileId, { list: kept, byKey, at: Date.now() });
@@ -76,7 +77,7 @@ export function getProgressFor(type: StreamMediaType, id: number, profileId = ge
 /** Drops a title from the memory list (e.g. removed from Continue Watching). */
 export function removeProgressEntry(profileId: number, type: StreamMediaType, id: number) {
   const mem = loaded.get(profileId);
-  if (!mem || !mem.byKey.has(keyOf(type, id))) return;
+  if (!mem || !mem.list.some(p => p.media_type === type && p.tmdb_id === id)) return;
   store(profileId, mem.list.filter(p => !(p.media_type === type && p.tmdb_id === id)));
 }
 

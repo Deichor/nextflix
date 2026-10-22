@@ -213,12 +213,15 @@ private suspend fun openLink(core: Core, stack: BackStack, link: AppLink) {
     }
 }
 
-/** The Continue Watching entry of the card (also the server's "next episode" entries), as a player request. */
+/**
+ * The Continue Watching entry of the card (also the server's "next episode" entries), as a player request. Null for
+ * an episode not out yet: the link then only opens the title page.
+ */
 private suspend fun resumeRequest(core: Core, link: AppLink.Open): PlayRequest? {
     fun StreamProgress.matches() = mediaType == link.type && tmdbId == link.tmdbId && season == link.season && episode == link.episode
     val entry = core.progress.continueWatching(link.profileId).firstOrNull { it.matches() }
         ?: core.progress.item(link.profileId, link.type, link.tmdbId, link.season, link.episode)
-    return entry?.toPlayRequest()
+    return entry?.takeUnless { it.isUpcoming }?.toPlayRequest()
 }
 
 private suspend fun <T> orNull(block: suspend () -> T): T? = try {

@@ -63,7 +63,7 @@ Progress:
 | Method | Path | Notes |
 |---|---|---|
 | PUT | `/api/stream-progress` | body = Progress without `id`/`updated_at` → 200 Progress. Upsert key `(profile_id, media_type, tmdb_id, season, episode)`; movies use season 0, episode 0 |
-| GET | `/api/stream-progress?profile_id=` | Continue Watching row: newest first, one entry per title, finished entries (>= 92 %) excluded; a show whose newest episode is finished shows the next aired episode instead (its saved row, or a new one with `id` 0 and position 0), max 20 |
+| GET | `/api/stream-progress?profile_id=[&upcoming=1]` | Continue Watching row: newest first, one entry per title, finished entries (>= 92 %) excluded; a show whose newest episode is finished shows the next aired episode instead (its saved row, or a new one with `id` 0 and position 0), max 20. With `upcoming=1` a show whose next episode is not out yet but airs within 30 days (TMDB episode date, or `next_episode_to_air` for a new season) stays as that episode with `next_air_date: "YYYY-MM-DD"` (not playable: clients show the date and open the title). Opt-in because older TV apps would try to play it |
 | GET | `/api/stream-progress/item?profile_id=&media_type=&tmdb_id=&season=&episode=` | 200 Progress or 404 |
 | GET | `/api/stream-progress/title?profile_id=&media_type=tv&tmdb_id=` | every entry of one title for the profile, finished ones included (per-episode progress bars) |
 | DELETE | `/api/stream-progress?profile_id=&media_type=&tmdb_id=` | 204; removes all episodes of that title |

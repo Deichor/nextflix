@@ -7,7 +7,7 @@ import type { Title } from '../lib/catalog';
 import type { StreamProgress } from '../lib/stream';
 import { useEntry, useFocusRestore, useRouter, type Tab } from '../nav/router';
 import { usePlayer } from '../nav/player';
-import { progressToRequest } from '../lib/stream';
+import { isUpcoming, progressToRequest } from '../lib/stream';
 import SideNav from './SideNav';
 import Row, { RowPlaceholder, heroOfTitle, type RowDef } from './Row';
 import { setHero, useHero, type HeroItem } from './heroStore';
@@ -141,9 +141,11 @@ export default function RowsScreen({ tab, featured, kicker, rows, ready, surpris
   const openTitle = useCallback((item: Title, autoplay = false) => {
     latest.current.router.push({ name: 'detail', id: item.id, type: item.type, autoplay });
   }, []);
-  const playProgress = useCallback((p: StreamProgress) => {
-    const { player: pl, onPlayed: done } = latest.current;
-    pl.open(progressToRequest(p), done);
+  const selectProgress = useCallback((p: StreamProgress) => {
+    const { router: r, player: pl, onPlayed: done } = latest.current;
+    // Not out yet: the show's page instead of playback
+    if (isUpcoming(p)) r.push({ name: 'detail', id: p.tmdb_id, type: p.media_type });
+    else pl.open(progressToRequest(p), done);
   }, []);
   const toHero = useCallback(() => setInRows(false), []);
 
@@ -179,7 +181,7 @@ export default function RowsScreen({ tab, featured, kicker, rows, ready, surpris
       >
         <div className="rows-content" data-scroll-content>
           {rows.map((r, i) => (i >= center - ROWS_BEFORE && i <= center + ROWS_AFTER
-            ? <Row key={r.id} row={r} index={i} onSelectTitle={openTitle} onSelectProgress={playProgress} />
+            ? <Row key={r.id} row={r} index={i} onSelectTitle={openTitle} onSelectProgress={selectProgress} />
             : <RowPlaceholder key={r.id} row={r} index={i} />
           ))}
           {surprise && <SurpriseFooter />}

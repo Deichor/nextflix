@@ -237,21 +237,32 @@ fun RankCard(title: Title, rank: Int, onClick: () -> Unit, modifier: Modifier = 
     }
 }
 
-/** Continue Watching card: backdrop, title and "S1:E2", a red progress bar. */
+/**
+ * Continue Watching card: backdrop, title and "S1:E2", a red progress bar. [upcoming] ("New episode Thursday")
+ * replaces the episode label and the bar for an episode not out yet.
+ */
 @Composable
-fun ContinueCard(progress: StreamProgress, onClick: () -> Unit, modifier: Modifier = Modifier, onFocused: () -> Unit = {}) {
+fun ContinueCard(
+    progress: StreamProgress,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    onFocused: () -> Unit = {},
+    upcoming: String? = null,
+) {
     val core = LocalCore.current
     val language = LocalAppLanguage.current
     FocusCard(onClick = onClick, modifier = modifier, onFocused = onFocused) {
         Box(Modifier.fillMaxSize()) {
             CardImage(core.imageUrl(progress.backdropPath.ifEmpty { progress.posterPath }, TmdbImages.W500), Modifier.fillMaxSize())
-            val label = Formats.episode(language, progress.season, progress.episode)
+            val label = upcoming ?: Formats.episode(language, progress.season, progress.episode)
             Caption(progress.title, sub = label.ifEmpty { null }, Modifier.align(Alignment.BottomStart).padding(bottom = 4.dp))
-            InstantBadge(
-                InstantItem(progress.mediaType, progress.tmdbId, progress.title, progress.season.takeIf { it > 0 }, progress.episode.takeIf { it > 0 }),
-                Modifier.align(Alignment.TopEnd).padding(6.dp),
-            )
-            ProgressBar(progress.fraction, Modifier.align(Alignment.BottomStart).fillMaxWidth())
+            if (upcoming == null) {
+                InstantBadge(
+                    InstantItem(progress.mediaType, progress.tmdbId, progress.title, progress.season.takeIf { it > 0 }, progress.episode.takeIf { it > 0 }),
+                    Modifier.align(Alignment.TopEnd).padding(6.dp),
+                )
+                ProgressBar(progress.fraction, Modifier.align(Alignment.BottomStart).fillMaxWidth())
+            }
         }
     }
 }

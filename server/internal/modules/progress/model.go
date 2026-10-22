@@ -39,6 +39,8 @@ type StreamProgress struct {
 	Duration     float64   `json:"duration"`
 	CreatedAt    time.Time `json:"-"`
 	UpdatedAt    time.Time `json:"updated_at" gorm:"index"`
+	// NextAirDate (YYYY-MM-DD) marks a next episode that is not out yet; it is never stored
+	NextAirDate string `json:"next_air_date,omitempty" gorm:"-"`
 }
 
 func (StreamProgress) TableName() string { return "stream_progress" }

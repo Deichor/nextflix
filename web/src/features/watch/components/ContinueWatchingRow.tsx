@@ -1,10 +1,12 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Play, X } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { ChevronLeft, ChevronRight, Info, Play, X } from 'lucide-react';
 import TorrentStreamPlayer from '@/features/watch/components/LazyTorrentStreamPlayer';
+import { tmdbDetailHref } from '@/features/catalog/titles';
 import { useActiveProfile } from '@/shared/lib/profile';
-import { useLocale, useT } from '@/shared/i18n';
+import { useFormat, useLocale, useT } from '@/shared/i18n';
 import InstantChip from '@/shared/ui/InstantChip';
 import {
   PlayRequest,
@@ -23,11 +25,14 @@ interface ContinueWatchingRowProps {
 }
 
 // Netflix-style "Continue Watching" row for the active profile.
-// Clicking a card resumes it directly in the torrent player.
+// Clicking a card resumes it directly in the torrent player; a card whose next episode is not out
+// yet shows its air date and opens the title page instead.
 export default function ContinueWatchingRow({ title, className = '' }: ContinueWatchingRowProps) {
   const profile = useActiveProfile();
   const t = useT();
   const locale = useLocale();
+  const fmt = useFormat();
+  const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [request, setRequest] = useState<PlayRequest | null>(null);
   const [canLeft, setCanLeft] = useState(false);
@@ -109,15 +114,18 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
               const pct = progressPercent(p);
               const ep = p.media_type === 'tv' ? episodeLabel(p.season, p.episode, locale) : '';
               const img = p.backdrop_path || p.poster_path;
+              const upcoming = p.next_air_date
+                ? t('home.newEpisodeOn', { when: airDay(p.next_air_date, fmt.date) })
+                : '';
               return (
                 <div
                   key={`${p.media_type}-${p.tmdb_id}`}
                   className="group/card relative shrink-0 w-[220px] sm:w-[260px] md:w-[300px] transition-transform duration-300 hover:scale-[1.08] hover:z-10"
                 >
                   <button
-                    onClick={() => setRequest(progressToRequest(p))}
+                    onClick={() => (upcoming ? router.push(tmdbDetailHref(p.tmdb_id, 'tv')) : setRequest(progressToRequest(p)))}
                     className="block w-full text-left"
-                    title={`${t('player.resume')}: ${p.title}${ep ? ` ${ep}` : ''}`}
+                    title={upcoming ? `${p.title}: ${upcoming}` : `${t('player.resume')}: ${p.title}${ep ? ` ${ep}` : ''}`}
                   >
                     <div className="relative aspect-video rounded overflow-hidden bg-[#2f2f2f]">
                       {img ? (
@@ -127,16 +135,24 @@ export default function ContinueWatchingRow({ title, className = '' }: ContinueW
                       )}
                       <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover/card:bg-black/40 transition-colors">
                         <span className="w-12 h-12 rounded-full border-2 border-white bg-black/50 flex items-center justify-center opacity-0 group-hover/card:opacity-100 transition-opacity">
-                          <Play className="w-5 h-5 text-white fill-current translate-x-0.5" />
+                          {upcoming ? <Info className="w-5 h-5 text-white" /> : <Play className="w-5 h-5 text-white fill-current translate-x-0.5" />}
                         </span>
                       </div>
-                      <InstantChip
-                        corner="left"
-                        item={{ type: p.media_type, tmdb_id: p.tmdb_id, title: p.title, season: p.season || undefined, episode: p.episode || undefined }}
-                      />
-                      <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[#5a5a5a]/80">
-                        <div className="h-full bg-[#E50914]" style={{ width: `${pct}%` }} />
-                      </div>
+                      {upcoming ? (
+                        <span className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 to-transparent px-2.5 pt-6 pb-1.5 text-white text-xs md:text-sm font-semibold">
+                          {upcoming}
+                        </span>
+                      ) : (
+                        <>
+                          <InstantChip
+                            corner="left"
+                            item={{ type: p.media_type, tmdb_id: p.tmdb_id, title: p.title, season: p.season || undefined, episode: p.episode || undefined }}
+                          />
+                          <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[#5a5a5a]/80">
+                            <div className="h-full bg-[#E50914]" style={{ width: `${pct}%` }} />
+                          </div>
+                        </>
+                      )}
                     </div>
                     <div className="pt-2 pr-6">
                       <p className="text-white text-sm font-semibold truncate">{p.title}</p>
@@ -182,4 +198,13 @@ function RetryImage({ src, alt, className }: { src: string; alt: string; classNa
       onError={() => { timer.current = setTimeout(() => setAttempt(a => a + 1), 2000 * (attempt + 1)); }}
     />
   );
+}
+
+// "Wednesday" within the coming week, else "October 29" (YYYY-MM-DD read as a local day)
+function airDay(day: string, format: (d: Date, opts: Intl.DateTimeFormatOptions) => string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const now = new Date();
+  const days = Math.round((date.getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000);
+  return format(date, days > 0 && days < 7 ? { weekday: 'long' } : { month: 'long', day: 'numeric' });
 }

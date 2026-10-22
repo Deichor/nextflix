@@ -66,7 +66,8 @@ class WatchNext(private val context: Context, private val core: Core) {
     }
 
     private suspend fun sync(server: String, profileId: Int) {
-        val items = core.progress.continueWatchingCached(profileId).take(MAX_PROGRAMS)
+        // An episode not out yet has nothing to play: left out (an older program of the title is removed)
+        val items = core.progress.continueWatchingCached(profileId).filterNot { it.isUpcoming }.take(MAX_PROGRAMS)
         if (core.session.server != server || core.session.profileId != profileId) return
         val helper = PreviewChannelHelper(context)
         val resolver = context.contentResolver

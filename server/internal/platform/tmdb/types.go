@@ -95,6 +95,7 @@ type TVDetails struct {
 	Homepage            string     `json:"homepage"`
 	Networks            []Network  `json:"networks"`
 	Seasons             []Season   `json:"seasons"`
+	NextEpisodeToAir    *Episode   `json:"next_episode_to_air,omitempty"`
 	Certification       string     `json:"certification,omitempty"`
 	Awards              []string   `json:"awards,omitempty"`
 }

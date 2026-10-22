@@ -139,8 +139,9 @@ Host check accepts LAN addresses and `nextflix.local`. Plain HTTP to the LAN ser
 
 - **Continue watching on the home screen** (`app/.../WatchNext.kt`): the active profile's Continue Watching list
   (max 12) is published as Watch Next programs through `androidx.tvprovider`: in progress titles as "continue", the
-  server's next-episode entries as "next", with the backdrop through `<server>/tmdb-img/`. It syncs when the
-  profile changes, 30 s after progress was saved and when the app goes to the background. A card opens the app on
+  server's next-episode entries as "next" (not an episode that has not aired yet), with the backdrop through
+  `<server>/tmdb-img/`. It syncs when the profile changes, 30 s after progress was saved and when the app goes to the
+  background. A card opens the app on
   that profile at Home > Detail > Player, resuming the saved file and position (Back lands on the Detail page). A
   card the viewer removed stays hidden until the title is watched again. Only on devices with the
   `android.software.leanback` feature.

@@ -143,7 +143,8 @@ func (h handler) continueWatching(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := h.s.ContinueWatching(c.Request.Context(), profileID)
+	// ?upcoming=1: clients that show a not-yet-aired next episode as a dated card (older TV apps would play it)
+	out, err := h.s.ContinueWatching(c.Request.Context(), profileID, c.Query("upcoming") == "1")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load progress"})
 		return

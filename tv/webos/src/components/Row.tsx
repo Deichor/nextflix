@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { img } from '../lib/http';
 import { matchPercent, yearOf, type Title } from '../lib/catalog';
-import { episodeLabel, progressPercent, type StreamProgress } from '../lib/stream';
-import { useI18n, type I18n } from '../lib/i18n';
+import { episodeLabel, isUpcoming, progressPercent, type StreamProgress } from '../lib/stream';
+import { intlLocale, useI18n, type I18n } from '../lib/i18n';
+import { formatAirDay } from '../lib/airDay';
 import { setHero, type HeroItem } from './heroStore';
 import { useInstant, type InstantItem } from './instant';
 
@@ -20,10 +21,21 @@ export function heroOfTitle(t: Title, i18n: I18n, kicker?: string): HeroItem {
   return { key: t.key, title: t.title, overview: t.overview, backdrop: t.backdrop, facts, kicker };
 }
 
+/** "New episode Thursday" for an episode not out yet, else ''. */
+export function upcomingLabel(p: StreamProgress, i18n: I18n): string {
+  const when = p.next_air_date ? formatAirDay(intlLocale(i18n.locale), p.next_air_date) : '';
+  return when ? i18n.t('home.newEpisodeOn', { when }) : '';
+}
+
 export function heroOfProgress(p: StreamProgress, i18n: I18n): HeroItem {
   const facts = [episodeLabel(i18n.locale, p.season, p.episode), p.episode_title].filter(Boolean);
-  const left = Math.max(1, Math.round(Math.max(0, p.duration - p.position) / 60));
-  facts.push(i18n.t('player.timeLeft', { time: i18n.duration(left) }));
+  if (isUpcoming(p)) {
+    const soon = upcomingLabel(p, i18n);
+    if (soon) facts.push(soon);
+  } else {
+    const left = Math.max(1, Math.round(Math.max(0, p.duration - p.position) / 60));
+    facts.push(i18n.t('player.timeLeft', { time: i18n.duration(left) }));
+  }
   return { key: `cw-${p.media_type}-${p.tmdb_id}`, title: p.title, overview: '', backdrop: p.backdrop_path, facts };
 }
 
@@ -112,7 +124,7 @@ function Row({ row, onSelectTitle, onSelectProgress, index }: RowProps) {
               show={near && i <= reach + AHEAD}
               onFocusAt={focusAt}
               onSelectAt={selectAt}
-              label={episodeLabel(i18n.locale, p.season, p.episode)}
+              label={upcomingLabel(p, i18n) || episodeLabel(i18n.locale, p.season, p.episode)}
             />
           ))}
           {row.variant !== 'continue' && items && (items as Title[]).map((t, i) => (
@@ -238,6 +250,8 @@ const TitleCard = memo(function TitleCard({ t, rank, navId, index, show, onFocus
 });
 
 const ContinueCard = memo(function ContinueCard({ p, label, navId, index, show, onFocusAt, onSelectAt }: CardProps & { p: StreamProgress; label: string }) {
+  // Not out yet: nothing watched, nothing cached
+  const upcoming = isUpcoming(p);
   return (
     <button
       type="button"
@@ -248,12 +262,12 @@ const ContinueCard = memo(function ContinueCard({ p, label, navId, index, show, 
       onClick={() => onSelectAt(index)}
     >
       <CardImage src={img(p.backdrop_path || p.poster_path, 'w500')} show={show} />
-      <InstantBadge item={{ type: p.media_type, tmdb_id: p.tmdb_id, title: p.title, season: p.season || undefined, episode: p.episode || undefined }} show={show} />
+      {!upcoming && <InstantBadge item={{ type: p.media_type, tmdb_id: p.tmdb_id, title: p.title, season: p.season || undefined, episode: p.episode || undefined }} show={show} />}
       <span className="card-caption">
         {p.title}
         {!!label && <span className="card-caption-sub">{label}</span>}
       </span>
-      <span className="card-progress"><span style={{ width: `${progressPercent(p)}%` }} /></span>
+      {!upcoming && <span className="card-progress"><span style={{ width: `${progressPercent(p)}%` }} /></span>}
     </button>
   );
 });

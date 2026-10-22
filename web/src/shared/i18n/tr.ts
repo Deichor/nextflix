@@ -222,6 +222,7 @@ export const tr: Messages = {
   'home.currentlyAiring': 'Yayında Olanlar',
   'home.moreToExplore': 'Keşfedilecek Daha Fazlası',
   'home.removeFromRow': 'Bu sıradan kaldır',
+  'home.newEpisodeOn': 'Yeni bölüm {when}',
   'catalog.genres': 'Türler',
   'catalog.sort': 'Sırala',
   'catalog.sortPopular': 'Popüler',

@@ -114,6 +114,7 @@ func run() error {
 		return list, true
 	})
 	progressSvc.SetNextEpisode(catalogSvc.NextEpisode)
+	progressSvc.SetUpcoming(catalogSvc.UpcomingEpisode)
 	recommendationsSvc.SetSimilar(similarTitles(catalogSvc))
 	recommendationsSvc.SetProfiles(profilesSvc.Exists)
 

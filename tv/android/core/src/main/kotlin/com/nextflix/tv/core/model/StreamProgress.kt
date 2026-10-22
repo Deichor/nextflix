@@ -31,8 +31,13 @@ data class StreamProgress(
     /** seconds */
     val duration: Double = 0.0,
     @SerialName("updated_at") val updatedAt: String? = null,
+    /** "YYYY-MM-DD": the next episode of a caught-up show, not aired yet (Continue Watching with upcoming=1) */
+    @SerialName("next_air_date") val nextAirDate: String? = null,
 ) {
     val key: String get() = "${mediaType.apiName}-$tmdbId"
+
+    /** The episode is not out yet: nothing to play. */
+    val isUpcoming: Boolean get() = nextAirDate != null
 
     /** >= 92 % watched, like the server */
     val isFinished: Boolean get() = duration > 0 && position >= duration * FINISHED_RATIO

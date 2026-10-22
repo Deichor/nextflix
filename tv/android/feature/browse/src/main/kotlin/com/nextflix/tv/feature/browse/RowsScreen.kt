@@ -236,7 +236,15 @@ internal fun RowsScreen(
                             }
                         }
                         is ContinueRow -> ContentRow(row.title, row.items, row.id, key = { it.key }, modifier = rowModifier) { _, p, m ->
-                            ContinueCard(p, onClick = { playProgress(p) }, modifier = m, onFocused = { hero.show(heroOf(p, s, language)) })
+                            val upcoming = remember(p.nextAirDate, bs) { upcomingLabel(p, bs, language) }
+                            ContinueCard(
+                                p,
+                                // Not out yet: the title page instead of the player
+                                onClick = { if (p.isUpcoming) nav.push(Route.Detail(p.mediaType, p.tmdbId)) else playProgress(p) },
+                                modifier = m,
+                                onFocused = { hero.show(heroOf(p, s, language, upcoming)) },
+                                upcoming = upcoming,
+                            )
                         }
                     }
                 }
