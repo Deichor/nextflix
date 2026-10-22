@@ -34,6 +34,10 @@ internal interface BrowseStrings {
     val kickerFilm: String
     val kickerSeries: String
     val favorites: String
+    /** Continue Watching card of an episode not out yet; [day] "Thursday" / "October 29" */
+    fun newEpisode(day: String): String
+    /** [java.time.format.DateTimeFormatter] pattern of a day and month: "October 29" / "29 Ekim" */
+    val dayMonthPattern: String
 
     val surpriseHeading: String
     val surpriseNext: String
@@ -88,6 +92,8 @@ internal object BrowseEn : BrowseStrings {
     override val kickerFilm = "FILM"
     override val kickerSeries = "SERIES"
     override val favorites = "Favorites"
+    override fun newEpisode(day: String) = "New episode $day"
+    override val dayMonthPattern = "MMMM d"
 
     override val surpriseHeading = "How about this?"
     override val surpriseNext = "Something else"
@@ -147,6 +153,8 @@ internal object BrowseTr : BrowseStrings {
     override val kickerFilm = "FİLM"
     override val kickerSeries = "DİZİ"
     override val favorites = "Favoriler"
+    override fun newEpisode(day: String) = "Yeni bölüm $day"
+    override val dayMonthPattern = "d MMMM"
 
     override val surpriseHeading = "Buna ne dersin?"
     override val surpriseNext = "Başka bir şey"

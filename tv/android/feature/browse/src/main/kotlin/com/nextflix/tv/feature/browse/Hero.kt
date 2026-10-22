@@ -81,10 +81,11 @@ internal fun heroOf(t: Title, s: CoreStrings, kicker: String? = null): HeroItem 
     return HeroItem(t.key, t.title, t.overview, t.backdrop, facts, kicker)
 }
 
-internal fun heroOf(p: StreamProgress, s: CoreStrings, language: AppLanguage): HeroItem {
+/** [upcoming]: [upcomingLabel] of an episode not out yet, shown instead of the time left. */
+internal fun heroOf(p: StreamProgress, s: CoreStrings, language: AppLanguage, upcoming: String? = null): HeroItem {
     val facts = listOf(Formats.episode(language, p.season, p.episode), p.episodeTitle).filter { it.isNotEmpty() }.toMutableList()
     val left = maxOf(1, (p.remaining / 60).roundToInt())
-    facts += s.timeLeft(Formats.duration(language, left))
+    facts += upcoming ?: s.timeLeft(Formats.duration(language, left))
     return HeroItem("cw-${p.key}", p.title, "", p.backdropPath, facts)
 }
 

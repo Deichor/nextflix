@@ -24,9 +24,12 @@ class ProgressRepository internal constructor(private val api: ApiClient, privat
 
     private val listSerializer = ListSerializer(StreamProgress.serializer())
 
-    /** Continue Watching row: newest first, one entry per title, finished ones left out (server rules). */
+    /**
+     * Continue Watching row: newest first, one entry per title, finished ones left out (server rules). A caught-up
+     * weekly show stays as its next episode, not aired yet ([StreamProgress.isUpcoming]).
+     */
     suspend fun continueWatching(profileId: Int): List<StreamProgress> {
-        val data = api.getJson("/api/stream-progress", mapOf("profile_id" to profileId))
+        val data = api.getJson("/api/stream-progress", mapOf("profile_id" to profileId, "upcoming" to 1))
         return if (data == JsonNull) emptyList() else api.decode(listSerializer, data)
     }
 

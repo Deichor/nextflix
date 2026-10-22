@@ -85,7 +85,7 @@ func TestContinueSkipsFinishedNextEpisodes(t *testing.T) {
 	save(t, s, 7, 1, 2, 99, 2*time.Hour)   // watched earlier
 	save(t, s, 7, 1, 3, 98, 1*time.Hour)   // watched earlier
 	save(t, s, 7, 1, 1, 99, 1*time.Minute) // rewatched last
-	out, err := s.ContinueWatching(context.Background(), 1)
+	out, err := s.ContinueWatching(context.Background(), 1, false)
 	if err != nil || len(out) != 1 {
 		t.Fatalf("out %+v %v", out, err)
 	}
@@ -96,7 +96,7 @@ func TestContinueSkipsFinishedNextEpisodes(t *testing.T) {
 	// A saved, unfinished next episode keeps its position
 	save(t, s, 7, 1, 4, 30, 3*time.Hour)
 	save(t, s, 7, 1, 1, 99, 0)
-	out, _ = s.ContinueWatching(context.Background(), 1)
+	out, _ = s.ContinueWatching(context.Background(), 1, false)
 	if len(out) != 1 || out[0].Episode != 4 || out[0].Position != 30 {
 		t.Fatalf("want S1E4 at 30, got %+v", out)
 	}
@@ -109,7 +109,7 @@ func TestContinueGivesUpAfterMaxSteps(t *testing.T) {
 		save(t, s, 9, 1, e, 99, time.Duration(e)*time.Hour)
 	}
 	save(t, s, 9, 1, 1, 99, 0)
-	out, _ := s.ContinueWatching(context.Background(), 1)
+	out, _ := s.ContinueWatching(context.Background(), 1, false)
 	if len(out) != 0 {
 		t.Fatalf("want nothing, got %+v", out)
 	}
@@ -125,7 +125,7 @@ func TestContinueCapsLookups(t *testing.T) {
 	for tv := 1; tv <= 40; tv++ {
 		save(t, s, tv, 1, 1, 99, time.Duration(tv)*time.Minute)
 	}
-	if _, err := s.ContinueWatching(context.Background(), 1); err != nil {
+	if _, err := s.ContinueWatching(context.Background(), 1, false); err != nil {
 		t.Fatal(err)
 	}
 	if n := calls.Load(); n > maxNextLookups {
@@ -146,7 +146,7 @@ func TestContinueHonoursDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	out, err := s.ContinueWatching(ctx, 1)
+	out, err := s.ContinueWatching(ctx, 1, false)
 	if err != nil || time.Since(start) > 2*time.Second {
 		t.Fatalf("took %v: %v", time.Since(start), err)
 	}
@@ -171,5 +171,29 @@ func TestInputSizeCaps(t *testing.T) {
 		if inputSizeOK(in) {
 			t.Fatalf("oversized input accepted: %d bytes", len(in.Magnet)+len(in.Title)+len(in.EpisodeTitle)+len(in.PosterPath)+len(in.Hash))
 		}
+	}
+}
+
+func TestContinueKeepsUpcomingEpisode(t *testing.T) {
+	s := testService(t)
+	s.SetNextEpisode(func(int, int, int) (int, int, bool) { return 0, 0, false }) // E3 is not out
+	s.SetUpcoming(func(tv, season, episode int) (int, int, string, bool) {
+		if tv == 4 {
+			return season, episode + 1, "2026-10-29", true
+		}
+		return 0, 0, "", false
+	})
+	save(t, s, 4, 1, 2, 99, time.Minute) // latest aired episode, finished
+	save(t, s, 5, 1, 8, 99, time.Hour)   // finale of an ended show
+
+	if out, _ := s.ContinueWatching(context.Background(), 1, false); len(out) != 0 {
+		t.Fatalf("old clients must not get unaired episodes: %+v", out)
+	}
+	out, err := s.ContinueWatching(context.Background(), 1, true)
+	if err != nil || len(out) != 1 {
+		t.Fatalf("out %+v %v", out, err)
+	}
+	if r := out[0]; r.TmdbID != 4 || r.Episode != 3 || r.Position != 0 || r.NextAirDate != "2026-10-29" {
+		t.Fatalf("want S1E3 dated 2026-10-29, got %+v", r)
 	}
 }

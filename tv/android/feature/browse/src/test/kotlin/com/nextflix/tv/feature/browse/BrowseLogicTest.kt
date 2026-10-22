@@ -5,12 +5,17 @@ import com.nextflix.tv.core.model.HomeData
 import com.nextflix.tv.core.model.HomeFeeds
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.model.RecommendationRow
+import com.nextflix.tv.core.model.StreamProgress
 import com.nextflix.tv.core.model.Title
+import com.nextflix.tv.core.net.NextflixJson
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
 import kotlin.random.Random
 
 class BrowseLogicTest {
@@ -136,5 +141,28 @@ class BrowseLogicTest {
         assertNull(byId.getValue("trending").items)
         assertNull(byId.getValue("genre-acclaimed").items)
         assertEquals(mapOf("sort_by" to "vote_average.desc", "vote_count.gte" to "5000"), GENRE_ROWS.last().params)
+    }
+
+    @Test
+    fun upcomingEpisodeLabel() {
+        val today = LocalDate.of(2026, 10, 22) // Thursday
+        fun entry(date: String?) = StreamProgress(profileId = 1, mediaType = MediaType.Tv, tmdbId = 7, season = 2, episode = 5, nextAirDate = date)
+        assertNull(upcomingLabel(entry(null), BrowseEn, AppLanguage.En, today))
+        assertEquals("New episode Thursday", upcomingLabel(entry("2026-10-22"), BrowseEn, AppLanguage.En, today))
+        assertEquals("Yeni bölüm Çarşamba", upcomingLabel(entry("2026-10-28"), BrowseTr, AppLanguage.Tr, today))
+        assertEquals("New episode October 29", upcomingLabel(entry("2026-10-29"), BrowseEn, AppLanguage.En, today))
+        assertEquals("Yeni bölüm 29 Ekim", upcomingLabel(entry("2026-10-29"), BrowseTr, AppLanguage.Tr, today))
+    }
+
+    @Test
+    fun upcomingEntryDecodes() {
+        val list = NextflixJson.decodeFromString(
+            ListSerializer(StreamProgress.serializer()),
+            """[{"profile_id":1,"media_type":"tv","tmdb_id":7,"season":2,"episode":5,"position":0,"next_air_date":"2026-10-29"},
+               {"profile_id":1,"media_type":"tv","tmdb_id":8,"season":1,"episode":1,"position":30}]""",
+        )
+        assertEquals("2026-10-29", list[0].nextAirDate)
+        assertTrue(list[0].isUpcoming)
+        assertFalse(list[1].isUpcoming)
     }
 }

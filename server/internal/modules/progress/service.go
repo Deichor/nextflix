@@ -13,9 +13,13 @@ import (
 // NextEpisodeFunc gives the episode after season/episode of a show when it is out.
 type NextEpisodeFunc func(tvID, season, episode int) (int, int, bool)
 
+// UpcomingFunc gives the episode after season/episode that is not out yet, with its air date.
+type UpcomingFunc func(tvID, season, episode int) (int, int, string, bool)
+
 type Service struct {
-	db   *gorm.DB
-	next NextEpisodeFunc
+	db       *gorm.DB
+	next     NextEpisodeFunc
+	upcoming UpcomingFunc
 }
 
 func NewService(db *gorm.DB) *Service {
@@ -24,6 +28,9 @@ func NewService(db *gorm.DB) *Service {
 
 // SetNextEpisode lets Continue Watching offer the next episode of a finished one.
 func (s *Service) SetNextEpisode(f NextEpisodeFunc) { s.next = f }
+
+// SetUpcoming lets Continue Watching keep a show whose next episode airs soon (with its date).
+func (s *Service) SetUpcoming(f UpcomingFunc) { s.upcoming = f }
 
 var (
 	ErrNotFound       = errors.New("No progress found")
@@ -61,8 +68,9 @@ func (s *Service) Save(row StreamProgress) (*StreamProgress, error) {
 
 // ContinueWatching returns the newest unfinished entry per title, newest first. A show whose
 // newest episode is finished comes with the next unfinished episode instead (its saved
-// position, if any). The next-episode lookups run in parallel, capped and bounded by a deadline.
-func (s *Service) ContinueWatching(ctx context.Context, profileID uint) ([]StreamProgress, error) {
+// position, if any). With upcoming, a show whose next episode is not out yet stays with that
+// episode and its NextAirDate. The next-episode lookups run in parallel, capped and bounded by a deadline.
+func (s *Service) ContinueWatching(ctx context.Context, profileID uint, upcoming bool) ([]StreamProgress, error) {
 	rows, err := listByProfile(s.db, profileID, 1000)
 	if err != nil {
 		return nil, err
@@ -99,7 +107,7 @@ func (s *Service) ContinueWatching(ctx context.Context, profileID uint) ([]Strea
 		}
 	}
 
-	resolved := s.resolveNext(ctx, cands, lookups, saved)
+	resolved := s.resolveNext(ctx, cands, lookups, saved, upcoming)
 	out := make([]StreamProgress, 0, continueWatchingLimit)
 	for i, r := range cands {
 		if r.finished() {
@@ -119,7 +127,7 @@ func (s *Service) ContinueWatching(ctx context.Context, profileID uint) ([]Strea
 
 // resolveNext finds the next unfinished episode for each finished candidate. Lookups that are
 // not done by the deadline (or when ctx ends) drop their title from this answer.
-func (s *Service) resolveNext(ctx context.Context, cands []StreamProgress, idx []int, saved map[string]StreamProgress) map[int]StreamProgress {
+func (s *Service) resolveNext(ctx context.Context, cands []StreamProgress, idx []int, saved map[string]StreamProgress, upcoming bool) map[int]StreamProgress {
 	out := make(map[int]StreamProgress, len(idx))
 	if len(idx) == 0 {
 		return out
@@ -142,7 +150,7 @@ func (s *Service) resolveNext(ctx context.Context, cands []StreamProgress, idx [
 				return
 			}
 			defer func() { <-sem }()
-			p, ok := s.stepNext(ctx, cands[i], saved)
+			p, ok := s.stepNext(ctx, cands[i], saved, upcoming)
 			results <- result{i, p, ok}
 		}(i)
 	}
@@ -160,18 +168,29 @@ func (s *Service) resolveNext(ctx context.Context, cands []StreamProgress, idx [
 }
 
 // stepNext walks forward from a finished episode past episodes that are finished too (at most
-// maxNextSteps), returning the saved row of the first unfinished one or a fresh row at 0.
-func (s *Service) stepNext(ctx context.Context, r StreamProgress, saved map[string]StreamProgress) (StreamProgress, bool) {
+// maxNextSteps), returning the saved row of the first unfinished one or a fresh row at 0. With
+// upcoming, an episode that is not out yet ends the walk as a fresh row with its NextAirDate.
+func (s *Service) stepNext(ctx context.Context, r StreamProgress, saved map[string]StreamProgress, upcoming bool) (StreamProgress, bool) {
 	season, episode := r.Season, r.Episode
 	for step := 0; step < maxNextSteps && ctx.Err() == nil; step++ {
 		ns, ne, ok := s.next(r.TmdbID, season, episode)
-		if !ok || (ns == season && ne == episode) {
+		fresh := StreamProgress{ProfileID: r.ProfileID, MediaType: "tv", TmdbID: r.TmdbID, Season: ns, Episode: ne,
+			Title: r.Title, PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, UpdatedAt: r.UpdatedAt}
+		if !ok {
+			if !upcoming || s.upcoming == nil {
+				return StreamProgress{}, false
+			}
+			if fresh.Season, fresh.Episode, fresh.NextAirDate, ok = s.upcoming(r.TmdbID, season, episode); !ok {
+				return StreamProgress{}, false
+			}
+			return fresh, true
+		}
+		if ns == season && ne == episode {
 			return StreamProgress{}, false
 		}
 		p, ok := saved[episodeKey("tv", r.TmdbID, ns, ne)]
 		if !ok {
-			return StreamProgress{ProfileID: r.ProfileID, MediaType: "tv", TmdbID: r.TmdbID, Season: ns, Episode: ne,
-				Title: r.Title, PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, UpdatedAt: r.UpdatedAt}, true
+			return fresh, true
 		}
 		if !p.finished() {
 			p.UpdatedAt = r.UpdatedAt

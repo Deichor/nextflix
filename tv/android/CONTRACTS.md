@@ -117,7 +117,8 @@ subtitle rule (list, retries, default pick, late uploads, cue loading and pollin
   (`nextflix://open?profile=&type=&id=&season=&episode=&play=1`, explicit intent) switches to its profile and
   opens Home > Detail > Player (the Continue Watching entry as a resume request). No intro then.
 - Watch Next (`app/.../WatchNext.kt`): the active profile's Continue Watching list on the home screen
-  (`androidx.tvprovider`), synced on profile change, 30 s after a progress save and when the activity stops.
+  (`androidx.tvprovider`) without its episodes not out yet (`isUpcoming`), synced on profile change, 30 s after a
+  progress save and when the activity stops. Continue Watching cards of such episodes open Detail, not the player.
 - Progress / ratings changes: `core.progress.version` and `core.ratings.version` grow after each save; screens
   reload what depends on them when they come back (compare with the version they loaded).
 
@@ -144,7 +145,7 @@ subtitle rule (list, retries, default pick, late uploads, cue loading and pollin
 | `imageUrl(path, size)` | `<server>/tmdb-img/t/p/<size><path>` (`TmdbImages.W342`, `W500`, `W780`, `W1280` …). Never use image.tmdb.org |
 
 Models (`core.model`): `MediaType`, `Profile`, `ProfileInput`, `Title`, `Details`, `SeasonInfo`, `EpisodeInfo`,
-`HomeFeeds`, `RecommendationRow`, `Top10Region`, `StreamProgress` (`isFinished`, `fraction`, `remaining`),
+`HomeFeeds`, `RecommendationRow`, `Top10Region`, `StreamProgress` (`isFinished`, `fraction`, `remaining`, `isUpcoming`),
 `Rating`, `RatingValue`, `RatingTarget`, `Availability`; helpers `nextEpisodeOf`, `List<StreamProgress>.find`,
 `JsonElement.toTitles / toTitle / toDetails / toEpisodes / toAvailability`, `yearOf`, `matchPercent`.
 Streaming (`core.stream`): `PlaybackCaps`, `PlaybackCapsProvider`, `ResolveParams` (`query()`),

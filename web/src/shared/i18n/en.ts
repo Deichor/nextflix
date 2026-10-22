@@ -235,6 +235,7 @@ export const en = {
   'home.currentlyAiring': 'Currently Airing',
   'home.moreToExplore': 'More to Explore',
   'home.removeFromRow': 'Remove from row',
+  'home.newEpisodeOn': 'New episode {when}',
   'catalog.genres': 'Genres',
   'catalog.sort': 'Sort',
   'catalog.sortPopular': 'Popular',

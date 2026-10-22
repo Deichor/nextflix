@@ -4,6 +4,7 @@ import com.nextflix.tv.core.i18n.AppLanguage
 import com.nextflix.tv.core.i18n.coreStrings
 import com.nextflix.tv.core.model.MediaType
 import com.nextflix.tv.core.model.RecommendationRow
+import com.nextflix.tv.core.model.StreamProgress
 import com.nextflix.tv.core.model.Title
 import com.nextflix.tv.core.model.toTitle
 import com.nextflix.tv.core.net.arr
@@ -13,6 +14,10 @@ import com.nextflix.tv.core.net.str
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.time.temporal.ChronoUnit
 import kotlin.random.Random
 
 // Pure rules ported from webOS lib/catalog.ts, screens/HomeScreen.tsx and lib/discover.ts
@@ -163,4 +168,20 @@ internal fun reasonText(s: BrowseStrings, language: AppLanguage, pick: SurpriseP
         else -> Unit
     }
     return s.reasonTrending
+}
+
+/**
+ * "New episode Thursday" for a Continue Watching entry not out yet: the weekday within the next 6 days, else day
+ * and month. Null for a normal entry.
+ */
+internal fun upcomingLabel(p: StreamProgress, s: BrowseStrings, language: AppLanguage, today: LocalDate = LocalDate.now()): String? {
+    val raw = p.nextAirDate ?: return null
+    val date = runCatching { LocalDate.parse(raw.take(10)) }.getOrNull() ?: return s.newEpisode(raw)
+    val days = ChronoUnit.DAYS.between(today, date)
+    val day = if (days in 0..6) {
+        date.dayOfWeek.getDisplayName(TextStyle.FULL, language.locale)
+    } else {
+        date.format(DateTimeFormatter.ofPattern(s.dayMonthPattern, language.locale))
+    }
+    return s.newEpisode(day)
 }
