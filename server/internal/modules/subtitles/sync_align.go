@@ -279,7 +279,9 @@ func alignLive(cues []span, windows []refWindow, scales []float64) (syncFit, boo
 	return f, ok
 }
 
-// liveSplitPeak is the peak bar of a live fit's one offset change below syncMinWindows windows.
+// liveSplitPeak is the peak bar of a live fit's one offset change below syncMinWindows windows
+// (a var for TestSnapshotHeldSweep: at 0.15 the replays of the 2026-10-27 snapshot served 17 more
+// false segments, 212 instead of 195 of 4364 re-fits).
 var liveSplitPeak = 2.5 * syncMinPeak
 
 func refLines(ws []prepared) float64 {
