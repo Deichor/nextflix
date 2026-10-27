@@ -87,7 +87,7 @@ func (s *Service) receive(c *gin.Context) {
 	if s.files != nil {
 		// The full batch goes to the file; stdout only gets the header line
 		log.Printf("playback: %s", lines[0])
-		s.files.write(s.now(), ip, lines)
+		s.files.Write(s.now(), ip, lines)
 	} else {
 		for _, line := range lines {
 			log.Printf("playback: %s", line)
@@ -115,7 +115,7 @@ func format(b batch) []string {
 			skipped++
 			continue
 		}
-		at := time.UnixMilli(e.T).Format("15:04:05.000")
+		at := time.UnixMilli(e.T).UTC().Format("15:04:05.000")
 		lines = append(lines, fmt.Sprintf("%s %s pos=%s %s%s", id, at, num(e.P), e.K, fields(e.X)))
 	}
 	head += fmt.Sprintf(" events=%d", len(b.Events)-skipped)

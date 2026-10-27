@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 	"nextflix/internal/platform/cache"
 	"nextflix/internal/platform/config"
 	"nextflix/internal/platform/database"
+	"nextflix/internal/platform/daylog"
 	"nextflix/internal/platform/httpserver"
 	"nextflix/internal/platform/netcheck"
 	"nextflix/internal/platform/tmdb"
@@ -42,6 +46,8 @@ func run() error {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment")
 	}
+	playbackLogs := os.Getenv("PLAYBACK_LOG_DIR")
+	keepTimingLog(playbackLogs)
 
 	cfg := config.Load()
 
@@ -196,7 +202,7 @@ func run() error {
 	streaming.Register(api, streamingSvc)
 	subtitles.Register(api, subtitlesSvc)
 	segments.Register(api, segmentsSvc)
-	playbacklog.Register(api, playbacklog.NewService(os.Getenv("PLAYBACK_LOG_DIR")))
+	playbacklog.Register(api, playbacklog.NewService(playbackLogs))
 
 	log.Printf("Nextflix server listening on :%s", cfg.Port)
 	if err := httpserver.Run(ctx, r, cfg.Port); err != nil {
@@ -204,6 +210,25 @@ func run() error {
 	}
 	log.Println("Server stopped")
 	return nil
+}
+
+// keepTimingLog also writes the subtitle timing lines of the server log to daily files under
+// <playback logs>/timing (14 days, 20 MB a day): docker's log loses lines on rotation and after a
+// damaged line. scripts/playback-log.sh prints them with a session's player events.
+func keepTimingLog(playbackLogs string) {
+	if playbackLogs == "" {
+		return
+	}
+	w := daylog.New(filepath.Join(playbackLogs, "timing"), "timing log", daylog.Options{Keep: 14, DayCap: 20 << 20})
+	if w == nil {
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, daylog.NewTee(w, timingLine)))
+}
+
+func timingLine(l string) bool {
+	return strings.HasPrefix(l, "subtitles: ") || strings.HasPrefix(l, "warm: deferring subtitle timing read") ||
+		strings.HasPrefix(l, "warm: resuming subtitle timing read")
 }
 
 // similarTitles feeds the catalog's "More Like This" lists into the "Because you ..." rows. A list
