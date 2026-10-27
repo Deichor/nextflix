@@ -70,7 +70,7 @@ func (h handler) file(c *gin.Context) {
 		return
 	}
 	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks, timing logs)
-	a, err := h.s.FileFor(c.Request.Context(), c.Query("id"), t)
+	a, err := h.s.FileFor(withPlayerID(c.Request.Context(), c.Query("id")), c.Query("id"), t)
 	vtt, partial := a.VTT, a.Partial
 	if fileError(c, err) {
 		return

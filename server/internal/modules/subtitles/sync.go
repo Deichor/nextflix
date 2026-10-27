@@ -313,6 +313,7 @@ type syncer struct {
 	onGrow  func(f *liveFile)     // more live audio: re-fit soon (tests replace it)
 	// result key -> *sync.Mutex: one decide per result at a time (first timing and live re-fits)
 	deciding sync.Map
+	diags    map[string]*viewDiag // result key -> its viewing's diagnostics (sync_diag.go)
 
 	refitDelay, refitGap, pendingGap time.Duration
 	lineWait                         time.Duration // the LineGate wait of one job (syncLineWait; tests shorten it)
@@ -467,7 +468,7 @@ func (y *syncer) pretime(ctx context.Context, inner, hash string, index int) (st
 	if err != nil {
 		return "", err
 	}
-	log.Printf("subtitles: pre-timing %s on %s:%d (next episode)", shortSubID(inner), hash[:8], index)
+	log.Printf("subtitles: pre-timing %s on %s:%d (next episode) id=%s", shortSubID(inner), hash[:8], index, syncLogID(inner, hash, index))
 	y.startTiming(inner, hash, index, base, true)
 	return syncStatePending, nil
 }
@@ -585,11 +586,11 @@ func (y *syncer) startTiming(inner, hash string, index int, base []byte, pre boo
 		err := y.run(ctx, inner, hash, index, base)
 		switch {
 		case p != nil && p.givenUp():
-			log.Printf("subtitles: pre-timing of %s on %s:%d given up after %s: no room beside the playing streams",
-				shortSubID(inner), hash[:8], index, time.Since(start).Round(time.Second))
+			log.Printf("subtitles: pre-timing of %s on %s:%d given up after %s: no room beside the playing streams id=%s",
+				shortSubID(inner), hash[:8], index, time.Since(start).Round(time.Second), syncLogID(inner, hash, index))
 		case err != nil:
-			log.Printf("subtitles: timing of %s on %s:%d failed after %s: %v", shortSubID(inner), hash[:8], index,
-				time.Since(start).Round(time.Second), err)
+			log.Printf("subtitles: timing of %s on %s:%d failed after %s: %v id=%s", shortSubID(inner), hash[:8], index,
+				time.Since(start).Round(time.Second), err, syncLogID(inner, hash, index))
 		}
 		if (err != nil || y.meta(key).stale()) && (p == nil || y.viewing(hash, index)) {
 			y.mu.Lock()
@@ -901,8 +902,9 @@ func (y *syncer) altsDue(key string, read bool) bool {
 }
 
 func logKept(inner, hash string, index int, m syncMeta, liveWindows int, liveSecs float64) {
-	log.Printf("subtitles: timing of %s on %s:%d: kept the last accepted fit (new fit %s: score %.2f over %.2f, peak %.2f; %d windows (%d live, %.0f s played))",
-		shortSubID(inner), hash[:8], index, m.State, m.Fit.Score, m.Fit.Base, m.Fit.Peak, m.Windows, liveWindows, liveSecs)
+	log.Printf("subtitles: timing of %s on %s:%d: kept the last accepted fit (new fit %s: score %.2f over %.2f, peak %.2f; %d windows (%d live, %.0f s played)) id=%s",
+		shortSubID(inner), hash[:8], index, m.State, m.Fit.Score, m.Fit.Base, m.Fit.Peak, m.Windows, liveWindows, liveSecs,
+		syncLogID(inner, hash, index))
 }
 
 // fitChanged reports whether a new result differs from the stored one in what is served.
@@ -943,9 +945,9 @@ func logSync(inner, hash string, index int, m syncMeta, took time.Duration) {
 	if m.LiveWindows > 0 {
 		live = fmt.Sprintf(" (%d live, %.0f s played)", m.LiveWindows, m.LiveSeconds)
 	}
-	log.Printf("subtitles: timing of %s on %s:%d: %s%s (scale %.4f, offsets %s, score %.2f over %.2f, peak %.1f; %s reference, %d windows%s, %s)",
+	log.Printf("subtitles: timing of %s on %s:%d: %s%s (scale %.4f, offsets %s, score %.2f over %.2f, peak %.1f; %s reference, %d windows%s, %s) id=%s",
 		shortSubID(inner), hash[:8], index, m.State, extra, f.Scale, strings.Join(offs, " "), f.Score, f.Base, f.Peak,
-		m.Ref, m.Windows, live, took.Round(100*time.Millisecond))
+		m.Ref, m.Windows, live, took.Round(100*time.Millisecond), syncLogID(inner, hash, index))
 }
 
 // shortSubID names a subtitle in logs: source and provider reference.

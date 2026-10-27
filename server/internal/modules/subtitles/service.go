@@ -506,6 +506,9 @@ func (s *Service) fileFor(ctx context.Context, id string, t float64, holes bool)
 	}
 	if inner, hash, index, ok := unwrapSyncID(id); ok {
 		a, err := s.sync.serve(ctx, inner, hash, index, t)
+		if err == nil {
+			s.sync.observe(ctx, inner, hash, index, t, a)
+		}
 		if err != nil || !holes {
 			return a, err
 		}
