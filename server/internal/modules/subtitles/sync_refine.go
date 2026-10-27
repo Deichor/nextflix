@@ -159,8 +159,9 @@ func pinnedFit(prev *syncMeta, f syncFit) (syncFit, bool) {
 	return f, true
 }
 
-// keepOffsets turns pinnedFit and the check's kept offsets on (evaluations compare without).
-var keepOffsets = true
+// keepOffsets turns pinnedFit and the check's kept offsets on. Off: with the other timing changes
+// of 2026-10-27 they moved more lines already shown on the snapshots (TestSnapshotRefitStability).
+var keepOffsets = false
 
 // closeSegments reports offsets that differ by 0.05 s at most, splits by 1 s (fitChanged); never
 // while keepOffsets is off.

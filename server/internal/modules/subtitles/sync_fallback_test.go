@@ -107,6 +107,7 @@ func TestPretimeTakesTheNextPick(t *testing.T) {
 
 // A re-fit whose offsets moved less than fitChanged notices keeps the served ones.
 func TestPinnedFit(t *testing.T) {
+	keepOn(t)
 	prev := &syncMeta{State: syncStateSynced, Live: true, Fit: syncFit{Scale: 1, Segments: []syncSegment{{0, 0.03}, {900, -1.5}}}}
 	f := syncFit{Scale: 1, Segments: []syncSegment{{0, 0.04}, {900.6, -1.47}}, Score: 0.5}
 	if p, ok := pinnedFit(prev, f); !ok || p.Segments[0].Offset != 0.03 || p.Segments[1].From != 900 || p.Score != 0.5 {
@@ -161,6 +162,7 @@ func TestPinnedFit(t *testing.T) {
 // back and forth by up to 0.45 s with them (13 flips, 11 moves of lines the viewer saw already).
 // Kept offsets leave only the lines just refined in the stretch heard last (1 flip, 0.2 s).
 func TestRefitsKeepRefinedLines(t *testing.T) {
+	keepOn(t)
 	b, err := os.ReadFile(filepath.Join("testdata", "sync", "mentalist_s03e23.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -254,4 +256,11 @@ func TestReplacementIsNoMove(t *testing.T) {
 	if mv := movesNear(before, after, 0, 300); mv.moved != 3 || mv.max != -22 || mv.median != -22 {
 		t.Fatalf("moves %+v", mv)
 	}
+}
+
+// keepOn turns kept offsets on for one test.
+func keepOn(t *testing.T) {
+	saved := keepOffsets
+	keepOffsets = true
+	t.Cleanup(func() { keepOffsets = saved })
 }

@@ -352,7 +352,8 @@ func sortedKeys(m map[int]liveWin) []int { return slices.Sorted(maps.Keys(m)) }
 func TestSnapshotRefitStability(t *testing.T) {
 	type tally struct{ pairs, steps, shown, ahead, beyond, flips, flipped int }
 	var tallies [2]tally // keepOffsets off, on
-	t.Cleanup(func() { keepOffsets = true })
+	saved := keepOffsets
+	t.Cleanup(func() { keepOffsets = saved })
 	perFile := 1
 	if v, err := strconv.Atoi(os.Getenv("NFX_STAB_SUBS")); err == nil && v > 0 {
 		perFile = v
