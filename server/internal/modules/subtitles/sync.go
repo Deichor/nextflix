@@ -151,6 +151,14 @@ func (y *syncer) viewing(hash string, index int) bool {
 	return y.livePlaying(fk) || len(y.servedFor(fk)) > 0
 }
 
+// watched reports whether the result of key was asked for in a viewing within liveServedFor.
+func (y *syncer) watched(key string) bool {
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	s := y.served[key]
+	return s != nil && time.Since(s.last) < liveServedFor
+}
+
 type lineBudgetKey struct{}
 
 // lineBudget is how long the reads of one timing job may still wait in the LineGate, together.
@@ -224,6 +232,8 @@ type syncMeta struct {
 	SameCut string `json:"same_cut,omitempty"`
 	// SameSpeech: the two files' speech matched at offset 0 (speechMatches)
 	SameSpeech bool `json:"same_speech,omitempty"`
+	// Aside: fitted to the windows of an own track set aside (fitRefs.setAside), not to the speech
+	Aside bool `json:"aside,omitempty"`
 }
 
 // syncVersion is the version of the timing. A result of an older one is timed again when it is
@@ -674,26 +684,37 @@ func (y *syncer) run(ctx context.Context, inner, hash string, index int, base []
 	if ref.Skipped && ctx.Value(preTimingKey{}) != nil {
 		ref = y.startRef(ctx, hash, index, base, ref)
 	}
-	key, err := syncKey(inner, hash, index)
-	if err != nil {
-		return err
-	}
-	mu := y.decideLock(key)
-	decideNow := func(ref syncRef) bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return y.decide(ctx, inner, hash, index, base, ref, true)
-	}
-	decided := decideNow(ref)
+	decided := y.decideRead(ctx, inner, hash, index, base, ref)
 	if ref.unpaired() || y.svc.flights.running("syncpair|"+syncFileKey(hash, index)) {
 		if paired, ok := y.pairRef(ctx, hash, index); ok {
-			decided = decideNow(paired) || decided
+			decided = y.decideRead(ctx, inner, hash, index, base, paired) || decided
 		}
 	}
 	if !decided && !ref.Skipped && !ref.Full {
 		return errors.New("too little reference to time it (own-track windows wait for their check against the speech)")
 	}
 	return nil
+}
+
+// decideRead decides with a reference just read (more windows read where the offset changes),
+// under the result's decide lock. A subtitle served in a viewing first gets what the windows read
+// give: the extra reads take a minute (The Mentalist S03E22: 52 s, the cues another cut's own
+// track had timed served meanwhile).
+func (y *syncer) decideRead(ctx context.Context, inner, hash string, index int, base []byte, ref syncRef) bool {
+	key, err := syncKey(inner, hash, index)
+	if err != nil {
+		return false
+	}
+	mu := y.decideLock(key)
+	decided := false
+	if y.svc.cfg.LiveTiming && y.watched(key) {
+		mu.Lock()
+		decided = y.decide(ctx, inner, hash, index, base, ref, false)
+		mu.Unlock()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return y.decide(ctx, inner, hash, index, base, ref, true) || decided
 }
 
 // knownProbe is a file's probe from memory or its reference on disk, without probing it.
@@ -774,20 +795,27 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			prev = &p
 		}
 	}
+	// The played audio backs the pre-timed fit: served from now on
+	showPre := func() {
+		kept := *prev
+		kept.Pre, kept.LiveWindows, kept.LiveSeconds = false, len(live), liveSecs
+		kept.RateWindows = max(kept.RateWindows, m.RateWindows)
+		y.storeWatched(key, inner, hash, index, base, prev, kept, nil)
+		logSync(inner, hash, index, kept, time.Since(start))
+	}
 	if y.keepAccepted(key, base, prev, m, ref.Probe.Duration, complete) {
-		y.keepRates(key, prev, m)
 		logKept(inner, hash, index, m, len(live), liveSecs)
+		if backsPre(prev, base, ref.Probe.Duration, live) {
+			showPre()
+		} else {
+			y.keepRates(key, prev, m)
+		}
 		return true
 	}
 	if keepStable(prev, m, base, ref.Probe.Duration, complete) {
 		if _, ok := y.result(key, base); ok {
 			if prev.Pre && len(live) > 0 {
-				// The played audio backs the pre-timed fit: served from now on
-				kept := *prev
-				kept.Pre, kept.LiveWindows, kept.LiveSeconds = false, len(live), liveSecs
-				kept.RateWindows = max(kept.RateWindows, m.RateWindows)
-				y.storeWatched(key, inner, hash, index, base, prev, kept, nil)
-				logSync(inner, hash, index, kept, time.Since(start))
+				showPre()
 			} else {
 				y.keepRates(key, prev, m)
 			}
@@ -915,14 +943,76 @@ func (y *syncer) keepAccepted(key string, base []byte, prev *syncMeta, m syncMet
 
 // keepStable reports whether a provisional fit that was accepted stays served although the new
 // one fits too: unless the new offsets beat it on the current windows by an offset change's
-// worth of matched lines, the cues would only move back and forth between re-fits.
+// worth of matched lines, the cues would only move back and forth between re-fits. Another frame
+// rate is held to that too (its scale is rescored as it is): The Mentalist S03E15's pre-timed
+// fit at 24/23.976 was replaced 5 s in, from one played window, by one at the file's rate 2 s off.
+// The same offsets are stored again (their lines refined by the windows heard since): m comes
+// before decide marks it provisional, and that difference alone kept the old result, so lines
+// were refined only by the final fit.
 func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, complete bool) bool {
+	same := m
+	same.Live, same.Pre = prev != nil && prev.Live, prev != nil && prev.Pre
 	if complete || prev == nil || !prev.Live || !prev.fits() || !m.fits() || len(m.Fit.windows) == 0 ||
-		m.Fit.Scale != prev.Fit.Scale || !fitChanged(prev, m) || !copyFits(prev, m, base, duration) {
+		!fitChanged(prev, same) || !copyFits(prev, m, base, duration) {
 		return false
 	}
 	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
 	return m.Fit.Score*lines-old < syncSplitPenalty
+}
+
+const (
+	syncBackRange = 15.0 // seconds either way the played windows try a pre-timed fit moved by
+	syncBackPeak  = 3.0  // matched lines its offsets beat every move of 0.4 s or more by there
+)
+
+// backsPre reports whether the played windows back a pre-timed fit (prev.Pre) where it plays: on
+// them its offsets match more lines than the fit moved as a whole by 0.4 s or more (within
+// syncBackRange) by syncBackPeak and beat chance by the gain bar. The re-fits of the first
+// seconds have too few windows to fit (or a fit a played window tips), and the fit is shown
+// once the played audio agrees with it there (The Mentalist S03E15: from 5 s, not 30 s; one that
+// misses a teaser's offset stays pending).
+func backsPre(prev *syncMeta, base []byte, duration float64, live []refWindow) bool {
+	if prev == nil || !prev.Pre || !prev.fits() || len(live) == 0 {
+		return false
+	}
+	at, peak, gain := playBacking(prev.Fit, baseSpans(base, duration), live)
+	return at > 0 && peak >= syncBackPeak && gain >= syncMinGain
+}
+
+// playBacking scores fit f on the windows ws (matched lines at its offsets), how far that beats
+// the fit moved as a whole by 0.4 s or more within syncBackRange (peak, matched lines) and
+// chance (gain, per reference line start).
+func playBacking(f syncFit, cues []span, ws []refWindow) (at, peak, gain float64) {
+	ps := prepare(ws)
+	if len(ps) == 0 || len(cues) == 0 {
+		return 0, 0, 0
+	}
+	last := 0.0
+	for _, c := range cues {
+		last = math.Max(last, f.mapTime(c.start))
+	}
+	starts := make([]float64, int((last+1)*syncRate)+2)
+	for _, c := range cues {
+		if i := int(math.Round(f.mapTime(c.start) * syncRate)); i >= 0 && i < len(starts) {
+			starts[i] = 1
+		}
+	}
+	d := int(syncBackRange * syncRate)
+	total := make([]float64, 2*d+1)
+	lines := 0.0
+	for _, w := range ps {
+		lines += w.lines
+		for q, v := range windowCurve(w, starts, d) {
+			total[q] += v
+		}
+	}
+	other := math.Inf(-1)
+	for q, v := range total {
+		if abs(q-d) >= syncMinChange {
+			other = math.Max(other, v)
+		}
+	}
+	return total[d], total[d] - other, (total[d] - mean(total)) / lines
 }
 
 // copyFits reports whether a fit taken from another file of the same cut (sameCut) fits this
@@ -1040,18 +1130,25 @@ type fitRefs struct {
 	live []refWindow
 	// own, ownLive: the file's reference as read and its live windows, before the own-track check
 	// (a set-aside track's windows, decide's fallback)
-	own     syncRef
-	ownLive []refWindow
-	same    map[string]bool // the speech matched with files of the same cut, by file key (sameSpeech)
+	own      syncRef
+	ownLive  []refWindow
+	same     map[string]bool // the speech matched with files of the same cut, by file key (sameSpeech)
+	setAside bool            // the windows of an own track set aside (aside)
 }
 
 // aside are the windows of an own track set aside (OwnAside), as read and played, moved onto the
 // speech by the check's best lag.
 func (r fitRefs) aside() fitRefs {
 	c := r.ref.Own
-	a := fitRefs{ref: r.own, live: c.onSpeech(r.ownLive), own: r.own, ownLive: r.ownLive, same: r.same}
+	a := fitRefs{ref: r.own, live: c.onSpeech(r.ownLive), own: r.own, ownLive: r.ownLive, same: r.same, setAside: true}
 	a.ref.Windows = c.onSpeech(r.own.Windows)
 	return a
+}
+
+// speechFit reports an accepted provisional fit of this file's speech (not of a set-aside own
+// track's windows, nor a copy from a file of the same cut).
+func speechFit(m *syncMeta) bool {
+	return m != nil && m.Live && m.fits() && !m.Aside && m.SameCut == ""
 }
 
 // fitRef builds the windows a fit uses from the file's reference and live windows: own-track
@@ -1070,7 +1167,7 @@ func (y *syncer) fitRef(inner, hash string, index int, ref syncRef, live []refWi
 	r.own.Own = r.ref.Own
 	if r.ref.OwnAside && tooLittleRef(r.ref, r.live) {
 		a := r.aside() // too little speech yet: the own track's windows, as before the check
-		r.ref, r.live = a.ref, a.live
+		r.ref, r.live, r.setAside = a.ref, a.live, true
 	}
 	r.ref = y.sameCutWindows(inner, hash, index, r)
 	return r
@@ -1098,7 +1195,7 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 		spans[i] = span{c.start, c.end}
 	}
 	scales := syncScales
-	if n := len(mergeWindows(ref.Windows, live)); prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 && !final &&
+	if n := len(mergeWindows(ref.Windows, live)); prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 && !final && !read &&
 		2*n < 3*prev.RateWindows {
 		scales = []float64{prev.Fit.Scale}
 	}
@@ -1126,7 +1223,7 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 		ref, live = r.ref, r.live
 		fit, ok = fitTo()
 	}
-	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: refKind(ref, windows), Windows: len(windows)}
+	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: refKind(ref, windows), Windows: len(windows), Aside: r.setAside}
 	if len(scales) > 1 {
 		m.RateWindows = len(windows)
 	} else if prev != nil {
@@ -1162,16 +1259,33 @@ func heldFits(prev *syncMeta, f syncFit) bool {
 }
 
 // fitAside is fitOne and, when the speech does not time the subtitle, a fit to the windows of an
-// own track set aside (OwnAside: no fit to the speech; as before the check), for the subtitle and
-// each alternative alike. It returns the windows of the fit with the speech.
+// own track set aside (OwnAside: not known, or no fit to the speech; as before the check), for the
+// subtitle and each alternative alike, unless the speech timed it before (speechFit) and the
+// speech's windows still prefer that fit (speechPrefers): a few more windows can tip it under the
+// bars, and it is kept then (keepAccepted), not replaced by the windows of a track that did not
+// fit the speech (The Mentalist S03E15: its pre-timed fit right, the set-aside track's 2 s early
+// for 30 s). It returns the windows of the fit with the speech.
 func (y *syncer) fitAside(ctx context.Context, inner, hash string, index int, r fitRefs, vtt []byte, read bool, prev *syncMeta, final bool) (syncMeta, []byte, fitRefs) {
 	m, out, r := y.fitOne(ctx, inner, hash, index, r, vtt, read, prev, final)
 	if r.ref.OwnAside && !m.fits() {
-		if om, ovtt, _ := y.fitOne(ctx, inner, hash, index, r.aside(), vtt, false, prev, final); om.fits() {
+		om, ovtt, _ := y.fitOne(ctx, inner, hash, index, r.aside(), vtt, false, prev, final)
+		if om.fits() && (final || !speechFit(prev) || !speechPrefers(prev.Fit, om.Fit, vtt, r.ref.Probe.Duration, m.Fit.windows)) {
 			return om, ovtt, r
 		}
 	}
 	return m, out, r
+}
+
+// speechPrefers reports whether the speech windows ws match fit a by an offset change's worth of
+// lines more than fit b.
+func speechPrefers(a, b syncFit, base []byte, duration float64, ws []refWindow) bool {
+	if len(ws) == 0 {
+		return false
+	}
+	cues := baseSpans(base, duration)
+	sa, _ := rescore(cues, ws, a)
+	sb, _ := rescore(cues, ws, b)
+	return sa-sb >= syncSplitPenalty
 }
 
 // lengthFits rejects a subtitle that runs past the end of the video or covers too little of it

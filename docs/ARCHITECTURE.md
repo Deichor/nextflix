@@ -1421,7 +1421,10 @@ that change at splits), simplified:
   sawtooth of −0.2 to +0.5 s and two stretches 2 s late). Up to 2 rounds
   add windows between neighbours with different offsets more than 150 s apart (12 windows at most; a start the
   reference already has a window at is not read again, and a stretch counts once: two timings of S03E09 read the
-  window at 312.5 s twice and every fit counted its lines twice). A result fits
+  window at 312.5 s twice and every fit counted its lines twice). Those reads take about 10 s a window, under the
+  subtitle's decide lock, so the first timing of a subtitle served in a viewing first stores what the windows read
+  give (`decideRead`; The Mentalist S03E22: 52 s of extra reads while the cues another cut's own track had timed
+  stayed served), and the decide with the reads after it tries every frame rate as before. A result fits
   when its score beats chance (the mean over all offsets) by 0.15 and the best offset away from the chosen ones by
   0.08 (matched lines per reference line), and the timed subtitle ends before the video does (+60 s) and covers 40 %
   of it.
@@ -1512,6 +1515,10 @@ that change at splits), simplified:
   subtitle was served untimed for two minutes before two offsets fitted at 8. A re-fit that fits replaces the served
   fit only when its offsets match 4 lines more on the current windows than the served ones do (`keepStable`), else
   the cues moved back and forth by fractions of a second between re-fits (the players logged `moved=` on most polls).
+  A fit at another frame rate is held to that too (the served one rescored at its own rate; it used to replace the
+  served fit at once). The same offsets are stored again, their lines refined by the windows heard since (the
+  comparison saw the new result before it was marked provisional, so the old one stayed and lines were refined
+  only by the final fit).
   While an accepted fit is served (not a pre-timed one, nor one lent by another file of the same cut), a re-fit at
   its frame rate that misses only the gain bar, by at most 0.03 (the held bar 0.12; the peak bar still holds), counts
   as fitting, so `keepStable` can let its offsets replace the served ones; the final fit has the plain bars. A
@@ -1562,16 +1569,27 @@ that change at splits), simplified:
   so a fit lands on the speech whatever the check says later (S03E09's track went timed at +0.49 s, another cut at
   38 stretches with +0.87 s after 1897 s). Until a PGS
   track is timed, and for another cut, the speech of the same stretches stands in for its windows (fit, holes) and
-  the cue tap and early reads stop for the file (another cut only). A text track is used while the check cannot
-  tell (as before the check: music, noise or speech the server cannot read; such a file was never timed and read
-  again by every request), with no line refinement, unless its lines found no fit although the speech had the lines
-  for one (`NoFit`; The Mentalist S03E03 KONTRAST WEBRip: 6 stretches, its lines 0 to 4 s off by stretch, 35 % on
-  an onset at best, so every Turkish subtitle came out poor against it, peak 0.0): then the speech stands in as for
-  another cut, and the track's windows (a PGS track's too) only time a subtitle or an alternative tried in its
-  place that the speech does not fit (or while there is too little speech), moved by the track's best offset when
-  it lies within the range and more line starts than by chance are on an onset there (S03E10, the same NF release
-  as S03E09, was served from its track as it is in this fallback); its cue tap goes on, so more stretches may still
-  decide. Checked with every re-fit (one
+  the cue tap and early reads stop for the file (another cut only). A text track whose lines found no fit although
+  the speech had the lines for one (`NoFit`; The Mentalist S03E03 KONTRAST WEBRip: 6 stretches, its lines 0 to 4 s
+  off by stretch, 35 % on an onset at best, so every Turkish subtitle came out poor against it, peak 0.0), and one
+  the check cannot tell yet (too few stretches, speech without the lines for a fit, or a reference still being read),
+  is set aside: the speech stands in as for another cut, and the track's windows (a PGS track's too, for `NoFit`) only
+  time a subtitle or an alternative tried in its place that the speech does not fit (or while there is too little
+  speech: music, noise or speech the server cannot read, as before the check), with no line refinement. Until
+  2026-10 a text track the check could not tell timed every subtitle: The Mentalist S03E22 (2026-10-25), opened
+  while its read ran (the check waits for it), was timed from the cue tap's lines of its track, another cut's as the
+  check found 80 s later, 0.82 s early for 2 minutes (the speech heard with them: -0.80 s, right, from 28 s). A
+  set-aside track's fit replaces an accepted fit of the speech (a few more windows can tip that one under the bars,
+  and it is kept then, below) only when the speech's windows do not match the accepted fit by an offset change's
+  worth of lines more (`speechPrefers`): S03E15's pre-timed fit from the speech was right, the set-aside track's
+  timed the subtitle 2 s early from the first played window for 30 s; never replacing it cost more on the
+  snapshot of 2026-10-16, whose set-aside caption tracks are often right. They are moved by the track's best offset
+  when it lies within the range and more line starts than by chance are on an onset there (S03E10, the same NF
+  release as S03E09, was served from its track as it is in this fallback); that offset stays while a new check
+  finds none (two offsets, or one outside the range) or one more than 0.1 s away from fewer than a third more
+  stretches than it was found from, as long as it is still above chance: each window moves with it, so every flip
+  moved the whole subtitle (S03E17, 2026-10-22: +0.38, 0 and +0.37 s at 14, 15 and 17 stretches, the cues -0.33 s
+  then +0.37 s mid-episode). Its cue tap goes on, so more stretches may still decide. Checked with every re-fit (one
   decide hook, done again from all stretches when they grew by a third; not from a stand-in while the reference is
   read) and kept per file with its live windows (`synclive` `check`: state, tight, stretches, offsets, `NoFit`), so
   a restart or a live reference dropped from memory goes on from it (a `NoFit` was not kept, and the stand-in of a
@@ -1586,7 +1604,8 @@ that change at splits), simplified:
   once say, except one never decided by them (kept timed from 4). Logged `subtitles: own track of <hash8>:<index>
   against the speech of <n> stretches: timed to the file (+0.05 s) and tight (76 % of 588 line starts on a speech
   start)` / `… but loose …: no line refinement` / `not timed to the file (another cut): timed from the speech only`
-  / `no fit (at best 35 % of 63 line starts on a speech start), not known yet: …`.
+  / `no fit (at best 35 % of 63 line starts on a speech start), not known yet: … (its windows moved +0.38 s)` (logged
+  again when that offset changes).
   On the snapshot
   (`TestSnapshotOwnCheck`): S03E02's PGS track timed and tight (+0.05 s, 76 %; from 2-3 stretches on), S03E01's
   another cut (26 %, from 8 stretches), S02E22's two caption tracks timed but loose (+0.17 s, 39 %), 8 own tracks
@@ -1661,7 +1680,11 @@ that change at splits), simplified:
   file's bitrate it waits, and after 3 minutes of waiting the job gives up without marking the timing failed (the
   episode's first request times it). A fit made before any of the file's
   audio was heard is marked pre-timed (`pre`): when the episode opens it is answered `pending` (the subtitle as it
-  is) until the first re-fit with played audio keeps or replaces it, a few seconds into the episode. Read windows
+  is) until the first re-fit with played audio keeps or replaces it, a few seconds into the episode, or the played
+  windows back it while the re-fits still find no fit (`backsPre`: on them its offsets match more lines than the
+  fit moved as a whole by 0.4 s or more within ±15 s, by 3 lines, and beat chance by the gain bar; measured on the
+  pre-timed fits of both snapshots, none backed wrong before 90 s heard, about a third of the right ones by 90 s;
+  S03E15 shown from 18 s instead of a set-aside track's wrong fit). Read windows
   alone can miss a teaser's own offset: on the snapshot's starts the read-only fit put 20 of 31 subtitles' first 5
   minutes partly off (the subf2m English S02 pack: −3.3 s where the teaser needs −1.2 s), while with the played
   audio of the first minutes most were right (median from 140 s heard). Viewing model (`TestSnapshotFirstFit`, 35
@@ -1670,6 +1693,17 @@ that change at splits), simplified:
   until the TV shows a timing right for 90 % of them, p90 58 s → 50 s → 28 s. Pre-timing helps most where the played
   audio alone fits late: the Turkish subtitles of The Mentalist S03E01 / S03E02 need 440 s of audio for their first
   live fit (~80 s on the TV), so their first minutes went from 84-89 % to 98-100 % within 0.5 s.
+  That model missed the slips of 2026-10-22..26 (36 viewings, mostly in the first 15-140 s): it has no cue tap
+  (an unchecked or set-aside own track timing the start), pre-times from the final reference (with the windows
+  later timings read) instead of the first pass, has no first read running during playback, and scores against
+  the fit over every window, which can miss a teaser's own offset (S03E16: the first ~110 s 1.4 s off it).
+  `TestSnapshotStartCases` replays six of those viewings as the logs say they ran (read windows at the open, both
+  taps as heard, the own-track check as it went, the re-fit steps, the TV's polls); `TestSnapshotStartAll` does so
+  for every file of a snapshot played from its start (up to 3 fitting subtitles each, pre-timed and opened while
+  the read runs; all series, no movie was played from its start in either snapshot). Cues of the first 5 minutes
+  as the TV shows them more than 0.5 s off, before → after: the six cases 78 → 28 (85 → 95 % within 0.5 s);
+  2026-10-27 opened 1233 → 997, pre-timed 681 → 661; 2026-10-16 opened 545 → 543, pre-timed 276 → 266; changes
+  of a shown timing 372 → 357; no other subtitle shown timed that was not before (2 of 70 either way).
   A file above the byte budget (Cost below) reads no windows, so its pre-timing had nothing to fit, and a muxed 4K
   stream's tap hears only ~30 s ahead of the picture: the episode showed its subtitle untimed until 120 s of its
   audio were heard (Westworld S01E05 4K, 2.8 MB/s, played from 105 s past its intro: the Turkish subtitle 0.8 s late
