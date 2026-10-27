@@ -93,6 +93,40 @@ func TestSettleLag(t *testing.T) {
 	}
 }
 
+// A pre-timed fit stays pending after the file opened until played audio backs it: a re-fit before
+// any of the audio was heard stores the same offsets again (The Mentalist S03E16: its pre-timed fit,
+// 3 s off in the teaser, was shown from 3 s on).
+func TestPreTimedFitWaitsForPlayedAudio(t *testing.T) {
+	svc := newLiveTest(t, 1500)
+	y := svc.sync
+	file := dialogue(84, 1500)
+	sub := subtitleFor(file, 1, func(float64) float64 { return 2 })
+	ws := speechWindows(file, windowStarts(1500, syncWindowLen, 8), 0, 0.05, 0.1, 2)
+	for i := range ws {
+		ws[i].Kind = "audio"
+	}
+	probe := mediaProbe{Duration: 1500, FPS: 23.976, Audio: 1, OwnSub: -1, SubCodec: "none", Bitrate: 2 << 20}
+	ref := syncRef{Probe: probe, Windows: ws, Paired: true}
+	ctx := context.Background()
+	inner := cacheProviderSub(t, svc, "1|pre|2|7|1", sub)
+	base, _ := svc.File(ctx, inner)
+	key, _ := syncKey(inner, syncHash, 1)
+	if !y.decide(ctx, inner, syncHash, 1, base, ref, false) {
+		t.Fatal("too little to tell")
+	}
+	if m := y.meta(key); m == nil || !m.Pre || !m.fits() {
+		t.Fatal("not pre-timed")
+	}
+	lf := y.liveFile(syncHash, 1)
+	lf.mu.Lock()
+	lf.taps = 1 // the file opened, none of its audio heard yet
+	lf.mu.Unlock()
+	y.decide(ctx, inner, syncHash, 1, base, ref, false)
+	if m := y.meta(key); !untimedMeta(m) {
+		t.Fatalf("shown before any of its audio was heard: %s %s", m.State, segText(m.Fit))
+	}
+}
+
 // The played audio backs a pre-timed fit only at its offsets.
 func TestBacksPre(t *testing.T) {
 	file := dialogue(82, 900)

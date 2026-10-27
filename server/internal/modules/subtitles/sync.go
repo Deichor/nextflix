@@ -822,8 +822,11 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			return true
 		}
 	}
-	// Timed before the file played (pre-timing): none of its audio was heard
-	pre := provisional && len(live) == 0 && !y.livePlaying(syncFileKey(hash, index))
+	// Timed before the file played (pre-timing): none of its audio was heard. A pre-timed fit stays
+	// so until played audio backs it, also after the file opened: a re-fit then stores the same
+	// offsets again (keepStable), and that showed The Mentalist S03E16's pre-timed fit, 3 s off in
+	// the teaser, from 3 s on
+	pre := provisional && len(live) == 0 && (!y.livePlaying(syncFileKey(hash, index)) || prev != nil && prev.Pre)
 	if !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced)) {
 		// Did not fit: the best fitting other subtitle of the language, when one fits. While
 		// provisional, a lined up subtitle stays served as it is (a few minutes cannot tell
