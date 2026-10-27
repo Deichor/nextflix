@@ -1957,8 +1957,8 @@ same (flips 6041 → 6229, moves of lines already shown 10552 → 10615; of 36 p
 take another path of the same wandering split, below): there `keepStable` keeps a re-fit whose offsets barely
 moved. The flips there are offset changes the fit takes and gives back: on file bf8fac49 a split of a Turkish
 subtitle (+6.3 / +9.2 s) moved between 1059 and 1362 s, and 100-150 lines the viewer saw already moved by 3 s each
-time, with kept offsets or without. With the other timing changes of 2026-10-27 merged (78 pairs), kept offsets
-moved more lines already shown (17427 → 18574) and flipped more (9791 → 10008), so they are off (`keepOffsets`);
+time, with kept offsets or without. With the other timing changes of 2026-10-27 merged (the same 64 pairs), kept offsets
+moved more lines already shown (9301 → 10222) and flipped more (4872 → 5142), so they are off (`keepOffsets`);
 the S03E23 tests turn them on.
 A PGS own track (`sync_pgs_eval_test.go`, NFX_GT; The Mentalist S03E02 d3g, no text track, its English PGS track as
 the tap and the reads give it, 970 lines; each line scored against the PGS line starts): the subf2m subtitles were
