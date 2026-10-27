@@ -344,87 +344,131 @@ func sortedKeys(m map[int]liveWin) []int { return slices.Sorted(maps.Keys(m)) }
 // without own-track windows: the subtitles its windows fit) through replaySteps, served by
 // themselves, and sums the cue moves between steps. Flips (a cue back where it was two or more
 // steps before) are noise; moves of cues the viewer saw already are visible only after a seek
-// back. NFX_STAB_SUBS caps the subtitles per file (default 4).
+// back. Each pair is replayed with keepOffsets off and on. NFX_PAIRS (lines "<file key>
+// <source>/<first 8 of the raw file> ...": the pairs the server served) takes those pairs of
+// NFX_TESTDATA instead; NFX_STAB_MORE names more snapshot data dirs (comma-separated, paired as
+// above); NFX_STAB_SUBS caps the subtitles per file (default 1).
 func TestSnapshotRefitStability(t *testing.T) {
-	dir := snapshotDir(t)
-	files, subs := loadSnapshot(t)
-	perFile := 4
+	type tally struct{ pairs, steps, shown, ahead, beyond, flips, flipped int }
+	var tallies [2]tally // keepOffsets off, on
+	t.Cleanup(func() { keepOffsets = true })
+	perFile := 1
 	if v, err := strconv.Atoi(os.Getenv("NFX_STAB_SUBS")); err == nil && v > 0 {
 		perFile = v
 	}
-	var pairs, steps, shown, ahead, beyond, flips, flipped int
-	for _, f := range files {
-		raw, err := os.ReadFile(filepath.Join(dir, "synclive", f.name+".json"))
-		if err != nil {
-			continue
-		}
-		var saved liveSaved
-		if json.Unmarshal(raw, &saved) != nil || len(saved.Windows)+len(saved.Own) < 6 {
-			continue
-		}
-		dur := f.ref.Probe.Duration
-		withOwn := f.ref
-		withOwn.Windows = append([]refWindow(nil), f.ref.Windows...)
-		for g, d := range saved.Own {
-			w := refWindow{Start: float64(g) * syncWindowLen, Kind: "subs", Speech: unpackBits(d.Bits, d.Frames)}
-			for _, i := range d.Starts {
-				if i >= 0 && i < len(w.Speech) {
-					w.Speech[i] = 2
-				}
-			}
-			withOwn.Windows = append(withOwn.Windows, w)
-		}
-		sort.Slice(withOwn.Windows, func(i, j int) bool { return withOwn.Windows[i].Start < withOwn.Windows[j].Start })
-		var live []refWindow
-		for g, d := range saved.Windows {
-			live = append(live, refWindow{Start: float64(g) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)})
-		}
-		n := 0
-		for _, s := range subs {
-			last := s.spans[len(s.spans)-1].end
-			if n == perFile || last < 0.75*dur || last > 1.1*dur {
-				continue
-			}
-			if subsWindows(withOwn) >= 3 {
-				if agreeingWindows(s.spans, withOwn) < 3 {
-					continue
-				}
-			} else if fit, ok := alignLive(clampSpans(s.spans, dur), mergeWindows(f.ref.Windows, live), syncScales); !ok ||
-				!fit.good() || !lengthFits(s.spans, fit, dur) {
-				continue
-			}
-			n++
-			tmp := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(tmp, "synclive"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(tmp, "synclive", hashKey(syncFileKey(syncHash, 1))+".json"), raw, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			svc := replayService(tmp, f.ref)
-			inner := cacheProviderSub(t, svc, "stab|"+f.name[:8]+"|"+s.name, s.spans)
-			st := replaySteps(t, svc, syncHash, 1, inner, f.ref)
-			var pf, ps int
-			for _, x := range st {
-				steps++
-				shown += x.shown
-				ahead += x.ahead
-				beyond += x.beyond
-				pf += x.flips
-				ps += x.shown
-			}
-			pairs++
-			flips += pf
-			if pf > 0 {
-				flipped++
-			}
-			last2 := st[len(st)-1]
-			t.Logf("%s %-24s %2d steps, final %s [%s]: shown moves %d, flips %d", f.label(), s.name, len(st), last2.state,
-				last2.offsets, ps, pf)
+	dirs := []string{os.Getenv("NFX_TESTDATA")}
+	for _, d := range strings.Split(os.Getenv("NFX_STAB_MORE"), ",") {
+		if d != "" {
+			dirs = append(dirs, d)
 		}
 	}
-	t.Logf("SUMMARY stability: %d pairs, %d steps; moved cues: shown %d, ahead %d, beyond %d; flips %d (%d pairs)",
-		pairs, steps, shown, ahead, beyond, flips, flipped)
+	for di, data := range dirs {
+		t.Setenv("NFX_TESTDATA", data)
+		dir := snapshotDir(t)
+		files, subs := loadSnapshot(t)
+		var served map[string]map[string]bool // file -> subtitles served for it
+		if p := os.Getenv("NFX_PAIRS"); p != "" && di == 0 {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			served = map[string]map[string]bool{}
+			for _, l := range strings.Split(string(b), "\n") {
+				if fs := strings.Fields(l); len(fs) >= 2 {
+					if served[fs[0]] == nil {
+						served[fs[0]] = map[string]bool{}
+					}
+					served[fs[0]][fs[1]] = true
+				}
+			}
+		}
+		for _, f := range files {
+			raw, err := os.ReadFile(filepath.Join(dir, "synclive", f.name+".json"))
+			if err != nil {
+				continue
+			}
+			var saved liveSaved
+			if json.Unmarshal(raw, &saved) != nil || len(saved.Windows)+len(saved.Own) < 6 {
+				continue
+			}
+			dur := f.ref.Probe.Duration
+			withOwn := f.ref
+			withOwn.Windows = append([]refWindow(nil), f.ref.Windows...)
+			for g, d := range saved.Own {
+				w := refWindow{Start: float64(g) * syncWindowLen, Kind: "subs", Speech: unpackBits(d.Bits, d.Frames)}
+				for _, i := range d.Starts {
+					if i >= 0 && i < len(w.Speech) {
+						w.Speech[i] = 2
+					}
+				}
+				withOwn.Windows = append(withOwn.Windows, w)
+			}
+			sort.Slice(withOwn.Windows, func(i, j int) bool { return withOwn.Windows[i].Start < withOwn.Windows[j].Start })
+			var live []refWindow
+			for g, d := range saved.Windows {
+				live = append(live, refWindow{Start: float64(g) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)})
+			}
+			n := 0
+			for _, s := range subs {
+				last := s.spans[len(s.spans)-1].end
+				switch {
+				case served != nil:
+					if !served[f.name][s.name] {
+						continue
+					}
+				case n == perFile || last < 0.75*dur || last > 1.1*dur:
+					continue
+				case subsWindows(withOwn) >= 3:
+					if agreeingWindows(s.spans, withOwn) < 3 {
+						continue
+					}
+				default:
+					if fit, ok := alignLive(clampSpans(s.spans, dur), mergeWindows(f.ref.Windows, live), syncScales); !ok ||
+						!fit.good() || !lengthFits(s.spans, fit, dur) {
+						continue
+					}
+				}
+				n++
+				var line [2]string
+				for k, keep := range []bool{false, true} {
+					keepOffsets = keep
+					tmp := t.TempDir()
+					if err := os.MkdirAll(filepath.Join(tmp, "synclive"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(tmp, "synclive", hashKey(syncFileKey(syncHash, 1))+".json"), raw, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					svc := replayService(tmp, f.ref)
+					inner := cacheProviderSub(t, svc, "stab|"+f.name[:8]+"|"+s.name, s.spans)
+					st := replaySteps(t, svc, syncHash, 1, inner, f.ref)
+					tl := &tallies[k]
+					var pf, ps int
+					for _, x := range st {
+						tl.steps++
+						tl.shown += x.shown
+						tl.ahead += x.ahead
+						tl.beyond += x.beyond
+						pf += x.flips
+						ps += x.shown
+					}
+					tl.pairs++
+					tl.flips += pf
+					if pf > 0 {
+						tl.flipped++
+					}
+					end := st[len(st)-1]
+					line[k] = fmt.Sprintf("%s [%s]: shown %d, flips %d", end.state, end.offsets, ps, pf)
+				}
+				t.Logf("%s %-24s %2d windows | off: %s | on: %s", f.label(), s.name, len(saved.Windows), line[0], line[1])
+			}
+		}
+	}
+	for k, name := range []string{"kept offsets off", "kept offsets on"} {
+		tl := tallies[k]
+		t.Logf("SUMMARY stability, %s: %d pairs, %d steps; moved cues: shown %d, ahead %d, beyond %d; flips %d (%d pairs)",
+			name, tl.pairs, tl.steps, tl.shown, tl.ahead, tl.beyond, tl.flips, tl.flipped)
+	}
 }
 
 // TestSnapshotFallbackReplay prints the replay of each case and its sums.

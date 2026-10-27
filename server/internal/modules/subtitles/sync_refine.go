@@ -159,9 +159,13 @@ func pinnedFit(prev *syncMeta, f syncFit) (syncFit, bool) {
 	return f, true
 }
 
-// closeSegments reports offsets that differ by 0.05 s at most, splits by 1 s (fitChanged).
+// keepOffsets turns pinnedFit and the check's kept offsets on (evaluations compare without).
+var keepOffsets = true
+
+// closeSegments reports offsets that differ by 0.05 s at most, splits by 1 s (fitChanged); never
+// while keepOffsets is off.
 func closeSegments(a, b []syncSegment) bool {
-	if len(a) != len(b) {
+	if !keepOffsets || len(a) != len(b) {
 		return false
 	}
 	for i := range a {
