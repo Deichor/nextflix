@@ -64,6 +64,12 @@ var startCases = []startCase{
 	{"S04E01", "6c125c4a", "turkcealtyazi/192bf001", 6, true, 0,
 		[][2]float64{{7.4, 46}, {12.4, 120}, {17.4, 207}, {22.4, 207}, {31, 238}, {400, 490}},
 		"-1.12 -2.99@207 -4.73@594 -6.12@1280 -8.54@1836"},
+	// 6c044aaa:1, turkcealtyazi/tr S03E18 (2026-10-22 18:22, A2): pre-timed from the speech (its own
+	// track set aside) with the steps at 149 and 558 s; the set-aside track's fit at 10 s had them
+	// at 275 and 902 s as the final fit does, the speech fit took over again at 15 s
+	{"S03E18", "ebdba264", "turkcealtyazi/c49a3237", 6, true, 0,
+		[][2]float64{{8, 39}, {13, 60}, {16, 111}, {31, 210}, {400, 580}},
+		"-0.73 -2.30@275 -3.55@923 -4.67@1583 -5.77@1961"},
 	// aaa77dcb:2, Westworld S02E01 4K muxed, turkcealtyazi/tr (session x19adwmk, 2026-10-24 10:00):
 	// pre-timed from its start windows (-0.96 s), pending for 12 s
 	{"WW S02E01", "4d687085", "turkcealtyazi/28e5cd5a", 3, true, 0,
@@ -136,6 +142,7 @@ type startRun struct {
 	wrong      int     // cues of the first 5 minutes shown more than 0.5 s off
 	untimed    int     // of them, shown untimed (untimedFar: more than 2 s off)
 	untimedFar int
+	rawShown   int // cues of the first 5 minutes shown untimed
 	// moves: changes of a timing shown (to another or untimed) in the first 5 minutes; pre: the
 	// pre-timed fit (none: did not fit); shownTimed: a timing was shown, lastShown the last one
 	moves      int
@@ -389,6 +396,9 @@ func replayStart(t *testing.T, c startSpec, f *snapFile, own map[int]liveWin, su
 		}
 		e := math.Abs(p.shown.mapTime(s.start) - T)
 		run.errs = append(run.errs, e)
+		if untimed(p.shown) {
+			run.rawShown++
+		}
 		if e > 0.5 {
 			run.wrong++
 			if untimed(p.shown) {
@@ -649,7 +659,9 @@ func TestSnapshotStartCases(t *testing.T) {
 // played audio as it comes (playBacking).
 func TestSnapshotStartAll(t *testing.T) {
 	files, subs := loadSnapshot(t)
-	log.SetOutput(io.Discard)
+	if os.Getenv("NFX_EVAL") != "verbose" {
+		log.SetOutput(io.Discard)
+	}
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	kinds := map[string]string{}
 	if p := os.Getenv("NFX_KINDS"); p != "" {
@@ -665,8 +677,8 @@ func TestSnapshotStartAll(t *testing.T) {
 		others = v
 	}
 	type agg struct {
-		runs, wrong, timedWrong, untimedWrong, untimedFar, moves int
-		errs, rights                                             []float64
+		runs, wrong, timedWrong, untimedWrong, untimedFar, rawShown, moves int
+		errs, rights                                                       []float64
 	}
 	groups := map[string]*agg{}
 	add := func(name string, r startRun) {
@@ -680,6 +692,7 @@ func TestSnapshotStartAll(t *testing.T) {
 		g.wrong += r.wrong
 		g.untimedWrong += r.untimed
 		g.untimedFar += r.untimedFar
+		g.rawShown += r.rawShown
 		g.timedWrong += r.wrong - r.untimed
 		g.moves += r.moves
 		rt := r.rightAt
@@ -715,7 +728,7 @@ func TestSnapshotStartAll(t *testing.T) {
 		if !played[0] || !played[1] || !played[2] || !played[3] {
 			continue
 		}
-		if c := os.Getenv("NFX_CASE"); c != "" && !strings.HasPrefix(f.name, c) {
+		if c := os.Getenv("NFX_CASE"); c != "" && !slices.ContainsFunc(strings.Split(c, ","), func(p string) bool { return strings.HasPrefix(f.name, p) }) {
 			continue
 		}
 		jobs <- f
@@ -730,8 +743,8 @@ func TestSnapshotStartAll(t *testing.T) {
 	t.Logf("SUMMARY start of every viewing (first 5 minutes as the TV shows them; right: 90 %% within 0.5 s)")
 	for _, n := range names {
 		g := groups[n]
-		t.Logf("%-20s runs %3d | %s | off by >0.5 s: %4d cues (%d timed wrong, %d untimed, %d of them >2 s) | right shown median %3.0f s, p90 %3.0f s | moves %d",
-			n, g.runs, statsOf(g.errs), g.wrong, g.timedWrong, g.untimedWrong, g.untimedFar, quant(g.rights, 0.5), quant(g.rights, 0.9), g.moves)
+		t.Logf("%-20s runs %3d | %s | off by >0.5 s: %4d cues (%d timed wrong, %d untimed, %d of them >2 s; %d shown untimed) | right shown median %3.0f s, p90 %3.0f s | moves %d",
+			n, g.runs, statsOf(g.errs), g.wrong, g.timedWrong, g.untimedWrong, g.untimedFar, g.rawShown, quant(g.rights, 0.5), quant(g.rights, 0.9), g.moves)
 	}
 	t.Logf("other subtitles: %d of %d replays showed a timing", falseShown, falseRuns)
 	if len(backing) > 0 {
@@ -770,6 +783,9 @@ func startFile(t *testing.T, f *snapFile, subs []*snapSub, kinds map[string]stri
 	done := 0
 	for _, c := range fitting {
 		s := c.s
+		if v := os.Getenv("NFX_SUB"); v != "" && !strings.Contains(s.name, v) {
+			continue
+		}
 		if done >= perFile {
 			break
 		}
@@ -793,7 +809,7 @@ func startFile(t *testing.T, f *snapFile, subs []*snapSub, kinds map[string]stri
 		specs = append(specs, named{"opened", open})
 		var line []string
 		for _, sc := range specs {
-			r := replayStart(t, sc.sp, f, own, s.spans, false)
+			r := replayStart(t, sc.sp, f, own, s.spans, os.Getenv("NFX_EVAL") == "verbose")
 			var rows []backRow
 			if sc.sp.pre && os.Getenv("NFX_EVAL") == "backing" && len(r.pre.Segments) > 0 {
 				rows = backRows(f, s.spans, r.pre, truth, kind)
@@ -804,8 +820,8 @@ func startFile(t *testing.T, f *snapFile, subs []*snapSub, kinds map[string]stri
 			*backing = append(*backing, rows...)
 			mu.Unlock()
 			st := statsOf(r.errs)
-			line = append(line, fmt.Sprintf("%s %3.0f%% within 0.5 s, %d off (%d untimed), right at %3.0f s, %d moves", sc.name,
-				100*st.w05, r.wrong, r.untimed, r.rightAt, r.moves))
+			line = append(line, fmt.Sprintf("%s %3.0f%% within 0.5 s, %d off (%d untimed), right at %3.0f s, %d moves [%s]", sc.name,
+				100*st.w05, r.wrong, r.untimed, r.rightAt, r.moves, shownText(r)))
 		}
 		t.Logf("%s %s %s | %s", f.label(), s.name, kinds[f.name], strings.Join(line, " | "))
 	}
@@ -829,6 +845,19 @@ func startFile(t *testing.T, f *snapFile, subs []*snapSub, kinds map[string]stri
 			t.Logf("%s: another subtitle %s shown timed: %s", f.name[:8], s.name, segText(r.lastShown))
 		}
 	}
+}
+
+// shownText is what a replay showed when (seconds after the open).
+func shownText(r startRun) string {
+	var parts []string
+	for _, e := range r.timeline {
+		txt := segText(e.shown)
+		if e.pending {
+			txt = "untimed"
+		}
+		parts = append(parts, fmt.Sprintf("%.0fs %s", e.at, txt))
+	}
+	return strings.Join(parts, " -> ")
 }
 
 // startFixtures are the cases kept as fixtures (testdata/sync): the read windows (with the speech

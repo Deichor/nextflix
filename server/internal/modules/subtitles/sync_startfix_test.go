@@ -2,9 +2,7 @@ package subtitles
 
 import (
 	"context"
-	"fmt"
 	"math"
-	"strings"
 	"testing"
 )
 
@@ -21,19 +19,6 @@ func timedWrong(r startRun) (int, float64) {
 		}
 	}
 	return r.wrong - r.untimed, first
-}
-
-// shownText is what a replay showed when (seconds after the open).
-func shownText(r startRun) string {
-	var parts []string
-	for _, e := range r.timeline {
-		txt := segText(e.shown)
-		if e.pending {
-			txt = "untimed"
-		}
-		parts = append(parts, fmt.Sprintf("%.0fs %s", e.at, txt))
-	}
-	return strings.Join(parts, " -> ")
 }
 
 // The Mentalist S03E15 (session of 2026-10-22 02:23): its pre-timed fit, from the speech (its own
