@@ -144,8 +144,8 @@ func TestOwnCheckKept(t *testing.T) {
 }
 
 // A fit takes a PGS track's windows only once the check says it is timed to the file, a text
-// track's also while that is not known (its speech may not tell); for another cut the speech
-// read with them and heard stands in, and only a tight track refines lines.
+// track's while that is not known only set aside (where the speech does not tell); for another
+// cut the speech read with them and heard stands in, and only a tight track refines lines.
 func TestCheckOwnTrackWindows(t *testing.T) {
 	svc := newLiveTest(t, 1500)
 	y := svc.sync
@@ -162,11 +162,15 @@ func TestCheckOwnTrackWindows(t *testing.T) {
 	if got.Own.State != "" || len(got.Windows) != 0 || refineWindows(got, nil) != nil {
 		t.Fatalf("unchecked PGS: %+v, %d windows", got.Own, len(got.Windows))
 	}
-	// a text track's windows are used (no line refinement while not known)
+	// a text track's windows are set aside (no speech stands in here: the fit takes them, as too
+	// little speech; no line refinement while not known)
 	ref.Probe.SubCodec = "subrip"
 	got, _ = y.checkOwnTrack(syncHash, 1, ref, nil)
-	if got.Own.State != "" || got.kind() != "subs" || len(got.Windows) != len(own) || refineWindows(got, nil) != nil {
+	if got.Own.State != "" || !got.OwnAside || len(got.Windows) != 0 || refineWindows(got, nil) != nil {
 		t.Fatalf("unchecked text: %+v, %d windows (%s)", got.Own, len(got.Windows), got.kind())
+	}
+	if r := y.fitRef("", syncHash, 1, ref, nil, nil); r.ref.kind() != "subs" || len(r.ref.Windows) != len(own) || !r.setAside {
+		t.Fatalf("unchecked text, too little speech: %d windows (%s)", len(r.ref.Windows), r.ref.kind())
 	}
 	ref.Speech = speech
 	got, _ = y.checkOwnTrack(syncHash, 1, ref, nil)

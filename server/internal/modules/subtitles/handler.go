@@ -70,7 +70,7 @@ func (h handler) file(c *gin.Context) {
 		return
 	}
 	t, _ := strconv.ParseFloat(c.Query("t"), 64) // the player's position (live embedded tracks, timing logs)
-	a, err := h.s.FileFor(c.Request.Context(), c.Query("id"), t)
+	a, err := h.s.FileFor(withPlayerID(c.Request.Context(), c.Query("id")), c.Query("id"), t)
 	vtt, partial := a.VTT, a.Partial
 	if fileError(c, err) {
 		return
@@ -118,6 +118,10 @@ func fileError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true, "error_kind": ke.Kind})
 	case errors.Is(err, ErrRateLimited):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrNoSubtitle):
+		// The same download answers the same: the players show another subtitle, not this one again
+		log.Printf("subtitles: file: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	default:
 		log.Printf("subtitles: file: %v", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})

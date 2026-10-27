@@ -806,7 +806,8 @@ func (y *syncer) servedCues(key string, base []byte, m *syncMeta) []liveCue {
 }
 
 // logNear logs how a change of what is served moved the cues within liveNearAhead seconds ahead
-// of the viewer (the player's last position), so slips near the viewer show in the log.
+// of the viewer (the player's last position), so slips near the viewer show in the log, and
+// which of the moved ones the viewer saw already (movesSeen).
 func (y *syncer) logNear(key, inner, hash string, index int, before, after []liveCue) {
 	at, ok := y.viewerAt(key)
 	if !ok {
@@ -820,32 +821,86 @@ func (y *syncer) logNear(key, inner, hash string, index int, before, after []liv
 	if mv.other > 0 {
 		other = fmt.Sprintf(", %d lines of another subtitle", mv.other)
 	}
-	log.Printf("subtitles: timing of %s on %s:%d moved %d of %d cues within %.0f s of the viewer at %.0fs: max %+.2fs, median %+.2fs%s",
-		shortSubID(inner), hash[:8], index, mv.moved, mv.cues, liveNearAhead, at, mv.max, mv.median, other)
+	seen := movesSeen(before, after, at)
+	split := fmt.Sprintf("; seen=%d", seen.moved)
+	if seen.moved > 0 {
+		split += fmt.Sprintf(" seen_max=%+.2fs", seen.max)
+	}
+	split += fmt.Sprintf(" ahead=%d", mv.ahead)
+	if seen.onScreen {
+		split += fmt.Sprintf(" here=%+.2fs", seen.here)
+	}
+	log.Printf("subtitles: timing of %s on %s:%d moved %d of %d cues within %.0f s of the viewer at %.0fs: max %+.2fs, median %+.2fs%s%s id=%s",
+		shortSubID(inner), hash[:8], index, mv.moved, mv.cues, liveNearAhead, at, mv.max, mv.median, other, split,
+		syncLogID(inner, hash, index))
 }
 
 type cueMoves struct {
 	cues, moved, other int     // cues in the range, moved by 0.1 s or more, without a partner (another subtitle)
 	max, median        float64 // signed: the largest move in size, the median move of the moved ones
+	ahead              int     // moved ones that start in the range as before (not moved into it)
+	// movesSeen: the move of the cue on screen (0 when it stayed), when one shows
+	here     float64
+	onScreen bool
 }
 
-// movesNear compares two served cue lists in [from, to) (old or new start): each cue is matched to
-// the old cue of the same text that started nearest to it.
-func movesNear(before, after []liveCue, from, to float64) cueMoves {
-	old := map[string][]float64{}
+// cueMatcher matches the cues of a served list to those of the list served before by text: the
+// old cue of the same rank when the text comes as often in both (a line said twice is not taken
+// for the other one), else the one that started nearest. The new cues are matched in start order.
+type cueMatcher struct {
+	old         map[string][]liveCue // by text, by start
+	count, rank map[string]int       // new cues per text, matched so far
+}
+
+func newCueMatcher(before, after []liveCue) *cueMatcher {
+	m := &cueMatcher{old: map[string][]liveCue{}, count: map[string]int{}, rank: map[string]int{}}
 	for _, c := range before {
-		old[c.text] = append(old[c.text], c.start)
+		m.old[c.text] = append(m.old[c.text], c)
 	}
+	for _, cs := range m.old {
+		sort.SliceStable(cs, func(i, j int) bool { return cs[i].start < cs[j].start })
+	}
+	for _, c := range after {
+		m.count[c.text]++
+	}
+	return m
+}
+
+// byStart is a copy of cues in start order, as cueMatcher.match takes them.
+func byStart(cues []liveCue) []liveCue {
+	cues = append([]liveCue(nil), cues...)
+	sort.SliceStable(cues, func(i, j int) bool { return cues[i].start < cues[j].start })
+	return cues
+}
+
+func (m *cueMatcher) match(c liveCue) (liveCue, bool) {
+	cs := m.old[c.text]
+	k := m.rank[c.text]
+	m.rank[c.text]++
+	if len(cs) == 0 {
+		return liveCue{}, false
+	}
+	if len(cs) == m.count[c.text] {
+		return cs[k], true
+	}
+	best := cs[0]
+	for _, s := range cs[1:] {
+		if math.Abs(s.start-c.start) < math.Abs(best.start-c.start) {
+			best = s
+		}
+	}
+	return best, true
+}
+
+// movesNear compares two served cue lists of one subtitle in [from, to) (old or new start), the
+// cues matched by cueMatcher.
+func movesNear(before, after []liveCue, from, to float64) cueMoves {
+	m := newCueMatcher(before, after)
 	var mv cueMoves
 	var moves []float64
-	for _, c := range after {
-		starts := old[c.text]
-		best, found := 0.0, false
-		for _, s := range starts {
-			if !found || math.Abs(s-c.start) < math.Abs(best-c.start) {
-				best, found = s, true
-			}
-		}
+	for _, c := range byStart(after) {
+		o, found := m.match(c)
+		best := o.start
 		in := c.start >= from && c.start < to
 		if found {
 			in = in || best >= from && best < to
@@ -860,6 +915,9 @@ func movesNear(before, after []liveCue, from, to float64) cueMoves {
 		}
 		if d := c.start - best; math.Abs(d) >= 0.1 {
 			mv.moved++
+			if best >= from {
+				mv.ahead++
+			}
 			moves = append(moves, d)
 			if math.Abs(d) > math.Abs(mv.max) {
 				mv.max = d
@@ -869,6 +927,33 @@ func movesNear(before, after []liveCue, from, to float64) cueMoves {
 	if len(moves) > 0 {
 		sort.Float64s(moves)
 		mv.median = moves[len(moves)/2]
+	}
+	return mv
+}
+
+// movesSeen are the moves of the cues the viewer at saw already: those that started within
+// diagSeenBefore before it (the one on screen included), moved by 0.1 s or more (max: the
+// largest, signed), and the move of the cue on screen (old start <= at < old end).
+func movesSeen(before, after []liveCue, at float64) cueMoves {
+	m := newCueMatcher(before, after)
+	var mv cueMoves
+	hereFrom := 0.0 // the latest start of the cues on screen
+	for _, c := range byStart(after) {
+		o, found := m.match(c)
+		if !found || o.start < at-diagSeenBefore || o.start >= at {
+			continue
+		}
+		mv.cues++
+		d := c.start - o.start
+		if o.end > at && (!mv.onScreen || o.start > hereFrom) {
+			mv.here, mv.onScreen, hereFrom = d, true, o.start
+		}
+		if math.Abs(d) >= 0.1 {
+			mv.moved++
+			if math.Abs(d) > math.Abs(mv.max) {
+				mv.max = d
+			}
+		}
 	}
 	return mv
 }

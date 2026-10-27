@@ -122,12 +122,13 @@ func (f *liveFile) ownChecked() ownCheck {
 
 // checkOwnTrack applies the own-track check (sync_owncheck.go) to the windows a fit uses (ref
 // read, live played): the own track's windows stay when it is timed to the file (moved onto the
-// speech by the offsets the check found, onSpeech), a text track's
-// also while that is not known (as before the check: its speech may not tell, music or noise)
-// unless its lines found no fit in speech that had the lines for one (NoFit), else the speech of
-// the same stretches stands in (read with each window, heard while playing). Set aside for NoFit
-// (ref.OwnAside; a PGS track's too), the track's windows may still time a subtitle the speech
-// does not (decide). ref.Own tells the line refinement whether the track is tight.
+// speech by the offsets the check found, onSpeech), else the speech of the same stretches stands
+// in (read with each window, heard while playing). Set aside while the check does not know (a
+// text track's, as before the check: its speech may not tell, music or noise) or found no fit
+// (NoFit; a PGS track's too) (ref.OwnAside), the track's windows still time a subtitle the speech
+// does not (decide): an unchecked track may be another cut's (The Mentalist S03E22: its cue tap
+// timed the subtitle 0.82 s early while the read ran). ref.Own tells the line refinement whether
+// the track is tight.
 func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWindow) (syncRef, []refWindow) {
 	if ref.Full {
 		return ref, live
@@ -146,10 +147,7 @@ func (y *syncer) checkOwnTrack(hash string, index int, ref syncRef, live []refWi
 		ref.Windows = c.onSpeech(ref.Windows)
 		return ref, c.onSpeech(live)
 	}
-	if c.State == "" && !picture && !c.NoFit {
-		return ref, live
-	}
-	ref.OwnAside = c.State == "" && c.NoFit && (hasOwnWindows(ref.Windows) || hasOwnWindows(live))
+	ref.OwnAside = c.State == "" && (c.NoFit || !picture) && (hasOwnWindows(ref.Windows) || hasOwnWindows(live))
 	if hasOwnWindows(ref.Windows) {
 		ws := make([]refWindow, 0, len(ref.Windows))
 		for _, w := range ref.Windows {
@@ -188,7 +186,7 @@ func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index 
 	if !full || len(pairs) == n || prev.State != "" && len(pairs) < n+max(1, n/3) {
 		return f.withLocal(prev, n, pairs)
 	}
-	c := settleOwn(prev, checkOwn(pairs))
+	c := settleLag(prev, settleOwn(prev, checkOwn(pairs)), pairs)
 	c.local, c.localN = localOffsets(pairs, c), len(pairs)
 	f.mu.Lock()
 	if !sameSaved(c.saved(), f.check.saved()) {
@@ -196,7 +194,7 @@ func checkOwnCached(f *liveFile, pairs []ownPair, full bool, hash string, index 
 	}
 	f.check, f.checkN = c, len(pairs)
 	f.mu.Unlock()
-	if c.State != prev.State || c.Tight != prev.Tight || c.NoFit != prev.NoFit {
+	if c.State != prev.State || c.Tight != prev.Tight || c.NoFit != prev.NoFit || c.NoFit && math.Abs(c.Lag-prev.Lag) >= 0.05 {
 		logOwnCheck(hash, index, c)
 	}
 	return c
@@ -220,7 +218,9 @@ func (f *liveFile) withLocal(c ownCheck, n int, pairs []ownPair) ownCheck {
 // settleOwn is the check that stands after a new one: a decision is kept against one that does
 // not decide, or decides otherwise from fewer than a third more stretches (The Mentalist S02E22's
 // captions went timed, not known, timed at 15, 26 and 34 stretches); a tight track stays tight
-// down to ownLooseShare of its line starts on an onset.
+// down to ownLooseShare of its line starts on an onset. Offsets that moved by 0.05 s at most stay
+// (closeSegments): the line refinement turned +0.08 / +0.10 s on The Mentalist S03E23 into moves
+// of 35 lines by up to 0.4 s, back and forth.
 func settleOwn(prev, c ownCheck) ownCheck {
 	if prev.State == "" {
 		return c
@@ -230,6 +230,31 @@ func settleOwn(prev, c ownCheck) ownCheck {
 	}
 	if c.State == ownTimed && prev.State == ownTimed && prev.Tight && !c.Tight && c.Near >= ownLooseShare {
 		c.Tight = true
+	}
+	if c.State == ownTimed && prev.State == ownTimed && closeSegments(prev.Fit.Segments, c.Fit.Segments) {
+		c.Fit.Segments = prev.Fit.Segments
+	}
+	return c
+}
+
+// settleLag keeps the offset a track without a fit (NoFit) moves its set-aside windows by while
+// a new check finds none (its fit took two offsets, or one outside the lag) or one more than
+// 0.1 s away from fewer than a third more stretches than it was found from, as long as more of
+// its line starts than by chance still lie on speech onsets there: every set-aside window moves
+// with it, so each flip moved the whole subtitle (The Mentalist S03E17: +0.38, 0 and +0.37 s at
+// 14, 15 and 17 stretches; the cues -0.33 s, then +0.37 s).
+func settleLag(prev, c ownCheck, pairs []ownPair) ownCheck {
+	from := prev.lagPairs
+	if from == 0 {
+		from = prev.Pairs
+	}
+	c.lagPairs = c.Pairs
+	if !prev.NoFit || !c.NoFit || prev.Lag == 0 || math.Abs(c.Lag-prev.Lag) <= 0.1 ||
+		c.Lag != 0 && c.Pairs >= from+max(1, from/3) {
+		return c
+	}
+	if near, _ := nearShare(pairs, prev.Lag); near >= ownChanceShare {
+		c.Lag, c.lagPairs = prev.Lag, from
 	}
 	return c
 }
@@ -244,8 +269,8 @@ func logOwnCheck(hash string, index int, c ownCheck) {
 	case c.State == ownOther:
 		what = "not timed to the file (another cut): timed from the speech only"
 	case c.NoFit:
-		what = fmt.Sprintf("no fit (at best %.0f %% of %d line starts on a speech start), not known yet: the speech times subtitles, the track only those the speech does not",
-			100*c.Near, c.Matched)
+		what = fmt.Sprintf("no fit (at best %.0f %% of %d line starts on a speech start), not known yet: the speech times subtitles, the track only those the speech does not (its windows moved %+.2f s)",
+			100*c.Near, c.Matched, c.Lag)
 	case c.Tight:
 		what = fmt.Sprintf("timed to the file (%+.2f s) and tight (%.0f %% of %d line starts on a speech start)",
 			offset, 100*c.Near, c.Matched)

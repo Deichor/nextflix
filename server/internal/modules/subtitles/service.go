@@ -374,6 +374,7 @@ func (s *Service) list(ctx context.Context, q Query, wait time.Duration, targets
 }
 
 func (s *Service) rank(all []candidate, q Query) []Sub {
+	all = s.dropMissing(all)
 	file := q.Hash != "" && q.Index > 0
 	made := map[string]bool{} // made for the playing file (hash match)
 	if file {
@@ -506,6 +507,9 @@ func (s *Service) fileFor(ctx context.Context, id string, t float64, holes bool)
 	}
 	if inner, hash, index, ok := unwrapSyncID(id); ok {
 		a, err := s.sync.serve(ctx, inner, hash, index, t)
+		if err == nil {
+			s.sync.observe(ctx, inner, hash, index, t, a)
+		}
 		if err != nil || !holes {
 			return a, err
 		}
@@ -623,6 +627,9 @@ func (s *Service) File(ctx context.Context, id string) ([]byte, error) {
 	if b, ok := s.files.read(source, key, ".vtt", 0); ok {
 		return b, nil
 	}
+	if why, ok := s.missing(source, ref); ok {
+		return nil, noSubtitle(why)
+	}
 	call := s.startFile(source, lang, ref)
 	select {
 	case <-call.done:
@@ -633,6 +640,32 @@ func (s *Service) File(ctx context.Context, id string) ([]byte, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// missingFor: a download that held no subtitle that fits (ErrNoSubtitle) is not tried again, nor
+// listed, for this long (a season pack may get the episode later).
+const missingFor = 24 * time.Hour
+
+// missing reports a subtitle whose download held nothing that fits within missingFor, and why.
+func (s *Service) missing(source, ref string) (string, bool) {
+	b, ok := s.files.read(source, source+"|"+ref, ".none", missingFor)
+	return string(b), ok
+}
+
+// dropMissing leaves out the candidates whose download held nothing that fits (missing): the
+// players would pick a season pack without the episode first, and its pre-timing too (The
+// Mentalist S03E24: the subtitle shown instead was untimed for its first 21 s).
+func (s *Service) dropMissing(all []candidate) []candidate {
+	out := all[:0:0]
+	for _, c := range all {
+		if source, _, ref, err := decodeID(c.ID); err == nil && source != SourceTorrent && source != SourceEmbedded {
+			if _, gone := s.missing(source, ref); gone {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // hasFile reports whether the converted subtitle of id is on disk (File needs no download).
@@ -653,6 +686,12 @@ func (s *Service) startFile(source, lang, ref string) *flightCall {
 		defer cancel()
 		vtt, err := s.download(ctx, source, lang, ref)
 		if err != nil {
+			if errors.Is(err, ErrNoSubtitle) {
+				log.Printf("subtitles: %s/%s: %v: left out of the lists for %s", source, truncateString(ref, 60), err, missingFor)
+				if werr := s.files.write(source, key, ".none", []byte(err.Error())); werr != nil {
+					log.Printf("subtitles: cache write: %v", werr)
+				}
+			}
 			return nil, err
 		}
 		if err := s.files.write(source, key, ".vtt", vtt); err != nil {

@@ -146,6 +146,37 @@ func refineMoved(cues, timed []liveCue) bool {
 	return false
 }
 
+// pinnedFit is a re-fit served with the last fit's offsets when they moved less than
+// fitChanged notices (closeSegments; same scale and lag): the refinement's thresholds turn such
+// moves into moves of single lines (The Mentalist S03E23: a line went 0.45 s back and forth
+// between re-fits as the offset went +0.03 / +0.04 s). Its scores stay the new fit's. The
+// own-track check keeps its offsets so too (settleOwn).
+func pinnedFit(prev *syncMeta, f syncFit) (syncFit, bool) {
+	if prev == nil || !prev.fits() || prev.Fit.Scale != f.Scale || prev.Fit.Lag != f.Lag || !closeSegments(prev.Fit.Segments, f.Segments) {
+		return f, false
+	}
+	f.Segments = append([]syncSegment(nil), prev.Fit.Segments...)
+	return f, true
+}
+
+// keepOffsets turns pinnedFit and the check's kept offsets on. Off: with the other timing changes
+// of 2026-10-27 they moved more lines already shown on the snapshots (TestSnapshotRefitStability).
+var keepOffsets = false
+
+// closeSegments reports offsets that differ by 0.05 s at most, splits by 1 s (fitChanged); never
+// while keepOffsets is off.
+func closeSegments(a, b []syncSegment) bool {
+	if !keepOffsets || len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if math.Abs(a[i].Offset-b[i].Offset) > 0.05 || i > 0 && math.Abs(a[i].From-b[i].From) > 1 {
+			return false
+		}
+	}
+	return true
+}
+
 // refineFit times the cues with the fit and refines them, onto the own lines where the fit put
 // them (moved by its lag).
 func refineFit(cues []liveCue, f syncFit, windows []refWindow) []liveCue {

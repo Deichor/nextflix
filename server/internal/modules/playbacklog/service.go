@@ -5,9 +5,17 @@ package playbacklog
 import (
 	"sync"
 	"time"
+
+	"nextflix/internal/platform/daylog"
 )
 
 const (
+	keepDays   = 14
+	maxDayFile = 50 << 20
+	// What one client IP may write a day (a normal day is well under 1 MB), so one device
+	// cannot fill the day's file and push out everyone else's logs.
+	maxIPDay = 10 << 20
+
 	maxBody   = 32 << 10
 	maxEvents = 200
 	// Per session (sid + client IP): a burst of batches, then one every refillEvery
@@ -67,7 +75,7 @@ type Service struct {
 	ips      *limiter
 	sessions *limiter
 	now      func() time.Time
-	files    *fileLog
+	files    *daylog.Writer
 }
 
 // NewService also keeps the lines in daily files under dir (none when dir is empty).
@@ -76,7 +84,7 @@ func NewService(dir string) *Service {
 		ips:      newLimiter(ipBurst, ipRefillEvery),
 		sessions: newLimiter(burst, refillEvery),
 		now:      time.Now,
-		files:    newFileLog(dir),
+		files:    daylog.New(dir, "playback", daylog.Options{Keep: keepDays, DayCap: maxDayFile, KeyCap: maxIPDay}),
 	}
 }
 
