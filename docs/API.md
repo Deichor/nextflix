@@ -810,6 +810,14 @@ provider and file id, so a cached file never counts against a provider quota aga
 
 Event kinds (`tv/webos/src/player/playbackLog.ts`, engine): `wait` (a `waiting` until it played again: `d` ms, `end`, buffered `ahead`, `rs` readyState, `ns` networkState, `seeking`, `start`), `freeze` (media time fell behind the wall clock by `ms` without a `waiting`), `jump` (position moved by `by` s without a seek), `drops` (over 5 frames dropped in ~2 s), `late` (the 250 ms timer fired `ms` late: a long main-thread task), `stalled`, `seek` (`why`: `user`, `skip-intro`, `gap`, `align-start`, `align-split`, `splice-stuck` or `unmarked`), `restart` / `open` (`why`), `seekpoint` (`fix`), `buffering`, `hold` / `hold-end`, `health`, `splice` / `splice-end` / `splice-drop`, `subs` / `subs-none` / `subdelay` (below), `stream-fail`, `error`, `offline` (`net`: `offline` or `unreachable`) / `online`, `early-end`, `ended`, `next`, `exit` (`subdelay` while a subtitle is shown), `quota` (a SourceBuffer was full), `ranges` (each SourceBuffer's ranges near the playhead at a `waiting`), and a `summary` every 60 s (`ahead_min`, `ahead_avg`, `dropped`, `decoded`, `waits`, `freezes`, `jumps`, `late`, `late_max`, `subdelay` while a subtitle is shown). Batches go every 30 s and on pause, end, next episode and exit (`keepalive`). Off: `PLAYBACK_LOG = false` in `playbackLog.ts`, or localStorage `nfx-tv:playback-log` = `off` on the TV. Read with `scripts/playback-log.sh [days] [filter]` (e.g. `2 S02E09`).
 
+The server's subtitle timing lines are kept next to them, in `PLAYBACK_LOG_DIR/timing/<day>.log` (`<date> <time> subtitles: …` and the `warm: … subtitle timing read` waits, UTC, 14 days, at most 20 MB a day): docker's own log drops old lines on rotation and stopped at a damaged line after a WSL crash. With a filter the script prints each matching session's player events and the timing lines of its files (`src=` of its headers, `to=` of its `open` events; from 30 minutes before the session to 2 minutes after it) in one time order: player events by their own time (the device clock), a batch header with its first event, server lines as `<date> <time> server subtitles: …`. The timing lines about a served subtitle end in `id=<8 hex>`, the `id` the players log for it (`subs` below), so `grep id=1f3e8a0c` joins both; the line formats are in [ARCHITECTURE.md](ARCHITECTURE.md#automatic-subtitle-timing-modulessubtitlessyncgo) (Logs).
+
+```
+2026-10-24 19:41:15 a7e120yx web 19:40:45.364 pos=0 subs cues=471 first=2.9 id=1e0f885e lang=tr ... sync=pending why=open
+2026-10-24 19:41:10 server subtitles: timing of turkcealtyazi/tr/708908|/sub/708908/westworld1.html|2|2|1 on 83a81005:2 moved 41 of 41 cues within 300 s of the viewer at 22s: max +0.21s, median +0.21s; seen=0 ahead=41 here=+0.21s id=1e0f885e
+2026-10-24 19:41:15 a7e120yx web 19:41:10.562 pos=23.48 subs cues=471 first=3.1 here=0.21 id=1e0f885e ... sync=live why=poll
+```
+
 Subtitle events (all players, fields from `subsLog.ts` in `tv/webos/src/player/` and `web/src/features/watch/`, and
 `SubsLog.kt` in the Android TV app; the web player sends these, `exit`, `pagehide` and its playback events, see
 docs/ARCHITECTURE.md, as client `web`; its `exit` has `why`: `back` (Back button), `escape`, `error` (Close on the
@@ -819,7 +827,8 @@ reload, which never logs `exit`). String values are made
 log-safe tokens (Turkish letters folded to ASCII, other characters `_`, at most 40 chars); fields are printed sorted:
 
 - `subs`: a subtitle was loaded, or a later answer changed it. `id` (8 hex chars of the FNV-1a hash of the whole id;
-  before TV app 0.1.24 its first 24 chars, the same for every subtitle timed for one file), `cues`, `partial`, `sync`
+  before TV app 0.1.24 its first 24 chars, the same for every subtitle timed for one file; the server's timing lines
+  of a subtitle served for a file end in the same `id=`), `cues`, `partial`, `sync`
   (raw `X-Subtitle-Sync`; `-` none, `hidden` when the browser cannot read it on a cross-origin answer), `why` (`open`
   the file's first default pick, `auto` a later pick by the player (fuller list, late upload), `user`, `fallback` (the
   one before gave no cues), `poll` (the subtitle asked again)), `first` / `last` (start of the first / last cue,

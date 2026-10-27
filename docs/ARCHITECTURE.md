@@ -6,7 +6,7 @@ in its own module on both sides; shared infrastructure lives in `platform/` (ser
 ```
 server/                     Go 1.27, gin, gorm + SQLite, go-redis v9   (module name: nextflix)
   cmd/nextflix/main.go      wiring only
-  internal/platform/        config, database, httpserver, cache, tmdb, upstream, torbox
+  internal/platform/        config, database, httpserver, cache, daylog, tmdb, upstream, torbox
   internal/modules/         profiles, progress, ratings, recommendations, top10, catalog, providers,
                             notifications, streaming, subtitles, segments, images, playbacklog
 web/                        Next.js 16 (App Router), React 19, TypeScript
@@ -31,6 +31,7 @@ docs/                       this folder
 | `database` | SQLite open with pragmas and pool settings, `Migrate(db, models...)` |
 | `httpserver` | gin engine, logging/recovery, Host check against DNS rebinding (LAN names and IPs, hosts of `ALLOWED_ORIGINS` and `ALLOWED_HOSTS`; for Host `server`, i.e. the web container, the browser's Host from `X-Forwarded-Host`, none for SSR fetches), `Sec-Fetch-Site: cross-site` block (except LAN CORS origins, `Origin: null` with `?app_key=<TV_APP_KEY>` (the packaged webOS app), GET/HEAD without Origin from a webOS user agent (its images and video) and page navigations outside `/api/`), 1 MB body cap, timeout middleware (skips `/api/torrent-stream/`), CORS with LAN origin check (`Origin: null` only with the app key), gzip for JSON answers under `/api/` (`gzip.go`, registered last so CORS preflights are untouched; skips HEAD, `Range`, `/api/torrent-stream/` and anything that is not `application/json`, decided when the handler starts writing; pooled `compress/gzip` writers at `BestSpeed`), `Lang(c)` from `X-Lang` then `?x_lang=`, `ProfileID(c)` from `X-User-ID` then `?profile_id=` (header-less GETs skip the CORS preflight), `GET /api/health`, `http.Server` with graceful shutdown |
 | `cache` | go-redis v8 wrapper; a nil `*Cache` is valid and behaves as "no cache" |
+| `daylog` | Log lines in one file per UTC day (`dir/2026-10-10.log`, stamped to the second), old days removed, a day cap and a per-key cap (client IP); `Tee` is an `io.Writer` for the standard logger that queues the lines it picks for such a writer (one goroutine writes them; a full queue of 1024 drops lines and says how many). Used by `playbacklog` and, in `main.go`, for the subtitle timing lines (`PLAYBACK_LOG_DIR/timing`) |
 | `tmdb` | TMDB HTTP client (v4 token as Bearer, on `upstream`), types, 24 h in-memory cache shared by catalog, providers and notifications; expired entries are kept 7 days and served when TMDB fails (see [DPI resilience](#dpi-resilience)) |
 | `upstream` | Resilient HTTP client for TMDB API, image CDN, the TMDB export files (search typo index) and subtitle providers: short timeouts, retries on a new connection, hedging (GETs), per-request budget, `Post` for repeatable POSTs (see [DPI resilience](#dpi-resilience)) |
 | `torbox` | TorBox debrid API client (`checkcached` in batches of 100, `createtorrent`, `mylist`, `requestdl`, `user/me`), Bearer key plus a `Nextflix/1.0` User-Agent (Cloudflare refuses default ones), HTTP/1.1 with short dial / TLS / header timeouts; the key never reaches an error message (see [Debrid](#debrid-torbox)) |
@@ -51,7 +52,7 @@ docs/                       this folder
 | `subtitles` | Subtitles from the torrent itself (separate files, small embedded text tracks), OpenSubtitles (moviehash sync), SubDL, SubSource, turkcealtyazi.org, subf2m.co (Subscene archive) and YIFY Subtitles (movies); SRT/ASS/VTT → UTF-8 WebVTT with Turkish charset repair, ranking, automatic timing to the playing file (see [Automatic subtitle timing](#automatic-subtitle-timing-modulessubtitlessyncgo)), disk cache, settings, optional AI translation of missing languages with Claude Haiku 5.5: the whole source in the background, nearest to the player first, every answered line checked against its own line by id and echo (`ai.go`, `ai_job.go`, `ai_prompt.go`; see [API.md](API.md#ai-translation)), holes (stretches a reference of the file has dialogue in and the subtitle has none) found per served subtitle, ranked down and filled by that translation (`holes*.go`, [API.md](API.md#holes)) | `subtitle_settings`, `ai_translation_usage`, files in `/app/data/subtitles` and `/app/data/ai-subtitles` |
 | `segments` | Intro and end credits of an episode for the Skip intro / Next episode prompts: file chapters, then TheIntroDB / IntroDB; see [Skip intro and Next episode](#skip-intro-and-next-episode) | `skip_segments` |
 | `images` | Disk-cached proxy for TMDB images (`GET /tmdb-img/t/p/:size/*file`) plus a home feed warmer; see [Images](#images) | files in `/app/data/img-cache` |
-| `playbacklog` | `POST /api/playback-log`: playback diagnostics from the TV player (waits, freezes, dropped frames, seeks) written as `playback: ...` log lines and daily files, rate limited per IP; read them with `scripts/playback-log.sh` (see [API.md](API.md#playback-log-modulesplaybacklog)) | daily files in `PLAYBACK_LOG_DIR`, 14 days |
+| `playbacklog` | `POST /api/playback-log`: playback diagnostics from the TV player (waits, freezes, dropped frames, seeks) written as `playback: ...` log lines and daily files, rate limited per IP; read them with `scripts/playback-log.sh`, which adds the server's timing lines of a session's files (see [API.md](API.md#playback-log-modulesplaybacklog)) | daily files in `PLAYBACK_LOG_DIR`, 14 days |
 
 A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and `routes.go` with
 `func Register(api *gin.RouterGroup, s *Service)`. `catalog`, `providers` and `images` have no model or repository; `images.Register` takes the engine itself because its route lives outside `/api`.
@@ -72,7 +73,9 @@ A module usually has `model.go`, `repository.go`, `service.go`, `handler.go` and
 
 ### Startup order (`cmd/nextflix/main.go`)
 
-1. Load `.env` if present (optional), `config.Load()`.
+1. Load `.env` if present (optional); with `PLAYBACK_LOG_DIR` set the standard logger also writes the subtitle
+   timing lines (`subtitles: …`, `warm: deferring/resuming subtitle timing read …`) to daily files in
+   `PLAYBACK_LOG_DIR/timing` (`keepTimingLog`, `platform/daylog`, 14 days, 20 MB a day); `config.Load()`.
 2. `database.Open`, then `database.Migrate` with the models of profiles, progress, ratings, top10, streaming,
    subtitles and segments.
 3. `cache.New` (on error the server logs it and runs without Redis), `tmdb.New`.
@@ -1726,6 +1729,52 @@ that change at splits), simplified:
   (matched by text, nearest start; lines of another subtitle counted apart), so slips near the viewer show
   without the players' logs. Pre-timing logs `pre-timing … (next episode)`, `pre-timing reads of <hash8>:<index> wait:
   no room beside the playing streams` and `pre-timing of … given up after …`.
+  Diagnostics (`sync_diag.go`; the lines are also kept in daily files, see [API.md](API.md#playback-log-modulesplaybacklog)):
+  - Every line about a served subtitle (`timing of …`, `kept the last accepted fit`, the move line, `pre-timing`,
+    `failed`, `given up` and the lines below) ends in `id=<8 hex>`: the FNV-1a hash of the id the subtitle is
+    listed with for the file, as the players log it (`subs id=`). An AI translation is shown under its own id:
+    `subtitles: <sub> on <hash8>:<index> is shown as <8 hex> (AI translation) id=<8 hex>`, once per viewing.
+  - The move line goes on with `; seen=<n> [seen_max=±…s] ahead=<n> [here=±…s]`: `seen` the moved cues that
+    started in the 60 s before the viewer (shown with the old timing, the one on screen included; `seen_max` the
+    largest move), `ahead` the moved ones that start at or after the viewer, `here` the move of the cue on
+    screen (0 when it stayed; none when no cue shows), like the players' `here`.
+  - Residual: what the viewer is served against the speech heard there. Every file request of a player with its
+    position (`t`; once per 60 s of its progress, in the background, from the heard speech kept for the re-fits:
+    no read, nothing while nobody watches) compares the answer's cue starts in the 90 s before and after it (300 s
+    back when fewer than 8 have speech near them: a film's music or action) with the speech onsets (speech after
+    a pause) of the heard windows, the own-track check's measure: each start with an onset within 1 s gives the
+    signed distance to the nearest one. A final answer (no more requests) is compared to the end of the file.
+    `subtitles: residual of <sub> on <hash8>:<index> at 1990s (1900-2080s): median +0.12s, 78 % within 0.3s
+    (chance 36 %), n=23 (live provisional, offset +7.13s, subs+live reference) id=…` (`median`: cue minus speech,
+    + late; `chance`: the share with the cues moved 2-4 s; `pending: the subtitle as it is` for an untimed
+    answer; `, to the end` for a final one). Measured in stretches of 3 minutes (`sync_diag_eval_test.go`): on
+    the snapshot of 2026-10-27 the synced results stored for the pairs served on 2026-10-22..26 (The Mentalist,
+    Westworld 4K UHD, Avatar; provisional and final, 384 stretches) have |median| ≤ 0.03 s in half the stretches
+    and ≤ 0.11 s in 90 %, within 0.3 s p10 / p50 / p90 60 / 84 / 93 %; fits over all the speech of films and long
+    episodes (Primal Fear 2 h 9 min 4K, Westworld S01E01 / S01E10 4K, Gilmore Girls; 238 stretches) ≤ 0.06 s in
+    90 %, 67 / 81 / 94 %, and a viewer gets a residual every minute of the heard speech (Primal Fear 53 minutes,
+    one of them from 300 s back; Westworld S01E10 67, three). Chance is 31-40 %. The same fits moved by +0.5 s:
+    median +0.48 s, within 9-12 %; by -0.3 s: -0.28 s, 48 %. Subtitles served as they are that do not fit, another cut's own track and fits that
+    missed the bars sit at chance (31-37 %), their median is noise (p90 0.3-0.8 s); own tracks timed to the file
+    and tight: -0.09 s (their lead), 83 %. Against the ASR truth (`TestTruthResidual`, snapshot of 2026-10-16,
+    The Mentalist S02E22, S03E01, S03E02, S02E16 "Code Red": 48 served stretches): residual median minus the
+    served cues' true median error p50 0.03 s, p90 0.16 s; the truth's own cues reach 86 % within 0.3 s (p10 77 %:
+    the detector misses onsets), the served ones 77 % (true 83 %). The S02E22 English lines refined onto its loose
+    captions, -0.22 to -0.35 s off in 5 stretches, read -0.18 to -0.34 s; two S03E02 Turkish stretches -0.27 /
+    +0.21 s off read only -0.12 / +0.11 s; the raw subtitles 3-9 s off and the own tracks of another cut (S03E01
+    PGS, S02E16 ASS) 24-37 %. So: within 0.3 s well above chance and |median| under 0.1 s is right; a median of
+    0.2 s or more with the share under chance is at least that much off; a share near chance is not on the
+    speech (another cut or release, or more than a second off), whatever the median says. A single stretch with
+    few cues (n under 20) can reach 55-70 % by chance (a raw subtitle 9 s off: 71 % of 17): read several lines.
+    Cost: at most 0.4 ms for 3 minutes, 0.9 ms for a 2 h film to its end (`BenchmarkDiagResidual`), plus parsing
+    the answer's cues; about 15 KB of log per hour watched (all timing lines of 2026-10-22..26: 200 KB).
+  - Untimed answers: when a viewing gets `pending` (the subtitle as it is) while a fit is held back, once per
+    viewing: `subtitles: pending of <sub> on <hash8>:<index>: its pre-timed fit held back would move 41 of 41 cues
+    within 300 s of the viewer at 22s: max +0.21s, median +0.21s id=…` (`its poor fit (score 0.21 over 0.10,
+    peak 0.05)` for one that missed the bars). The first timed answer of a viewing after untimed ones: `subtitles:
+    first timed answer of <sub> on <hash8>:<index> at 45s after 23 s of the raw subtitle (from 22s): moved 41 of
+    41 cues within 300 s of the viewer: max +0.21s, median +0.21s (live) id=…`, so how long and how far off the
+    viewer saw it shows without the player's log.
 - Ranking: later lists show a timed fitting subtitle as `synced` (after the ones made for the file) and move ones
   that do not fit down; the file's probed frame rate is the ranking's fps hint. A subtitle made for the playing
   release (same group, or same streaming service and source family; "WEBRip.Amazon" counts as AMZN) goes ahead of
