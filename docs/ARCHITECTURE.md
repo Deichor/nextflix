@@ -1508,7 +1508,10 @@ that change at splits), simplified:
   grown by half since every rate was tried, and the final fit tries them all (S03E02: a rate chosen from 4 played
   minutes was kept for good, the final fit too). A re-fit that keeps the served fit (hysteresis below) notes such a
   search too, else the next re-fits tried every rate again (S03E02 replayed: 7 of 39 re-fits instead of 23, the same
-  final fit).
+  final fit). A rate fitted to other windows (a set-aside own track's while the speech is fitted, or the other way
+  round) is tried beside the file's rate: The Mentalist S03E20's fit to its unchecked own track (another cut's) at
+  24/23.976 held every speech re-fit at that rate, under the bars from 240 to 940 s heard, so the speech's fit at the
+  file's rate (fitting from 470 s) never got the chance to replace it (`keepStable` still decides).
   Hysteresis: once a provisional fit was accepted, a re-fit that does not fit keeps it served (no alternatives tried;
   logged `kept the last accepted fit (new fit poor: …)`) until a new fit is accepted or the file is covered. On
   S02E10 the fit from 3 windows (one offset) turned poor at 6 windows as they passed the title sequence, so the

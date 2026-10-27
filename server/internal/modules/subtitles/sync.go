@@ -1198,6 +1198,10 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	if n := len(mergeWindows(ref.Windows, live)); prev != nil && prev.Live && prev.fits() && prev.Fit.Scale > 0 && !final && !read &&
 		2*n < 3*prev.RateWindows {
 		scales = []float64{prev.Fit.Scale}
+		if prev.Aside != r.setAside && prev.Fit.Scale != 1 {
+			// its rate was fitted to other windows (a set-aside track's, or the speech): the file's too
+			scales = []float64{1, prev.Fit.Scale}
+		}
 	}
 	// lengthFits still sees every cue (a longer cut runs past the end)
 	timed := clampSpans(spans, ref.Probe.Duration)
@@ -1224,7 +1228,7 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 		fit, ok = fitTo()
 	}
 	m := syncMeta{State: syncStatePoor, Fit: fit, Ref: refKind(ref, windows), Windows: len(windows), Aside: r.setAside}
-	if len(scales) > 1 {
+	if len(scales) == len(syncScales) {
 		m.RateWindows = len(windows)
 	} else if prev != nil {
 		m.RateWindows = prev.RateWindows
