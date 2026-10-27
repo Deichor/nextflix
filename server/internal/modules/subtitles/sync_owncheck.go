@@ -57,6 +57,8 @@ type ownCheck struct {
 	// there, so they do not time subtitles alone (checkOwnTrack)
 	NoFit bool
 	Lag   float64 // NoFit: its best offset, when one within the lag with more line starts on an onset than by chance
+	// lagPairs: the stretches Lag was found from (settleLag; 0: Pairs)
+	lagPairs int
 	// local: a loose track's offset per stretch (pair start; localOffsets), from localN pairs
 	local  map[float64]float64
 	localN int
