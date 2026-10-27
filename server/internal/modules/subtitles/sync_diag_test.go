@@ -191,14 +191,25 @@ func TestDiagObserveAViewing(t *testing.T) {
 	if share, _ := strconv.Atoi(res[2]); math.Abs(med) > 0.12 || share < 80 {
 		t.Fatalf("residual of the timed cues: %s", res[0])
 	}
-	// Requests without a player (another subtitle's reference, a translation source) log nothing
+	// Requests without a player, and the hole reference read for another subtitle shown, log nothing
 	n := strings.Count(buf.String(), "\n")
 	if _, err := svc.FileFor(t.Context(), id, 700); err != nil {
 		t.Fatal(err)
 	}
+	shown := wrapSyncID(cacheProviderSub(t, svc, "1|shown|2|10|1", raw), syncHash, 1)
+	if _, err := svc.fileFor(withPlayerID(t.Context(), shown), id, 760, false); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if strings.Count(buf.String(), "\n") != n {
-		t.Fatalf("a request without a player was observed:\n%s", buf.String())
+		t.Fatalf("a request for no player was observed:\n%s", buf.String())
+	}
+	// An AI translation of it: the player's id is named once
+	ai := encodeID(SourceAI, "de", "x|"+id)
+	svc.sync.observe(withPlayerID(t.Context(), ai), inner, syncHash, 1, 765, FileAnswer{Sync: syncStateLive, Partial: true})
+	svc.sync.observe(withPlayerID(t.Context(), ai), inner, syncHash, 1, 770, FileAnswer{Sync: syncStateLive, Partial: true})
+	if c := strings.Count(buf.String(), "is shown as "+subLogID(ai)+" (AI translation) "+tag); c != 1 {
+		t.Fatalf("AI id logged %d times:\n%s", c, buf.String())
 	}
 }
 
@@ -219,4 +230,21 @@ func TestDiagLogNearSplitsSeenAndAhead(t *testing.T) {
 	if !strings.Contains(buf.String(), want) {
 		t.Fatalf("log: %s", buf.String())
 	}
+}
+
+// A residual near the viewer, and one to the end of a 2 h film (a final answer).
+func BenchmarkDiagResidual(b *testing.B) {
+	file := dialogue(9, 7200)
+	cues := cuesOf(file, 0.1)
+	ws := joinWindows(liveWindowsOf(file, gridStarts(0, 7200), 0.1, 2))
+	b.Run("3min", func(b *testing.B) {
+		for b.Loop() {
+			residualOf(cues, ws, 3600, 3780)
+		}
+	})
+	b.Run("film", func(b *testing.B) {
+		for b.Loop() {
+			residualOf(cues, ws, 0, 7200)
+		}
+	})
 }

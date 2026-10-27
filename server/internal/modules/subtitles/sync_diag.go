@@ -75,6 +75,10 @@ func (y *syncer) observe(ctx context.Context, inner, hash string, index int, t f
 		return
 	}
 	id := syncLogID(inner, hash, index)
+	other := subLogID(pid) != id
+	if source, _, _, err := decodeID(pid); other && (err != nil || source != SourceAI) {
+		return // another subtitle's request (a hole reference of the one shown)
+	}
 	now := time.Now()
 	y.mu.Lock()
 	s := y.served[key]
@@ -83,7 +87,7 @@ func (y *syncer) observe(ctx context.Context, inner, hash string, index int, t f
 		return
 	}
 	d := y.viewDiag(key, s.first)
-	alias := !d.aliased && subLogID(pid) != id
+	alias := other && !d.aliased
 	d.aliased = d.aliased || alias
 	untimed := a.Sync == syncStatePending
 	if untimed && d.rawSince.IsZero() && !d.timed {
