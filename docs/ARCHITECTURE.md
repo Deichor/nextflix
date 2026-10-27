@@ -1683,7 +1683,8 @@ that change at splits), simplified:
   file's bitrate it waits, and after 3 minutes of waiting the job gives up without marking the timing failed (the
   episode's first request times it). A fit made before any of the file's
   audio was heard is marked pre-timed (`pre`): when the episode opens it is answered `pending` (the subtitle as it
-  is) until the first re-fit with played audio keeps or replaces it, a few seconds into the episode, or the played
+  is) until the first re-fit with played audio keeps or replaces it (one before any of it was heard keeps it
+  pending; it showed S03E16's, 3 s off in the teaser, from 3 s), a few seconds into the episode, or the played
   windows back it while the re-fits still find no fit (`backsPre`: on them its offsets match more lines than the
   fit moved as a whole by 0.4 s or more within ±15 s, by 3 lines, and beat chance by the gain bar; measured on the
   pre-timed fits of both snapshots, none backed wrong before 90 s heard, about a third of the right ones by 90 s;
