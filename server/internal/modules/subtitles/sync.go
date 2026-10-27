@@ -1166,19 +1166,32 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 
 // fitAside is fitOne and, when the speech does not time the subtitle, a fit to the windows of an
 // own track set aside (OwnAside: not known, or no fit to the speech; as before the check), for the
-// subtitle and each alternative alike, unless the speech timed it before (speechFit): a few more
-// windows can tip that fit under the bars, and it is kept then (keepAccepted), not replaced by
-// the windows of a track that did not fit the speech (The Mentalist S03E15: its pre-timed fit
-// right, the set-aside track's 2 s early for 30 s). It returns the windows of the fit with the
-// speech.
+// subtitle and each alternative alike, unless the speech timed it before (speechFit) and the
+// speech's windows still prefer that fit (speechPrefers): a few more windows can tip it under the
+// bars, and it is kept then (keepAccepted), not replaced by the windows of a track that did not
+// fit the speech (The Mentalist S03E15: its pre-timed fit right, the set-aside track's 2 s early
+// for 30 s). It returns the windows of the fit with the speech.
 func (y *syncer) fitAside(ctx context.Context, inner, hash string, index int, r fitRefs, vtt []byte, read bool, prev *syncMeta, final bool) (syncMeta, []byte, fitRefs) {
 	m, out, r := y.fitOne(ctx, inner, hash, index, r, vtt, read, prev, final)
-	if r.ref.OwnAside && !m.fits() && (final || !speechFit(prev)) {
-		if om, ovtt, _ := y.fitOne(ctx, inner, hash, index, r.aside(), vtt, false, prev, final); om.fits() {
+	if r.ref.OwnAside && !m.fits() {
+		om, ovtt, _ := y.fitOne(ctx, inner, hash, index, r.aside(), vtt, false, prev, final)
+		if om.fits() && (final || !speechFit(prev) || !speechPrefers(prev.Fit, om.Fit, vtt, r.ref.Probe.Duration, m.Fit.windows)) {
 			return om, ovtt, r
 		}
 	}
 	return m, out, r
+}
+
+// speechPrefers reports whether the speech windows ws match fit a by an offset change's worth of
+// lines more than fit b.
+func speechPrefers(a, b syncFit, base []byte, duration float64, ws []refWindow) bool {
+	if len(ws) == 0 {
+		return false
+	}
+	cues := baseSpans(base, duration)
+	sa, _ := rescore(cues, ws, a)
+	sb, _ := rescore(cues, ws, b)
+	return sa-sb >= syncSplitPenalty
 }
 
 // lengthFits rejects a subtitle that runs past the end of the video or covers too little of it
