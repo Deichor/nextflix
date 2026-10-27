@@ -1,9 +1,11 @@
 package subtitles
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"sort"
+	"strings"
 )
 
 // Subtitle timing correction, the math (sync.go runs it). Like ffsubsync, the subtitle and a
@@ -123,6 +125,7 @@ type syncFit struct {
 	windowOffsets []float64
 	windows       []refWindow
 	minPeak       float64 // a higher peak bar for a small reference (alignLive)
+	note          string  // a fit of another shape that was not taken, and why (logs)
 }
 
 // Thresholds of a fitting subtitle, from The Mentalist S02E07 against its Netflix track: three
@@ -135,6 +138,34 @@ const (
 
 func (f syncFit) good() bool {
 	return f.Score-f.Base >= syncMinGain && f.Peak >= math.Max(syncMinPeak, f.minPeak)
+}
+
+// missedBars names the bars the fit misses and by how much, and the fit of another shape not
+// taken (logs; "" when there is nothing to say).
+func (f syncFit) missedBars() string {
+	var out []string
+	if g := f.Score - f.Base; g < syncMinGain {
+		out = append(out, fmt.Sprintf("gain %.3f under %.2f", g, syncMinGain))
+	}
+	if bar := math.Max(syncMinPeak, f.minPeak); f.Peak < bar {
+		out = append(out, fmt.Sprintf("peak %.3f under %.2f", f.Peak, bar))
+	}
+	if f.note != "" {
+		out = append(out, f.note)
+	}
+	return strings.Join(out, "; ")
+}
+
+// offsetsText is the fit's offsets as logged: "-5.88s -9.64s@865s".
+func offsetsText(f syncFit) string {
+	offs := make([]string, len(f.Segments))
+	for i, s := range f.Segments {
+		offs[i] = fmt.Sprintf("%+.2fs", s.Offset)
+		if i > 0 {
+			offs[i] += fmt.Sprintf("@%.0fs", s.From)
+		}
+	}
+	return strings.Join(offs, " ")
 }
 
 // linedUp reports a fit that missed only the peak bar while the subtitle as it is already sits
@@ -219,10 +250,11 @@ func alignLive(cues []span, windows []refWindow, scales []float64) (syncFit, boo
 		if n >= liveSplitWindows {
 			// One change (a title sequence) at a higher bar, else the single offset
 			if g, ok2 := alignWith(cues, ws, scales[:1], syncSplitPenalty, 1); ok2 && len(g.Segments) > 1 {
-				g.minPeak = 2.5 * syncMinPeak
+				g.minPeak = liveSplitPeak
 				if g.good() {
 					return g, true
 				}
+				f.note = fmt.Sprintf("one change %s not taken: %s", offsetsText(g), g.missedBars())
 			}
 		}
 		return f, ok
@@ -246,6 +278,9 @@ func alignLive(cues []span, windows []refWindow, scales []float64) (syncFit, boo
 	f.minPeak = 1.25 * syncMinPeak
 	return f, ok
 }
+
+// liveSplitPeak is the peak bar of a live fit's one offset change below syncMinWindows windows.
+var liveSplitPeak = 2.5 * syncMinPeak
 
 func refLines(ws []prepared) float64 {
 	n := 0.0
