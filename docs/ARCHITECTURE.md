@@ -1331,7 +1331,12 @@ those retries and the audio is in another language:
   wait ends (an AI translation's first answer often fails once; before, every seek logged `why=failed` for 5
   minutes). The TV does the same (`subtitleRetryMs`); they and the items the server marks `quota: true` are greyed in the panel with the hint
   "giriş yapınca hak artar" / "more after signing in", and the default pick, a remembered pick and late lists only
-  take them when nothing else of that language is left. Only the chosen file is ever downloaded.
+  take them when nothing else of that language is left. Only the chosen file is ever downloaded. A download that
+  holds no subtitle that fits (a season pack without the episode, an archive without subtitle files, a RAR one)
+  answers 404 and is remembered for 24 h (`<source>/<key>.none` in the cache): not downloaded again and left out of
+  the lists, so it is neither the default pick nor the pre-timed one (The Mentalist S03E24: turkcealtyazi's season 3
+  pack holds E23 and E24 as one subtitle, found as E23; listed first for E24, it failed the pre-timing and the open,
+  and the OpenSubtitles subtitle the TV fell back to was shown untimed, 22 s late, for its first 21 s).
 
 Embedded text tracks of big files are read live (`modules/subtitles/live.go`): extracting a track of an MKV / MP4
 means reading the whole file, so before, such tracks were only offered for small or mostly cached files. Now they are
@@ -1585,7 +1590,13 @@ that change at splits), simplified:
   outside own-track windows stay as the fit serves them. Only a tight own track refines (own-track check above):
   onto the loose captions of S02E22 the moved lines got worse against the speech (78 % within 0.3 s from the fit,
   39 % refined; the truth agent's ASR truth), while the evaluations below measured the lines against the own
-  track itself.
+  track itself. Its thresholds turn small shifts into line moves, so a re-fit whose offsets moved by 0.05 s at most
+  (splits by 1 s; same rate and lag) is served with the last ones (`pinnedFit`), and the own-track check keeps its
+  offsets so too (`settleOwn`): The Mentalist S03E23's replacement subtitle, fitted again with every re-fit (the
+  alternatives have no `keepStable`), went +0.03 / +0.04 s and the check +0.08 / +0.10 s, and single lines went back
+  and forth by up to 0.45 s (replayed a minute at a time, `TestRefitsKeepRefinedLines`: 13 flips → 1, the line just
+  refined at the edge of the stretch heard last; moves of lines already shown 11 → 4). Lines of a stretch heard for
+  the first time still move once, 30 to 90 s before they show.
 - Serving (`sync.go`): the file request answers the subtitle as it is at once (marked partial, `NOTE
   nextflix-partial`, so the players ask again every 15 s, every 5 s while it is `pending` in the first 3 minutes after
   they put it on; a timing ready within 2.5 s is answered directly) and
@@ -1614,7 +1625,12 @@ that change at splits), simplified:
 - Next episode (`pretime`, `?pre=1`): the players warm the next episode 10 minutes before the end; once that resolve
   has a source (`resolve?cached=1`, asked every 20 s for 3 minutes) they list its subtitles and ask the one their
   default pick would show with `pre=1`. The server starts its timing like a first request (reference read, decide),
-  but notes nothing as served (no live re-fits, no first-answer grace); the reads wait in the LineGate like every
+  but notes nothing as served (no live re-fits, no first-answer grace). A pick that gives no cues (a download that
+  holds no subtitle that fits, an OpenSubtitles quota used up) is not what the episode's list will offer first, so
+  the next one of its language in the file's last list is pre-timed instead (logged `pre-timing <id> on
+  <hash8>:<index> (next episode) in place of <id>: <why>`; up to 3 tried, none when that one is made for the file).
+  A movie, or an episode opened without a pre-timing, has no such step: its first pick that gives no cues falls back
+  in the player, and that subtitle is timed from its first request on. The reads wait in the LineGate like every
   timing read and, until the file plays, every window read (also the speech read with an own-track window, and
   TorBox files: the same home line) asks streaming for room first (`ReadRoom.RoomToRead(hash)`): the line is known
   and the playing streams, of known bitrate, need at most half of it; for another file of a playing swarm torrent
@@ -1726,8 +1742,11 @@ that change at splits), simplified:
   read, …` for a reference saved before (`(cut: the rest next time)`); the own-track check's line above. When what
   is served changes and the player sent its position (`t`, within 2 minutes), `timing of … moved <n> of <m> cues
   within 300 s of the viewer at <t>s: max ±…s, median ±…s` says how the cues just ahead of the viewer moved
-  (matched by text, nearest start; lines of another subtitle counted apart), so slips near the viewer show
-  without the players' logs. Pre-timing logs `pre-timing … (next episode)`, `pre-timing reads of <hash8>:<index> wait:
+  (matched by text: a text that comes as often in both by rank, else the nearest start; lines without a match
+  counted apart), so slips near the viewer show without the players' logs. When it serves another subtitle's cues
+  than before (replaced, or back to its own) nothing is matched (lines of two translations matched by text gave
+  `max +1077.00s`): `timing of … serves the cues of <id> instead of <id> (<state>) from the viewer at <t>s: <n> cues
+  within 300 s`. Pre-timing logs `pre-timing … (next episode)`, `pre-timing reads of <hash8>:<index> wait:
   no room beside the playing streams` and `pre-timing of … given up after …`.
   Diagnostics (`sync_diag.go`; the lines are also kept in daily files, see [API.md](API.md#playback-log-modulesplaybacklog)):
   - Every line about a served subtitle (`timing of …`, `kept the last accepted fit`, the move line, `pre-timing`,
@@ -1863,6 +1882,18 @@ viewer watches): with the read windows (own track timed, +0.49 s) median −0.56
 23.976 ↔ 23.98 fps among the rates (Westworld S01E05 drifts 0.17 s per 1000 s against its own track, as that ratio
 predicts, but the ratio does not beat the file's rate by the 0.05 a near rate needs; two offsets, −0.92 / −1.18 s
 from 1801 s, keep it within about 0.15 s).
+Replaced subtitles (`sync_fallback_eval_test.go`): `TestSnapshotFallbackReplay` replays the S03E23 and S03E20
+viewings with the subtitles listed for them, a minute at a time (lines moved: already shown, heard but not shown,
+ahead of the audio; flips back to an earlier place): S03E23's replacement 13 flips → 1 with kept offsets, moves of
+lines already shown 11 → 4, 137 first refinements of lines 30-90 s before they show stay. `TestSnapshotRefitStability`
+does the same for the pairs the server served (`NFX_PAIRS`) and every file with live windows of more snapshots
+(`NFX_STAB_MORE`), with kept offsets off and on: on the snapshots of 2026-10-16 and 2026-10-27 (64 pairs, 2409
+re-fits; episodes, films up to 130 minutes, read and audio-only files) the subtitles served by themselves come out the
+same (flips 6041 → 6229, moves of lines already shown 10552 → 10615; of 36 pairs listed 34 alike, the other two
+take another path of the same wandering split, below): there `keepStable` keeps a re-fit whose offsets barely
+moved. The flips there are offset changes the fit takes and gives back: on file bf8fac49 a split of a Turkish
+subtitle (+6.3 / +9.2 s) moved between 1059 and 1362 s, and 100-150 lines the viewer saw already moved by 3 s each
+time, with kept offsets or without.
 A PGS own track (`sync_pgs_eval_test.go`, NFX_GT; The Mentalist S03E02 d3g, no text track, its English PGS track as
 the tap and the reads give it, 970 lines; each line scored against the PGS line starts): the subf2m subtitles were
 served from the speech, TR at x1.0010 with 7 offsets (48 % of 576 lines within 0.15 s, 76 % within 0.3 s, p90

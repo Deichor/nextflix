@@ -12,8 +12,19 @@ import (
 	"strings"
 )
 
+// ErrNoSubtitle: a download holds no subtitle that fits (a season pack without the episode, an
+// archive without subtitle files, a RAR one). The same download answers the same, so it is
+// remembered for a while (Service.File) and left out of the lists.
+var ErrNoSubtitle = errors.New("no subtitle in the download")
+
+// noSubtitle is an ErrNoSubtitle with its reason.
+type noSubtitle string
+
+func (e noSubtitle) Error() string        { return string(e) }
+func (e noSubtitle) Is(target error) bool { return target == ErrNoSubtitle }
+
 // ErrRarUnsupported is returned for RAR archives: there is no RAR reader in the standard library.
-var ErrRarUnsupported = errors.New("RAR archives are not supported")
+var ErrRarUnsupported error = noSubtitle("RAR archives are not supported")
 
 func isZip(b []byte) bool { return len(b) > 4 && bytes.HasPrefix(b, []byte("PK\x03\x04")) }
 func isRar(b []byte) bool { return bytes.HasPrefix(b, []byte("Rar!\x1a\x07")) }
@@ -138,9 +149,9 @@ func pickFromArchive(raw []byte, season, episode int, lang string) ([]byte, stri
 	}
 	if best == nil {
 		if episode > 0 {
-			return nil, "", errors.New("episode not found in the subtitle pack")
+			return nil, "", noSubtitle("episode not found in the subtitle pack")
 		}
-		return nil, "", errors.New("no subtitle file in the archive")
+		return nil, "", noSubtitle("no subtitle file in the archive")
 	}
 	rc, err := best.Open()
 	if err != nil {

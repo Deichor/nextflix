@@ -220,7 +220,9 @@ func (f *liveFile) withLocal(c ownCheck, n int, pairs []ownPair) ownCheck {
 // settleOwn is the check that stands after a new one: a decision is kept against one that does
 // not decide, or decides otherwise from fewer than a third more stretches (The Mentalist S02E22's
 // captions went timed, not known, timed at 15, 26 and 34 stretches); a tight track stays tight
-// down to ownLooseShare of its line starts on an onset.
+// down to ownLooseShare of its line starts on an onset. Offsets that moved by 0.05 s at most stay
+// (closeSegments): the line refinement turned +0.08 / +0.10 s on The Mentalist S03E23 into moves
+// of 35 lines by up to 0.4 s, back and forth.
 func settleOwn(prev, c ownCheck) ownCheck {
 	if prev.State == "" {
 		return c
@@ -230,6 +232,9 @@ func settleOwn(prev, c ownCheck) ownCheck {
 	}
 	if c.State == ownTimed && prev.State == ownTimed && prev.Tight && !c.Tight && c.Near >= ownLooseShare {
 		c.Tight = true
+	}
+	if c.State == ownTimed && prev.State == ownTimed && closeSegments(prev.Fit.Segments, c.Fit.Segments) {
+		c.Fit.Segments = prev.Fit.Segments
 	}
 	return c
 }
