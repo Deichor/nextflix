@@ -118,6 +118,10 @@ func fileError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusBadGateway, gin.H{"error": ke.Error(), "ai": true, "error_kind": ke.Kind})
 	case errors.Is(err, ErrRateLimited):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrNoSubtitle):
+		// The same download answers the same: the players show another subtitle, not this one again
+		log.Printf("subtitles: file: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	default:
 		log.Printf("subtitles: file: %v", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})

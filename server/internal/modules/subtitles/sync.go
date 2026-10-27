@@ -448,8 +448,29 @@ func (y *syncer) serve(ctx context.Context, inner, hash string, index int, t flo
 // is noted as served (live re-fits, the first answers' grace). Reads wait in the LineGate like
 // every timing read, and until the file plays each window read (TorBox files too: the same home
 // line) also waits for room beside the playing streams and takes at most that (readRoom); the
-// job gives up after syncRoomWait of waiting. It returns the timing state.
+// job gives up after syncRoomWait of waiting. It returns the timing state. A subtitle that gives
+// no cues (a season pack without the episode, left out of the episode's list from then on; an
+// OpenSubtitles quota used up, listed behind the others) is not what the episode will show: the
+// subtitle its list then offers first is pre-timed in its place (nextPick).
 func (y *syncer) pretime(ctx context.Context, inner, hash string, index int) (string, error) {
+	state, err := y.pretimeOne(ctx, inner, hash, index, nil)
+	var qe QuotaError
+	if err == nil || !errors.Is(err, ErrNoSubtitle) && !errors.As(err, &qe) {
+		return state, err
+	}
+	alt, base := y.nextPick(ctx, hash, index, inner)
+	if alt == "" {
+		log.Printf("subtitles: pre-timing %s on %s:%d: %v; no other subtitle of its language to time", shortSubID(inner),
+			hash[:8], index, err)
+		return "", err
+	}
+	log.Printf("subtitles: pre-timing %s on %s:%d (next episode) in place of %s: %v", shortSubID(alt), hash[:8], index,
+		shortSubID(inner), err)
+	return y.pretimeOne(ctx, alt, hash, index, base)
+}
+
+// pretimeOne is pretime of one subtitle; base is its WebVTT (nil: File).
+func (y *syncer) pretimeOne(ctx context.Context, inner, hash string, index int, base []byte) (string, error) {
 	key, err := syncKey(inner, hash, index)
 	if err != nil {
 		return "", err
@@ -463,13 +484,49 @@ func (y *syncer) pretime(ctx context.Context, inner, hash string, index int) (st
 	if y.svc.flights.running("sync|" + key) {
 		return syncStatePending, nil
 	}
-	base, err := y.svc.File(ctx, inner)
-	if err != nil {
-		return "", err
+	if base == nil {
+		if base, err = y.svc.File(ctx, inner); err != nil {
+			return "", err
+		}
+		log.Printf("subtitles: pre-timing %s on %s:%d (next episode)", shortSubID(inner), hash[:8], index)
 	}
-	log.Printf("subtitles: pre-timing %s on %s:%d (next episode)", shortSubID(inner), hash[:8], index)
 	y.startTiming(inner, hash, index, base, true)
 	return syncStatePending, nil
+}
+
+// nextPick is the subtitle the players' default pick shows on the file once inner is not offered
+// first: the first other one of its language in the file's last list (not forced; OpenSubtitles
+// only while its quota lasts) that gives cues (up to 3 tried), and its WebVTT; "" for none, also
+// when that one is made for the file (it is never timed).
+func (y *syncer) nextPick(ctx context.Context, hash string, index int, inner string) (string, []byte) {
+	_, lang, _, err := decodeID(inner)
+	if err != nil {
+		return "", nil
+	}
+	y.mu.Lock()
+	list := append([]Sub(nil), y.lists[syncFileKey(hash, index)]...)
+	y.mu.Unlock()
+	quota := !y.svc.OpenSubtitlesQuotaUntil().IsZero()
+	tries := 0
+	for _, s := range list {
+		if s.Language != lang || s.Forced || quota && s.Source == SourceOpenSubtitles {
+			continue
+		}
+		in, _, _, ok := unwrapSyncID(s.ID)
+		if !ok {
+			return "", nil
+		}
+		if in == inner {
+			continue
+		}
+		if b, err := y.svc.File(ctx, in); err == nil {
+			return in, b
+		}
+		if tries++; tries == 3 {
+			break
+		}
+	}
+	return "", nil
 }
 
 // answer is the stored answer of key; a provisional one is marked live (pending while nothing
@@ -812,17 +869,34 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 }
 
 // storeWatched stores a result of key and, while a player of it sent its position, logs how the
-// cues ahead of the viewer moved (logNear).
+// cues ahead of the viewer moved (logNear), or which subtitle's cues it serves now: the lines of
+// two subtitles matched by text are no moves (+1077 s for The Mentalist S03E23's replacement).
 func (y *syncer) storeWatched(key, inner, hash string, index int, base []byte, prev *syncMeta, m syncMeta, vtt []byte) {
-	_, watched := y.viewerAt(key)
+	at, watched := y.viewerAt(key)
 	var before []liveCue
 	if watched {
 		before = y.servedCues(key, base, prev)
 	}
 	y.store(key, m, vtt)
-	if watched {
-		y.logNear(key, inner, hash, index, before, y.servedCues(key, base, &m))
+	if !watched {
+		return
 	}
+	after := y.servedCues(key, base, &m)
+	if from, to := servedBy(inner, prev), servedBy(inner, &m); from != to {
+		mv := movesNear(nil, after, at, at+liveNearAhead)
+		log.Printf("subtitles: timing of %s on %s:%d serves the cues of %s instead of %s (%s) from the viewer at %.0fs: %d cues within %.0f s",
+			shortSubID(inner), hash[:8], index, shortSubID(to), shortSubID(from), m.State, at, mv.cues, liveNearAhead)
+		return
+	}
+	y.logNear(key, inner, hash, index, before, after)
+}
+
+// servedBy is the subtitle whose cues a result of inner serves.
+func servedBy(inner string, m *syncMeta) string {
+	if m != nil && m.State == syncStateReplaced && m.ReplacedBy != "" {
+		return m.ReplacedBy
+	}
+	return inner
 }
 
 // keepAccepted reports whether a provisional fit that was accepted stays served although the
@@ -1057,6 +1131,9 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	}
 	if !ok || !fit.good() || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, r
+	}
+	if p, ok := pinnedFit(prev, fit); ok {
+		fit, m.Fit = p, p
 	}
 	served := refineFit(cues, fit, refineWindows(ref, live))
 	if !fit.changes() && !refineMoved(cues, served) {

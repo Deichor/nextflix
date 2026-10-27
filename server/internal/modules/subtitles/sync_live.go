@@ -829,21 +829,41 @@ type cueMoves struct {
 	max, median        float64 // signed: the largest move in size, the median move of the moved ones
 }
 
-// movesNear compares two served cue lists in [from, to) (old or new start): each cue is matched to
-// the old cue of the same text that started nearest to it.
+// movesNear compares two served cue lists of one subtitle in [from, to) (old or new start): each
+// cue is matched to the old cue of the same text, the one of the same rank when the text comes as
+// often in both (a line said twice is not taken for the other one), else the one that started
+// nearest to it.
 func movesNear(before, after []liveCue, from, to float64) cueMoves {
-	old := map[string][]float64{}
+	old, count := map[string][]float64{}, map[string]int{}
 	for _, c := range before {
 		old[c.text] = append(old[c.text], c.start)
 	}
+	for _, starts := range old {
+		sort.Float64s(starts)
+	}
+	for _, c := range after {
+		count[c.text]++
+	}
+	after = append([]liveCue(nil), after...)
+	sort.SliceStable(after, func(i, j int) bool { return after[i].start < after[j].start })
+	rank := map[string]int{}
 	var mv cueMoves
 	var moves []float64
 	for _, c := range after {
 		starts := old[c.text]
-		best, found := 0.0, false
-		for _, s := range starts {
-			if !found || math.Abs(s-c.start) < math.Abs(best-c.start) {
-				best, found = s, true
+		k := rank[c.text]
+		rank[c.text]++
+		best, found := 0.0, len(starts) > 0
+		switch {
+		case !found:
+		case len(starts) == count[c.text]:
+			best = starts[k]
+		default:
+			best = starts[0]
+			for _, s := range starts[1:] {
+				if math.Abs(s-c.start) < math.Abs(best-c.start) {
+					best = s
+				}
 			}
 		}
 		in := c.start >= from && c.start < to
