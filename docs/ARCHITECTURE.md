@@ -1833,6 +1833,12 @@ viewer watches): with the read windows (own track timed, +0.49 s) median −0.56
 23.976 ↔ 23.98 fps among the rates (Westworld S01E05 drifts 0.17 s per 1000 s against its own track, as that ratio
 predicts, but the ratio does not beat the file's rate by the 0.05 a near rate needs; two offsets, −0.92 / −1.18 s
 from 1801 s, keep it within about 0.15 s).
+Replaced subtitles (`sync_fallback_eval_test.go`): `TestSnapshotFallbackReplay` replays the S03E23 and S03E20
+viewings with the subtitles listed for them, a minute at a time (lines moved: already shown, heard but not shown,
+ahead of the audio; flips back to an earlier place): S03E23's replacement 13 flips → 1 with kept offsets, moves of
+lines already shown 11 → 4, 137 first refinements of lines 30-90 s before they show stay. `TestSnapshotRefitStability`
+does the same for the pairs the server served (`NFX_PAIRS`) and every file with live windows of more snapshots
+(`NFX_STAB_MORE`), with kept offsets off and on.
 A PGS own track (`sync_pgs_eval_test.go`, NFX_GT; The Mentalist S03E02 d3g, no text track, its English PGS track as
 the tap and the reads give it, 970 lines; each line scored against the PGS line starts): the subf2m subtitles were
 served from the speech, TR at x1.0010 with 7 offsets (48 % of 576 lines within 0.15 s, 76 % within 0.3 s, p90
