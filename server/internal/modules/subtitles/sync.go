@@ -976,9 +976,17 @@ func (y *syncer) altsDue(key string, read bool) bool {
 }
 
 func logKept(inner, hash string, index int, m syncMeta, liveWindows int, liveSecs float64) {
-	log.Printf("subtitles: timing of %s on %s:%d: kept the last accepted fit (new fit %s: score %.2f over %.2f, peak %.2f; %d windows (%d live, %.0f s played)) id=%s",
-		shortSubID(inner), hash[:8], index, m.State, m.Fit.Score, m.Fit.Base, m.Fit.Peak, m.Windows, liveWindows, liveSecs,
-		syncLogID(inner, hash, index))
+	log.Printf("subtitles: timing of %s on %s:%d: kept the last accepted fit (new fit %s: offsets %s, score %.2f over %.2f, peak %.2f%s; %d windows (%d live, %.0f s played)) id=%s",
+		shortSubID(inner), hash[:8], index, m.State, offsetsText(m.Fit), m.Fit.Score, m.Fit.Base, m.Fit.Peak, missedNote(m.Fit),
+		m.Windows, liveWindows, liveSecs, syncLogID(inner, hash, index))
+}
+
+// missedNote names the bars a fit missed and the fit of another shape not taken (logs).
+func missedNote(f syncFit) string {
+	if m := f.missedBars(); m != "" {
+		return " (" + m + ")"
+	}
+	return ""
 }
 
 // fitChanged reports whether a new result differs from the stored one in what is served.
@@ -998,13 +1006,6 @@ func fitChanged(prev *syncMeta, m syncMeta) bool {
 
 func logSync(inner, hash string, index int, m syncMeta, took time.Duration) {
 	f := m.Fit
-	offs := make([]string, len(f.Segments))
-	for i, s := range f.Segments {
-		offs[i] = fmt.Sprintf("%+.2fs", s.Offset)
-		if i > 0 {
-			offs[i] += fmt.Sprintf("@%.0fs", s.From)
-		}
-	}
 	extra := ""
 	if m.ReplacedBy != "" {
 		extra = " by " + shortSubID(m.ReplacedBy)
@@ -1019,8 +1020,8 @@ func logSync(inner, hash string, index int, m syncMeta, took time.Duration) {
 	if m.LiveWindows > 0 {
 		live = fmt.Sprintf(" (%d live, %.0f s played)", m.LiveWindows, m.LiveSeconds)
 	}
-	log.Printf("subtitles: timing of %s on %s:%d: %s%s (scale %.4f, offsets %s, score %.2f over %.2f, peak %.1f; %s reference, %d windows%s, %s) id=%s",
-		shortSubID(inner), hash[:8], index, m.State, extra, f.Scale, strings.Join(offs, " "), f.Score, f.Base, f.Peak,
+	log.Printf("subtitles: timing of %s on %s:%d: %s%s (scale %.4f, offsets %s, score %.2f over %.2f, peak %.2f%s; %s reference, %d windows%s, %s) id=%s",
+		shortSubID(inner), hash[:8], index, m.State, extra, f.Scale, offsetsText(f), f.Score, f.Base, f.Peak, missedNote(f),
 		m.Ref, m.Windows, live, took.Round(100*time.Millisecond), syncLogID(inner, hash, index))
 }
 
@@ -1131,7 +1132,7 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	} else if prev != nil {
 		m.RateWindows = prev.RateWindows
 	}
-	if !ok || !fit.good() || !lengthFits(spans, fit, ref.Probe.Duration) {
+	if !ok || !(fit.good() || !final && heldFits(prev, fit)) || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, r
 	}
 	if p, ok := pinnedFit(prev, fit); ok {
@@ -1144,6 +1145,20 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	}
 	m.State = syncStateSynced
 	return m, renderVTT(served, false), r
+}
+
+// syncHeldGain is the gain bar of a re-fit while an accepted provisional fit is served (heldFits).
+var syncHeldGain = 0.12
+
+// heldFits reports whether a re-fit that missed only the gain bar, by at most syncMinGain -
+// syncHeldGain, counts as fitting while an accepted provisional fit of the same rate is served: the
+// subtitle was found to fit, and one with offset changes (made for another cut) can sit just under
+// the bar as windows come in while the served offsets go stale ahead of the viewer. keepStable
+// still keeps the served fit unless this one matches clearly more lines. Not for a pre-timed fit
+// (its backing) nor one lent by another file.
+func heldFits(prev *syncMeta, f syncFit) bool {
+	return prev != nil && prev.Live && prev.fits() && !prev.Pre && prev.SameCut == "" && prev.Fit.Scale == f.Scale &&
+		f.Score-f.Base >= syncHeldGain && f.Peak >= math.Max(syncMinPeak, f.minPeak)
 }
 
 // fitAside is fitOne and, when the speech does not time the subtitle, a fit to the windows of an

@@ -1492,9 +1492,14 @@ that change at splits), simplified:
   PAL subtitle of a 23-minute episode never fitted before), and the peak bar is 0.10 instead of 0.08 (another
   episode's subtitle with 3-41 contiguous windows: 1 of 480 cases fits, at 20 windows, with the plain rules 46 of 480;
   with 4-7 windows and the one change: 0 of 632, while 73 % of the true changes are found; with 8-20 contiguous
-  windows and the other rates: 0 of 60). An offset change costs as much as with read windows: the cost used to grow
-  with the windows (4 × windows / 12 lines), which dropped a real teaser offset once most of an episode was heard
-  (Mentalist S02E10 KONTRAST and a Gilmore Girls file, 2 s off before the title sequence). Shaped like S02E10
+  windows and the other rates: 0 of 60). These bars hold back real fits only where the evidence is ambiguous: Avatar:
+  Seven Havens S01E07 (2026-10-25, Turkish subtitle 5.9 s late, -9.6 s after 865 s) was served as it is for the first
+  49 s of the picture; from the cue tap's first 3 minutes of the own track the right offset tied with one 39 s away
+  (0.36 and 0.35 matched lines per line, the same second peak in the speech of those minutes: peak 0.0 under 0.12),
+  and with the first 4 read windows the one change scored peak 0.15-0.18 under its 0.20 until the 4th played
+  minute (`TestAvatarFirstMinutesWaitForEvidence`). An offset change costs as much as with read windows: the cost
+  used to grow with the windows (4 × windows / 12 lines), which dropped a real teaser offset once most of an episode
+  was heard (Mentalist S02E10 KONTRAST and a Gilmore Girls file, 2 s off before the title sequence). Shaped like S02E10
   (+0.66 s in the teaser, +3.00 s after the title sequence at ~214 s, a minute of audio at a time), the change is found
   at the 5th window. A later re-fit of a fitting subtitle keeps its frame rate (fewer FFTs) until the reference has
   grown by half since every rate was tried, and the final fit tries them all (S03E02: a rate chosen from 4 played
@@ -1507,6 +1512,23 @@ that change at splits), simplified:
   subtitle was served untimed for two minutes before two offsets fitted at 8. A re-fit that fits replaces the served
   fit only when its offsets match 4 lines more on the current windows than the served ones do (`keepStable`), else
   the cues moved back and forth by fractions of a second between re-fits (the players logged `moved=` on most polls).
+  While an accepted fit is served (not a pre-timed one, nor one lent by another file of the same cut), a re-fit at
+  its frame rate that misses only the gain bar, by at most 0.03 (the held bar 0.12; the peak bar still holds), counts
+  as fitting, so `keepStable` can let its offsets replace the served ones; the final fit has the plain bars. A
+  subtitle made for another cut, with offset changes at act breaks, can sit just under the gain bar on the speech for
+  minutes while the served offsets go stale ahead of the viewer: The Mentalist S03E20 (2026-10-24, Turkish season
+  pack, the own track another cut's): accepted at 470 s heard with -3.67 s from 768 s where -1.85 s holds from 714 s
+  to 1417 s, the re-fits had the change at 714 s from 890 s heard (gain 0.146-0.149), and one cleared the bar at
+  930 s, when the TV (the tap 220 s ahead of the picture) was at 708 s: 79 cues moved 1.82 s, the one on screen
+  0.56 s. Now from 890 s heard, ~40 s before the viewer reached it (`TestHeldGainTakesTheActBreakStep`).
+  Replayed on every file of both snapshots played for 4 minutes or more (`TestSnapshotHeldSweep`; up to 3
+  subtitles that fit each file, the fit from all its windows as truth, and up to 4 of about its length that fit
+  none, with and without the read windows): 2026-10-16, 2 movies (97 and 130 minutes, 4K, played audio only) and 27
+  series files; 2026-10-27, the same 2 movies and 66 series files: re-fits serving a segment more than 1 s off the
+  same with the held bar (movies 0, series 93 and 276), cues of the 200 s before the heard head within 0.5 s the
+  same, served changes 4 more of 4364 re-fits, other subtitles accepted 0 of 343 pairs either way (it cannot accept
+  one that was never accepted). A lower peak bar for the one offset change below 8 windows (0.15) was measured too
+  and not taken: 17 more false segments (195 → 212).
 - Own-track cue tap (`sync_owncues.go`, streaming side wired in `main.go`): the play ffmpeg also passes the cue times
   of one subtitle track of the played file (text, else PGS; it demuxes them anyway; no extra reads). Subtitles picks
   the track like the window reads (the probed one, else English, not forced, not SDH; a text track before a PGS one)
@@ -1734,7 +1756,11 @@ that change at splits), simplified:
   windows finished` when a play stream ends (`own track of <hash8>:<index> (<codec>) from …: <n> cues, <s> read; <n>
   own windows finished` for the cue tap), and `subtitles: timing of … (provisional) (… offsets …, score …; live
   reference, <n> windows (<n> live, <s> played) …)` whenever a re-fit changes what is served (state, offsets by
-  0.05 s, splits by 1 s); `timing reference of …: … no read, timed from the played audio` for files above the budget
+  0.05 s, splits by 1 s); a fit that misses a bar names it (`peak 0.007 under 0.12`, `gain 0.146 under 0.15` on a
+  fit taken by the held bar), and below 8 windows the one offset change not taken (`one change -5.93s -9.64s@865s
+  not taken: peak 0.177 under 0.20`), also in `kept the last accepted fit (new fit poor: offsets …)`, so the log
+  shows which bar held a fit back and when an offset change first appeared in a fit;
+  `timing reference of …: … no read, timed from the played audio` for files above the budget
   (`… the speech of its start (above the byte budget), <n> of <m> windows from <t>s, <MB> MB read in <s>` when a
   pre-timing reads their start),
   `timing reference of …: subs (PGS), …` / `… early windows of its own PGS track …` naming the own track's kind,
