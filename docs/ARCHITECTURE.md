@@ -1838,7 +1838,13 @@ viewings with the subtitles listed for them, a minute at a time (lines moved: al
 ahead of the audio; flips back to an earlier place): S03E23's replacement 13 flips → 1 with kept offsets, moves of
 lines already shown 11 → 4, 137 first refinements of lines 30-90 s before they show stay. `TestSnapshotRefitStability`
 does the same for the pairs the server served (`NFX_PAIRS`) and every file with live windows of more snapshots
-(`NFX_STAB_MORE`), with kept offsets off and on.
+(`NFX_STAB_MORE`), with kept offsets off and on: on the snapshots of 2026-10-16 and 2026-10-27 (64 pairs, 2409
+re-fits; episodes, films up to 130 minutes, read and audio-only files) the subtitles served by themselves come out the
+same (flips 6041 → 6229, moves of lines already shown 10552 → 10615; of 36 pairs listed 34 alike, the other two
+take another path of the same wandering split, below): there `keepStable` keeps a re-fit whose offsets barely
+moved. The flips there are offset changes the fit takes and gives back: on file bf8fac49 a split of a Turkish
+subtitle (+6.3 / +9.2 s) moved between 1059 and 1362 s, and 100-150 lines the viewer saw already moved by 3 s each
+time, with kept offsets or without.
 A PGS own track (`sync_pgs_eval_test.go`, NFX_GT; The Mentalist S03E02 d3g, no text track, its English PGS track as
 the tap and the reads give it, 970 lines; each line scored against the PGS line starts): the subf2m subtitles were
 served from the speech, TR at x1.0010 with 7 offsets (48 % of 576 lines within 0.15 s, 76 % within 0.3 s, p90

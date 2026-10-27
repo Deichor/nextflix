@@ -347,7 +347,8 @@ func sortedKeys(m map[int]liveWin) []int { return slices.Sorted(maps.Keys(m)) }
 // back. Each pair is replayed with keepOffsets off and on. NFX_PAIRS (lines "<file key>
 // <source>/<first 8 of the raw file> ...": the pairs the server served) takes those pairs of
 // NFX_TESTDATA instead; NFX_STAB_MORE names more snapshot data dirs (comma-separated, paired as
-// above); NFX_STAB_SUBS caps the subtitles per file (default 1).
+// above); NFX_STAB_SUBS caps the subtitles per file (default 1); NFX_STAB_ONLY ("<file8>
+// <subtitle>") replays that pair alone, step by step.
 func TestSnapshotRefitStability(t *testing.T) {
 	type tally struct{ pairs, steps, shown, ahead, beyond, flips, flipped int }
 	var tallies [2]tally // keepOffsets off, on
@@ -409,9 +410,12 @@ func TestSnapshotRefitStability(t *testing.T) {
 				live = append(live, refWindow{Start: float64(g) * syncWindowLen, Kind: "live", Speech: unpackBits(d.Bits, d.Frames)})
 			}
 			n := 0
+			only := os.Getenv("NFX_STAB_ONLY") // "<file8> <subtitle>": that pair, step by step
 			for _, s := range subs {
 				last := s.spans[len(s.spans)-1].end
 				switch {
+				case only != "" && only != f.name[:8]+" "+s.name:
+					continue
 				case served != nil:
 					if !served[f.name][s.name] {
 						continue
@@ -445,6 +449,9 @@ func TestSnapshotRefitStability(t *testing.T) {
 					tl := &tallies[k]
 					var pf, ps int
 					for _, x := range st {
+						if only != "" {
+							t.Logf("keep=%v %s", keep, x)
+						}
 						tl.steps++
 						tl.shown += x.shown
 						tl.ahead += x.ahead
