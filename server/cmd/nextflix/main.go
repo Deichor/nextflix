@@ -60,6 +60,7 @@ func run() error {
 	models = append(models, profiles.Models()...)
 	models = append(models, progress.Models()...)
 	models = append(models, ratings.Models()...)
+	models = append(models, recommendations.Models()...)
 	models = append(models, top10.Models()...)
 	models = append(models, streaming.Models()...)
 	models = append(models, subtitles.Models()...)
@@ -102,6 +103,7 @@ func run() error {
 	recommendationsSvc := recommendations.NewService(ratingSignals(ratingsSvc), recommendations.NewTMDBCatalog(tm))
 	ratingsSvc.OnChange(recommendationsSvc.Invalidate)
 	recommendationsSvc.SetHistory(watchHistory(progressSvc))
+	recommendationsSvc.EnableRotation(recommendations.NewExposureStore(db))
 
 	top10Svc := top10.NewService(db, top10.NewTMDBSearcher(tm), top10.Config{Localizer: top10.NewTMDBLocalizer(tm)})
 	top10Svc.Start(ctx)
@@ -256,7 +258,7 @@ func similarTitles(svc *catalog.Service) recommendations.SimilarSource {
 	}
 }
 
-// watchHistory feeds the titles a profile has played into the surprise picks.
+// watchHistory feeds the titles a profile has played into the recommendations and surprise picks.
 func watchHistory(svc *progress.Service) recommendations.HistoryFunc {
 	return func(profileID uint) ([]recommendations.Watched, error) {
 		rows, err := svc.History(profileID)
@@ -266,7 +268,7 @@ func watchHistory(svc *progress.Service) recommendations.HistoryFunc {
 		out := make([]recommendations.Watched, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, recommendations.Watched{MediaType: r.MediaType, TmdbID: r.TmdbID, Title: r.Title,
-				Finished: r.Finished, UpdatedAt: r.UpdatedAt})
+				Finished: r.Finished, FinishedEpisodes: r.FinishedEpisodes, WatchedSeconds: r.WatchedSeconds, UpdatedAt: r.UpdatedAt})
 		}
 		return out, nil
 	}

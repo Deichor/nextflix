@@ -129,10 +129,11 @@ is always an array. `original_language` (ISO 639-1) is sent when TMDB lists it.
 | `because-<media_type>-<tmdb_id>` | `Because you loved <Title>` | `because_loved` |
 | `because-<media_type>-<tmdb_id>` | `Because you liked <Title>` | `because_liked` |
 | `because-<media_type>-<tmdb_id>` | `Because you added <Title> to Favorites` (favorite without a rating) | `because_favorite` |
+| `because-<media_type>-<tmdb_id>` | `Because you watched <Title>` (watched, not rated or favorited) | `because_watched` |
 | `trending` | `Trending Now` (20 items) | `popular` |
 
 With positive signals the response is `top-picks` followed by up to 3 `because-*` rows (8 to 20 items each).
-A profile without any `like`/`love`/favorite (or when TMDB returns nothing) gets the single `trending` row instead.
+A profile without any `like`/`love`/favorite or watched title (or when TMDB returns nothing) gets the single `trending` row instead.
 `rows` is `[]` only when TMDB is unreachable.
 
 ```json
@@ -604,7 +605,8 @@ The subtitle part (below) did not bump it: an older pick still plays, and `subal
 
 Audio language: resolve reads the profile language from `X-Lang` (web and TV send it on every call). Release names
 with dub-only markers (`MVO`, `Dub`, `Дубляж`, `Rus`, `iTA` without `ENG`, `TRUEFRENCH`, ...) rank slightly lower,
-`MULTi` / `Dual Audio` / `ENG` slightly higher. A checked file whose audio tracks are all tagged with languages that
+`MULTi` / `Dual Audio` / `ENG` / the original language's name slightly higher. A file with one untagged track is judged
+by its name (a Russian voice-over studio such as `ColdFilm` counts as `Rus`). A checked file whose audio tracks are all tagged with languages that
 are neither the title's original language (TMDB) nor the profile's is taken only when no other candidate is left
 (see ARCHITECTURE.md). The language is not part of the cache key.
 

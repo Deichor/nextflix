@@ -3,6 +3,7 @@ package catalog
 import (
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -83,6 +84,13 @@ func (s *Service) home(c *gin.Context) {
 			if err != nil {
 				return nil, err
 			}
+			pages := [][]tmdb.Movie{movies}
+			for p := 2; p <= homeRotationPages; p++ {
+				if more, err := tm.GetPopularMovies(p); err == nil {
+					pages = append(pages, more)
+				}
+			}
+			movies = rotateHomeRow("popular_movies", time.Now(), pages)
 			return gin.H{"results": movies, "page": 1, "total_results": len(movies)}, nil
 		})
 		for _, row := range tmdb.HomeGenreRows {
@@ -92,6 +100,15 @@ func (s *Service) home(c *gin.Context) {
 				if err != nil {
 					return nil, err
 				}
+				pages := [][]tmdb.Movie{movies}
+				for p := 2; p <= homeRotationPages; p++ {
+					pq := row.Query()
+					pq["page"] = strconv.Itoa(p)
+					if more, err := tm.DiscoverMovies(pq); err == nil {
+						pages = append(pages, more)
+					}
+				}
+				movies = rotateHomeRow(row.ID, time.Now(), pages)
 				return gin.H{"results": movies, "total_results": len(movies), "filters": q}, nil
 			})
 		}

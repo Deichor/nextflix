@@ -26,13 +26,17 @@ import (
 
 // Vars so tests can shorten them.
 var (
-	tsIndexerSoft     = 3500 * time.Millisecond // resolve goes on with what arrived by then
-	tsIndexerQuick    = 1200 * time.Millisecond // ... or from then on, once enough good results are there
-	tsIndexerSettle   = 1500 * time.Millisecond // ... and 1080p+ counts as enough even while a fast one still runs
-	tsIndexerFast     = time.Second             // an indexer whose average answer time is this or less is "fast"
-	tsIndexerLateTime = 25 * time.Second        // slow indexers keep running this long
-	tsIndexerListTTL  = 10 * time.Minute
+	tsIndexerSoft      = 3500 * time.Millisecond // resolve goes on with what arrived by then
+	tsIndexerQuick     = 1200 * time.Millisecond // ... or from then on, once enough good results are there
+	tsIndexerSettle    = 1500 * time.Millisecond // ... and 1080p+ counts as enough even while a fast one still runs
+	tsIndexerFast      = time.Second             // an indexer whose average answer time is this or less is "fast"
+	tsIndexerLateTime  = 25 * time.Second        // slow indexers keep running this long
+	tsIndexerListTTL   = 10 * time.Minute
+	tsIndexerListTime  = 4 * time.Second  // the list answers in milliseconds when Jackett works
+	tsIndexerListRetry = 30 * time.Second // a Jackett that did not answer is asked again after this
 )
+
+var errJackettNoAnswer = errors.New("jackett does not answer")
 
 // tsSearchEnough usable candidates of the top wanted resolution let resolve rank early.
 const tsSearchEnough = 3
@@ -56,8 +60,9 @@ type tsIndexer struct {
 }
 
 type tsIndexerList struct {
-	list []tsIndexer
-	at   time.Time
+	list     []tsIndexer
+	at       time.Time
+	failedAt time.Time // the last fetch failed then (zero after a good one)
 }
 
 // Indexers lists the configured Jackett indexers (torznab t=indexers, works with the API key).
@@ -168,24 +173,56 @@ func tsRelevantIndexers(all []tsIndexer, mediaType string) []string {
 	return out
 }
 
-// indexersOf returns the configured indexers of a Jackett URL (cached).
+// indexersOf returns the configured indexers of a Jackett URL (cached). A Jackett that does
+// not answer is asked again after tsIndexerListRetry; until then, and when that fails, the last
+// known list is used, so a hung Jackett costs a resolve no wait.
 func (s *Service) indexersOf(ctx context.Context, searcher *TorrentSearcher) ([]tsIndexer, error) {
 	key := searcher.JackettURL()
+	var last tsIndexerList
 	if v, ok := s.indexerLists.Load(key); ok {
-		if l := v.(tsIndexerList); time.Since(l.at) < tsIndexerListTTL {
-			return l.list, nil
+		last = v.(tsIndexerList)
+		if last.failedAt.IsZero() && time.Since(last.at) < tsIndexerListTTL {
+			return last.list, nil
+		}
+		if time.Since(last.failedAt) < tsIndexerListRetry {
+			if last.list != nil {
+				return last.list, nil
+			}
+			return nil, errJackettNoAnswer
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	lctx, cancel := context.WithTimeout(ctx, tsIndexerListTime)
 	defer cancel()
 	started := time.Now()
-	list, err := searcher.Indexers(ctx)
+	list, err := searcher.Indexers(lctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err // the viewer left: says nothing about Jackett
+		}
+		log.Printf("jackett indexer list at %s: %v", key, err)
+		last.failedAt = time.Now()
+		s.indexerLists.Store(key, last)
+		if last.list != nil {
+			return last.list, nil
+		}
 		return nil, err
 	}
 	log.Printf("jackett indexer list of %s: %d indexers in %s", key, len(list), time.Since(started).Round(time.Millisecond))
 	s.indexerLists.Store(key, tsIndexerList{list: list, at: time.Now()})
 	return list, nil
+}
+
+// jackettFailedWithin reports whether the last list fetch of every Jackett URL asked so far
+// failed within d.
+func (s *Service) jackettFailedWithin(d time.Duration) bool {
+	seen, down := false, true
+	s.indexerLists.Range(func(_, v any) bool {
+		seen = true
+		at := v.(tsIndexerList).failedAt
+		down = !at.IsZero() && time.Since(at) < d
+		return down
+	})
+	return seen && down
 }
 
 // waitFor reports whether resolve waits for an indexer: not a background one, and not one
@@ -766,7 +803,6 @@ func (s *Service) searchQueries(ctx context.Context, q tsResolveQuery, queries [
 			break
 		} else {
 			// Unreachable, or a Jackett without the indexer list: the aggregate endpoint
-			log.Printf("resolve %q: jackett indexer list at %s: %v", q.title, searcher.JackettURL(), err)
 		}
 		if len(ids) == 0 {
 			lastErr = errors.New("no jackett indexer carries this media type")
@@ -776,13 +812,19 @@ func (s *Service) searchQueries(ctx context.Context, q tsResolveQuery, queries [
 			if id == tsBitsearchID {
 				return s.bitsearch.Search(ctx, query)
 			}
+			// The aggregate endpoint asks every indexer, slow ones too
+			slow := id == "all" || !s.waitFor(id)
 			if imdbID, ok := tsIMDbQuery(query); ok {
 				if !imdbOK[id] {
 					return nil, nil
 				}
-				return searcher.SearchIndexerIMDb(ctx, id, imdbID)
+				return s.jackettGate.do(ctx, id, slow, q.background, func(rctx context.Context) ([]JackettResult, error) {
+					return searcher.SearchIndexerIMDb(rctx, id, imdbID)
+				})
 			}
-			return searcher.SearchIndexer(ctx, id, query, category)
+			return s.jackettGate.do(ctx, id, slow, q.background, func(rctx context.Context) ([]JackettResult, error) {
+				return searcher.SearchIndexer(rctx, id, query, category)
+			})
 		}
 		jobs := append(tsJobs(ids, queries), side...)
 		withSide := len(side) > 0

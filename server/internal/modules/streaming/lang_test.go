@@ -73,7 +73,10 @@ func TestLangScore(t *testing.T) {
 		{"Unabomber 2026 TRUEFRENCH 1080p WEB", "en", tsLangDubPart},
 		{"Unabomber 2026 VFF MULTi 1080p WEB", "en", tsLangMultiPart},
 		{"Unabomber 2026 1080p Latino", "en", tsLangDubPart},
-		{"La Grande Bellezza 2013 1080p BluRay iTA", "it", 0},
+		{"La Grande Bellezza 2013 1080p BluRay iTA", "it", tsLangMultiPart},
+		{"Money Trap S01E01 1080p WEB TURKISH", "tr", tsLangMultiPart},
+		{"Money.Trap.S01E01.1080p.ColdFilm.mkv", "tr", tsLangDubPart},
+		{"Money.Trap.S01E01.1080p.Rus.ColdFilm", "tr", tsLangDubPart},
 		{"Unabomber 2026 1080p WEB-DL Rus", "", tsLangDubPart},
 	} {
 		title := c.name
@@ -174,5 +177,56 @@ func TestOriginalLanguageSharedLookup(t *testing.T) {
 	waitFor(t, func() bool { return s.originalLanguage(q) == "ja" })
 	if n := f.calls.Load(); n != 1 {
 		t.Fatalf("%d lookups, want the answer reused", n)
+	}
+}
+
+// A single untagged track is judged by the release name: the file picked for a Turkish show
+// was a Russian voice-over with no language tag at all.
+func TestWrongAudioByName(t *testing.T) {
+	q := tsResolveQuery{mediaType: "tv", title: "Money Trap", names: []string{"Organize Isler"}, lang: "tr"}
+	untagged := probeOf(audio("", ""))
+	for _, c := range []struct {
+		name, release string
+		p             *tsProbe
+		orig          string
+		wrong         bool
+	}{
+		{"studio without a language word", "Money.Trap.The.Karun.Treasure.S01E01.1080p.ColdFilm.mkv", untagged, "tr", true},
+		{"language word and studio", "Money.Trap.The.Karun.Treasure.S01E01.1080p.Rus.ColdFilm", untagged, "en", true},
+		{"no saved probe, name alone", "Money.Trap.S01E01.1080p.LostFilm", nil, "en", true},
+		{"plain web release", "Money Trap S01E01 1080p WEB H264-9Minus5in", untagged, "en", false},
+		{"multi", "Money.Trap.The.Karun.Treasure.S01.MULTi.1080p.WEB-DL", untagged, "en", false},
+		{"russian original", "Money.Trap.S01E01.1080p.ColdFilm", untagged, "ru", false},
+		{"original unknown", "Money.Trap.S01E01.1080p.ColdFilm", untagged, "", false},
+		{"two untagged tracks may hold the original", "Money.Trap.S01E01.ColdFilm", probeOf(audio("", ""), audio("", "")), "en", false},
+		{"track title says original", "Money.Trap.S01E01.ColdFilm", probeOf(audio("", "Original")), "en", false},
+		{"tagged track: the tag decides", "Money.Trap.S01E01.ColdFilm", probeOf(audio("tur", "")), "en", false},
+	} {
+		if got := tsWrongAudioByName(c.p, q, c.orig, c.release); (got != "") != c.wrong {
+			t.Errorf("%s: got %q, want wrong=%v", c.name, got, c.wrong)
+		}
+	}
+	// A Turkish show for an English profile, and the case that was reported: the profile is
+	// Turkish too, so only the original language may pass
+	en := tsResolveQuery{mediaType: "tv", title: "Money Trap", lang: "en"}
+	for _, release := range []string{"Money.Trap.The.Karun.Treasure.S01E01.1080p.ColdFilm.mkv", "Money.Trap.The.Karun.Treasure.S01E01.1080p.Rus.ColdFilm"} {
+		if got := tsWrongAudioByName(untagged, en, "tr", release); got == "" {
+			t.Errorf("%s for an English profile passed", release)
+		}
+		if got := tsWrongAudioByName(untagged, q, "tr", release); got == "" {
+			t.Errorf("%s for a Turkish profile passed", release)
+		}
+	}
+	if got := tsWrongAudioByName(untagged, q, "tr", "Organize Isler S01 2160p TURKISH WEB-DL ColdFilm"); got != "" {
+		t.Errorf("a name with the original language: %q", got)
+	}
+	// Words of the title are no language hint; a dub in the profile's language is fine
+	doll := tsResolveQuery{mediaType: "tv", title: "Russian Doll", lang: "en"}
+	if got := tsWrongAudioByName(untagged, doll, "en", "Russian Doll S01E01 1080p WEB"); got != "" {
+		t.Errorf("title word: %q", got)
+	}
+	ru := tsResolveQuery{mediaType: "tv", title: "Money Trap", lang: "ru"}
+	if got := tsWrongAudioByName(untagged, ru, "tr", "Money.Trap.S01E01.ColdFilm"); got != "" {
+		t.Errorf("profile language: %q", got)
 	}
 }
