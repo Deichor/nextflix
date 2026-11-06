@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -69,8 +70,10 @@ var tsLangNames = map[string][]string{
 var (
 	tsDubTokens = map[string]bool{"mvo": true, "dvo": true, "avo": true, "dub": true, "dubbed": true}
 	// Cyrillic tracker words: "Дубляж", "дублированный", "многоголосый" (voice-over)
-	tsDubCyrillic  = regexp.MustCompile(`(?i)дубл|многоголос|двухголос`)
-	tsLangTokens   = map[string]string{"rus": "ru", "russian": "ru", "ukr": "uk", "ukrainian": "uk", "ita": "it", "italian": "it", "latino": "es", "castellano": "es", "spanish": "es", "french": "fr", "truefrench": "fr", "vff": "fr", "vfq": "fr", "vfi": "fr", "german": "de", "hindi": "hi"}
+	tsDubCyrillic = regexp.MustCompile(`(?i)дубл|многоголос|двухголос`)
+	tsLangTokens  = map[string]string{"rus": "ru", "russian": "ru", "ukr": "uk", "ukrainian": "uk", "ita": "it", "italian": "it", "latino": "es", "castellano": "es", "spanish": "es", "french": "fr", "truefrench": "fr", "vff": "fr", "vfq": "fr", "vfi": "fr", "german": "de", "hindi": "hi",
+		// Russian voice-over studios: their releases carry that dub alone, often with no tag at all
+		"coldfilm": "ru", "lostfilm": "ru", "newstudio": "ru", "baibako": "ru", "alexfilm": "ru", "hdrezka": "ru", "rezka": "ru", "jaskier": "ru", "kerob": "ru", "novafilm": "ru", "amedia": "ru", "ideafilm": "ru", "rudub": "ru"}
 	tsMultiTokens  = map[string]bool{"multi": true, "multilang": true, "multilanguage": true, "dual": true}
 	tsOrigTokens   = map[string]bool{"original": true, "orig": true}
 	tsEnglishToken = map[string]bool{"eng": true, "english": true}
@@ -93,6 +96,8 @@ func tsLangScore(title string, rest []string, origLang string) float64 {
 			multi = multi || origLang == "" || origLang == "en"
 		case tsDubTokens[t]:
 			dub = true
+		case tsNamesOriginal(t, origLang):
+			multi = true
 		default:
 			if l, ok := tsLangTokens[t]; ok && l != origLang {
 				dub = true
@@ -106,6 +111,72 @@ func tsLangScore(title string, rest []string, origLang string) float64 {
 		return tsLangDubPart
 	}
 	return 0
+}
+
+// tsNamesOriginal: the token names the original language ("TURKISH", "tur", "Korean").
+func tsNamesOriginal(token, origLang string) bool {
+	if origLang == "" || origLang == "en" {
+		return false // ENG has its own rule above
+	}
+	return tsISO6392[token] == origLang || slices.Contains(tsLangNames[origLang], token)
+}
+
+// tsNameDubLang is the language a release name gives as its only audio, "" when it gives none
+// or hints at more tracks. Words of the title itself ("Russian Doll") do not count.
+func tsNameDubLang(name string, q tsResolveQuery) string {
+	inTitle := map[string]bool{}
+	for _, t := range append(tsNormalize(q.title), tsNormalize(strings.Join(q.names, " "))...) {
+		inTitle[t] = true
+	}
+	tokens := tsNormalize(name)
+	dub := ""
+	if tsDubCyrillic.MatchString(name) {
+		dub = "ru"
+	}
+	for i, t := range tokens {
+		switch {
+		case inTitle[t]:
+		case t == "multi" && i+1 < len(tokens) && tsSubWords[tokens[i+1]]:
+		case tsMultiTokens[t] || tsOrigTokens[t] || tsEnglishToken[t] || tsNamesOriginal(t, q.origLang):
+			return ""
+		case dub == "" && tsLangTokens[t] != "":
+			dub = tsLangTokens[t]
+		}
+	}
+	return dub
+}
+
+// tsWrongAudioByName is tsWrongAudio for a file whose only audio track has no language tag:
+// the release name decides (the ColdFilm release of a Turkish show has one untagged Russian
+// track). names are the release's and its file's names. p == nil judges by name alone, for a
+// saved source whose file was not probed.
+func tsWrongAudioByName(p *tsProbe, q tsResolveQuery, origLang string, names ...string) string {
+	if origLang == "" {
+		return ""
+	}
+	if p != nil {
+		tracks := 0
+		for i := range p.Streams {
+			st := &p.Streams[i]
+			if st.CodecType != "audio" {
+				continue
+			}
+			tracks++
+			if tsLangCode(tsTag(st, "language")) != "" || tsTitleSaysOriginal(tsTag(st, "title"), origLang) {
+				return ""
+			}
+		}
+		if tracks != 1 {
+			return ""
+		}
+	}
+	q.origLang = origLang
+	for _, name := range names {
+		if l := tsNameDubLang(name, q); l != "" && l != origLang && l != q.lang {
+			return fmt.Sprintf("audio in %s by its name, original %s", l, origLang)
+		}
+	}
+	return ""
 }
 
 // tsWrongAudio explains why a probed file's audio does not fit ("" = fine or unknown): every
@@ -236,11 +307,40 @@ func (s *Service) applyProbedLanguage(r *tsResolveResult, q tsResolveQuery) bool
 	if !ok {
 		return false
 	}
-	why := tsWrongAudio(v.(*tsProbe), s.originalLanguage(q), q.lang)
+	orig := s.originalLanguage(q)
+	why := tsWrongAudio(v.(*tsProbe), orig, q.lang)
+	if why == "" {
+		why = tsWrongAudioByName(v.(*tsProbe), q, orig, r.TorrentTitle, r.FileName)
+	}
 	if why == "" {
 		return false
 	}
 	r.unfit = why
 	log.Printf("resolve %q: %q has the wrong audio (%s), taken only when nothing else is left", q.title, r.TorrentTitle, why)
 	return true
+}
+
+// sourceWrongAudio explains why a source chosen earlier (cached or saved with the progress)
+// must not play on: picked while better releases were out of reach, its audio is a dub.
+// A source that was the only one left comes back from the fresh resolve as unfit.
+func (s *Service) sourceWrongAudio(q tsResolveQuery, hash string, index int, names ...string) string {
+	var p *tsProbe
+	if v, ok := s.probeCache.Load(s.probeKey(hash, index)); ok {
+		p = v.(*tsProbe)
+	}
+	// Only a name with a dub in it is worth the TMDB lookup
+	found := false
+	for _, name := range names {
+		found = found || tsNameDubLang(name, q) != ""
+	}
+	if !found {
+		return ""
+	}
+	orig := s.originalLanguage(q)
+	if p != nil {
+		if why := tsWrongAudio(p, orig, q.lang); why != "" {
+			return why
+		}
+	}
+	return tsWrongAudioByName(p, q, orig, names...)
 }

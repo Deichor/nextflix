@@ -303,6 +303,11 @@ func (s *Service) cachedFor(key string, q tsResolveQuery) (*tsResolveResult, boo
 		s.forgetSource(key)
 		return nil, false
 	}
+	if why := s.sourceWrongAudio(q, res.Hash, res.Index, res.TorrentTitle, res.FileName); why != "" {
+		log.Printf("resolve %q: cached source %q has the wrong audio (%s), resolving again", q.title, res.TorrentTitle, why)
+		s.forgetSource(key)
+		return nil, false
+	}
 	return res, true
 }
 

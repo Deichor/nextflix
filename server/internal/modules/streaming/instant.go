@@ -402,7 +402,7 @@ func (in *tsInstant) prewarmOnce(feed InstantFeed) int {
 // nil with an error when it cannot tell.
 func (s *Service) instantCheck(ctx context.Context, it InstantItem) (*bool, error) {
 	yes, no := true, false
-	q := tsResolveQuery{mediaType: it.Type, title: strings.TrimSpace(it.Title), year: it.Year, tmdbID: it.TmdbID}
+	q := tsResolveQuery{mediaType: it.Type, title: strings.TrimSpace(it.Title), year: it.Year, tmdbID: it.TmdbID, background: true}
 	if q.mediaType == "tv" {
 		q.season, q.episode = it.Season, it.Episode
 		if q.episode < 1 {
@@ -418,6 +418,9 @@ func (s *Service) instantCheck(ctx context.Context, it InstantItem) (*bool, erro
 	}
 	if !s.debrid.usable() {
 		return nil, errDebridPaused
+	}
+	if s.jackettFailedWithin(tsIndexerListRetry) {
+		return nil, errJackettNoAnswer
 	}
 	// Slower indexers keep searching on the warm context: they end with this check
 	wctx, cancel := context.WithCancel(ctx)

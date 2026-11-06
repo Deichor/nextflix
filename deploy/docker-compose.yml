@@ -161,7 +161,15 @@ services:
         condition: service_healthy
         required: false
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9117/UI/Login"]
+      # A hung Jackett stays "up" and Docker never restarts an unhealthy container, so after
+      # 3 minutes without an answer this kills it and s6 starts a new one (no docker.sock needed)
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS -m 4 -o /dev/null http://127.0.0.1:9117/UI/Login && { rm -f /tmp/hung-since; exit 0; };
+          now=$$(date +%s); since=$$(cat /tmp/hung-since 2>/dev/null || echo $$now); echo $$since > /tmp/hung-since;
+          if [ $$((now - since)) -ge 180 ]; then rm -f /tmp/hung-since; pkill -9 -x jackett; fi;
+          exit 1
       interval: 30s
       timeout: 5s
       retries: 3
