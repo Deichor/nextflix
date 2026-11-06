@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"path"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -652,7 +653,7 @@ func (y *syncer) startTiming(inner, hash string, index int, base []byte, pre boo
 			ctx = context.WithValue(ctx, preTimingKey{}, p)
 		}
 		start := time.Now()
-		err := y.run(ctx, inner, hash, index, base)
+		err := guardTiming(func() error { return y.run(ctx, inner, hash, index, base) })
 		switch {
 		case p != nil && p.givenUp():
 			log.Printf("subtitles: pre-timing of %s on %s:%d given up after %s: no room beside the playing streams id=%s",
@@ -668,6 +669,18 @@ func (y *syncer) startTiming(inner, hash string, index int, base []byte, pre boo
 		}
 		return nil, err
 	})
+}
+
+// guardTiming keeps a panic in a timing job from ending the server and every stream with it: the
+// job fails like any other and what is served stays.
+func guardTiming(job func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("subtitles: timing job panicked: %v\n%s", r, debug.Stack())
+			err = fmt.Errorf("timing job panicked: %v", r)
+		}
+	}()
+	return job()
 }
 
 // run times one subtitle for the file and stores the result. A reference saved before the
@@ -710,9 +723,11 @@ func (y *syncer) decideRead(ctx context.Context, inner, hash string, index int, 
 	mu := y.decideLock(key)
 	decided := false
 	if y.svc.cfg.LiveTiming && y.watched(key) {
-		mu.Lock()
-		decided = y.decide(ctx, inner, hash, index, base, ref, false)
-		mu.Unlock()
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+			decided = y.decide(ctx, inner, hash, index, base, ref, false)
+		}()
 	}
 	mu.Lock()
 	defer mu.Unlock()
