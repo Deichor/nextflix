@@ -392,6 +392,7 @@ export const en = {
   'home.recs.becauseLoved': 'Because you loved {title}',
   'home.recs.becauseLiked': 'Because you liked {title}',
   'home.recs.becauseFavorite': 'Because you added {title} to Favorites',
+  'home.recs.becauseWatched': 'Because you watched {title}',
   'home.top10TrMovies': 'Top 10 Movies in Türkiye This Week',
   'home.top10TrTv': 'Top 10 TV Shows in Türkiye This Week',
   'home.genreActionAdventure': 'Action & Adventure Movies',

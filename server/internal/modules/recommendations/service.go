@@ -35,6 +35,15 @@ type Service struct {
 	inflight map[cacheKey]*call
 
 	surprise surpriseState
+
+	exposures ExposureStore // nil = plain ranking, see EnableRotation
+	noted     map[uint]notedRows
+}
+
+// notedRows is the answer last counted as shown for a profile.
+type notedRows struct {
+	resp   *Response
+	window int64
 }
 
 // cacheKey: rows are kept per profile and content language.
@@ -194,18 +203,37 @@ func (s *Service) compute(profileID uint, lang string) (resp *Response, partial 
 	if err != nil {
 		return nil, false, err
 	}
-	seeds, dislikes := pickSeeds(signals, s.now())
+	if history := s.historyOf(profileID); len(history) > 0 {
+		signals = withHistory(signals, history)
+	}
+	var rot *rotation
+	var seeds, dislikes []seed
+	if s.exposures != nil {
+		rot = s.newRotation(profileID, s.now())
+		seeds, dislikes = allSeeds(signals, s.now())
+		seeds = rot.pickSeeds(seeds, maxSeeds)
+	} else {
+		seeds, dislikes = pickSeeds(signals, s.now())
+	}
 
 	var rows []Row
 	if len(seeds) > 0 {
 		in := s.fetch(lang, signals, seeds, dislikes)
+		in.rot = rot
 		partial = in.partial
-		rows = buildRows(score(in), seeds)
+		cands := score(in)
+		if rot != nil {
+			cands = diversify(cands, topPicksSize)
+		}
+		rows = buildRows(cands, seeds)
 	}
 	if len(rows) == 0 {
 		trending, err := s.catalog.Trending(lang)
 		if err != nil {
 			log.Printf("recommendations: trending: %v", err)
+		}
+		if rot != nil {
+			trending = rot.rotateItems(trending)
 		}
 		rows = trendingRows(trending, signals)
 	}

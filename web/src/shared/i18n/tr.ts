@@ -378,6 +378,7 @@ export const tr: Messages = {
   'home.recs.becauseLoved': '{title} yapımına bayıldığın için',
   'home.recs.becauseLiked': '{title} yapımını beğendiğin için',
   'home.recs.becauseFavorite': '{title} yapımını favorilerine eklediğin için',
+  'home.recs.becauseWatched': '{title} yapımını izlediğin için',
   'home.top10TrMovies': "Türkiye'de Bu Hafta Top 10 Film",
   'home.top10TrTv': "Türkiye'de Bu Hafta Top 10 Dizi",
   'home.genreActionAdventure': 'Aksiyon ve Macera Filmleri',

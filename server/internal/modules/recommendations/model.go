@@ -39,6 +39,7 @@ const (
 	ReasonBecauseLoved   = "because_loved"
 	ReasonBecauseLiked   = "because_liked"
 	ReasonBecauseFavored = "because_favorite"
+	ReasonBecauseWatched = "because_watched"
 	ReasonPopular        = "popular"
 )
 
@@ -49,6 +50,7 @@ type Signal struct {
 	Title     string
 	Rating    string // "", "dislike", "like" or "love"
 	Favorite  bool
+	Watched   float64 // taste from the watch history (watchWeight)
 	UpdatedAt time.Time
 }
 
@@ -104,7 +106,10 @@ type Watched struct {
 	TmdbID    int
 	Title     string
 	Finished  bool
-	UpdatedAt time.Time
+	// Over every entry of the title: episodes finished and seconds played
+	FinishedEpisodes int
+	WatchedSeconds   float64
+	UpdatedAt        time.Time
 }
 
 // HistorySource returns the titles a profile has played, newest first.

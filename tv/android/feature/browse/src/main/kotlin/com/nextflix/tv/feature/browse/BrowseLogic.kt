@@ -49,7 +49,7 @@ internal fun pickFeatured(pool: List<Title>, key: String?, random: Random = Rand
 /** The first [n] titles with their rank (Top 10 rows built from trending lists). */
 internal fun ranked(list: List<Title>, n: Int = 10): List<Title> = list.take(n).mapIndexed { i, t -> t.copy(rank = i + 1) }
 
-private val BECAUSE = Regex("^Because you (?:loved|liked) (.+)$")
+private val BECAUSE = Regex("^Because you (?:loved|liked|watched) (.+)$")
 private val BECAUSE_FAVORITE = Regex("^Because you added (.+) to Favorites$")
 
 /** Server row title in the UI language (the server sends English titles). */
@@ -61,6 +61,7 @@ internal fun recommendationTitle(s: BrowseStrings, row: RecommendationRow): Stri
         "because_loved" -> name?.let(s::becauseLoved) ?: row.title
         "because_liked" -> name?.let(s::becauseLiked) ?: row.title
         "because_favorite" -> name?.let(s::becauseFavorite) ?: row.title
+        "because_watched" -> name?.let(s::becauseWatched) ?: row.title
         else -> if (row.id == "trending") s.trendingNow else row.title
     }
 }
