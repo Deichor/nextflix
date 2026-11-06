@@ -1646,7 +1646,7 @@ that change at splits), simplified:
   they put it on; a timing ready within 2.5 s is answered directly) and
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
   disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues. Every result
-  carries the version of the timing that made it (`syncVersion`, 2 since own-track windows go onto the speech): an
+  carries the version of the timing that made it (`syncVersion`, 3 since cues shown too long are capped): an
   older one is served as it is (partial) while it
   is timed again from the stored windows, else final results would keep a fixed bug for good; for the ranking and
   the AI translation's source it counts as unknown (one it found poor is not ranked down, so it gets served and timed
@@ -1865,6 +1865,11 @@ that change at splits), simplified:
   was 3 s late after the title sequence, while subf2m's "S02.WEBRip.Amazon" pack is named for that release. It is
   still timed like every provider subtitle (only hash matches are served as they are), and needed it: +1.24 s, then
   +3.26 s after the title sequence.
+- Broken cue ends: a cue shown over 15 s is capped when a subtitle is converted and when a stored one is read
+  (`cappedEnd`, convert.go): it ends at the next cue, at most 7 s after its start. Avatar: Seven Havens S01E12's last
+  line read `00:22:06.125 --> 00:44:12.000`, past the end of the file, so `lengthFits` rejected every fit (+0.3 s,
+  score 0.50 over 0.13) as another cut and the episode was served raw; S01E13 had a 60 s line stacked over 14 others.
+  Of the 342 subtitles of the 2026-11-06 snapshot 10 hold such a cue, 6 of them 60 s or longer.
 - The viewer's manual offset (`subDelay`) still applies on top.
 - Holes (`holes.go`, `holes_fill.go`, see [API.md](API.md#holes)): once timed, a served subtitle is compared on the
   file's timeline with a reference of the file in another language (its own text track or a hash match on disk, else

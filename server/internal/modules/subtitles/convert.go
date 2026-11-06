@@ -463,6 +463,15 @@ func writeVTT(cues []cue) []byte {
 			if i+1 < len(cues) && cues[i+1].start > c.start && cues[i+1].start < end {
 				end = cues[i+1].start
 			}
+		} else if end-c.start > time.Duration(cueMaxShown*float64(time.Second)) {
+			next := -1.0
+			for _, o := range cues[i+1:] {
+				if o.start > c.start {
+					next = o.start.Seconds()
+					break
+				}
+			}
+			end = time.Duration(cappedEnd(c.start.Seconds(), next) * float64(time.Second))
 		}
 		key := fmt.Sprintf("%d|%d|%s", c.start, end, text)
 		if seen[key] {
@@ -472,6 +481,47 @@ func writeVTT(cues []cue) []byte {
 		fmt.Fprintf(&b, "%s --> %s\n%s\n\n", vttClock(c.start), vttClock(end), text)
 	}
 	return []byte(b.String())
+}
+
+// A cue shown longer than cueMaxShown has a broken end time (Avatar: Seven Havens S01E12: its last
+// line "00:22:06.125 --> 00:44:12.000" ran past the end of the file, so a good fit was rejected as
+// another cut; S01E13's 60 s line stacked over 14 others). None of the 342 subtitles of the
+// 2026-11-06 snapshot has a longer cue that belongs on screen.
+const (
+	cueMaxShown = 15.0 // seconds
+	cueCapShown = 7.0  // seconds such a cue is shown, at most until the next one
+)
+
+// cappedEnd is the end of a cue shown too long, next the next cue's start (negative: none).
+func cappedEnd(start, next float64) float64 {
+	if next > start && next < start+cueCapShown {
+		return next
+	}
+	return start + cueCapShown
+}
+
+// capBrokenCues caps the cues of a stored subtitle converted before the cap (writeVTT).
+func capBrokenCues(vtt []byte) []byte {
+	cues := vttCues(vtt)
+	changed := false
+	for i := range cues {
+		if cues[i].end-cues[i].start <= cueMaxShown {
+			continue
+		}
+		next := -1.0
+		for _, o := range cues[i+1:] {
+			if o.start > cues[i].start {
+				next = o.start
+				break
+			}
+		}
+		cues[i].end = cappedEnd(cues[i].start, next)
+		changed = true
+	}
+	if !changed {
+		return vtt
+	}
+	return renderVTT(cues, false)
 }
 
 func vttClock(d time.Duration) string {

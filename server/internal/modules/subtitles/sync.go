@@ -241,7 +241,8 @@ type syncMeta struct {
 // the timing would not reach them. 1: rates compared net of their offset changes and searched
 // again, changes placed over undecided windows (The Mentalist S03E02 kept 24/23.976 for good).
 // 2: own-track windows on the speech's timeline (The Mentalist S03E09 was served 0.5 s early).
-const syncVersion = 2
+// 3: cues shown too long capped (a timed result kept them on screen over the next lines).
+const syncVersion = 3
 
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }
 
@@ -2044,7 +2045,7 @@ func (y *syncer) fullReference(ctx context.Context, hash string, index int) []sp
 			}
 			vtt, err = y.svc.File(ctx, s.ID)
 		} else if b, ok := y.svc.files.read(source, source+"|"+ref, ".vtt", 0); ok {
-			vtt = b
+			vtt = capBrokenCues(b)
 		}
 		if err != nil || vtt == nil {
 			continue
