@@ -22,7 +22,9 @@ import (
 // to compare them. NFX_SERVED_SUBS: subtitles per file (default 1). NFX_SERVED_STEP: windows
 // between re-fits (0: only the final fit). NFX_SERVED_OUT: a file for one line per pair.
 // NFX_SERVED_ONLY: file names starting so. NFX_SERVED_PAIRS: such a file: its pairs instead of
-// looking for the best fitting ones (minutes).
+// looking for the best fitting ones (minutes). NFX_SERVED_DUMP: a directory for the final answers;
+// NFX_SERVED_CMP: such a directory of an earlier run: the lines moved a second or more since then
+// are measured there and here.
 const servedFilmSeconds = 4800
 
 type servedRow struct {
@@ -33,6 +35,8 @@ type servedRow struct {
 	n                         int
 	good, soft, atChance      int
 	shown25, shown50, flips   int
+	movedN, movedHits         int // lines moved since NFX_SERVED_CMP: with an onset near, within 0.3 s
+	movedWas                  int // the same before
 }
 
 func servedStacks(cues []liveCue) int {
@@ -186,6 +190,28 @@ func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub
 			row.inverted = servedInverted(s.cues, served)
 			r := residualOf(served, speech, 0, dur)
 			row.within, row.chance, row.median, row.n = r.within, r.chance, r.median, r.n
+			name := f.name[:8] + "_" + strings.ReplaceAll(s.name, "/", "_") + ".vtt"
+			if d := os.Getenv("NFX_SERVED_DUMP"); d != "" {
+				if err := os.WriteFile(filepath.Join(d, name), renderVTT(served, false), 0o644); err != nil {
+					t.Error(err)
+				}
+			}
+			if d := os.Getenv("NFX_SERVED_CMP"); d != "" {
+				if b, err := os.ReadFile(filepath.Join(d, name)); err == nil {
+					if was := vttCues(b); len(was) == len(served) {
+						var a, c []liveCue
+						for i := range served {
+							if math.Abs(served[i].start-was[i].start) >= 1 {
+								a, c = append(a, was[i]), append(c, served[i])
+							}
+						}
+						ra, rc := residualOf(a, speech, 0, dur), residualOf(c, speech, 0, dur)
+						row.movedN = len(c)
+						row.movedWas = int(math.Round(ra.within * float64(ra.n)))
+						row.movedHits = int(math.Round(rc.within * float64(rc.n)))
+					}
+				}
+			}
 		}
 	}
 	return row
@@ -318,13 +344,14 @@ func TestSnapshotServed(t *testing.T) {
 	}
 	type sum struct {
 		pairs, stacked, stackedPairs, inverted, good, soft, atChance, shown25, shown50, flips int
+		movedN, movedWas, movedHits                                                           int
 		within, chance                                                                        float64
 		states                                                                                map[string]int
 	}
 	groups := map[string]*sum{}
 	for _, r := range rows {
-		fmt.Fprintf(out, "%s\t%s\t%.0f\t%s\t%s\tcues=%d\tstacked=%d\tinverted=%d\twithin=%.2f\tchance=%.2f\tmedian=%+.2f\tn=%d\tgood=%d\tsoft=%d\tatchance=%d\tshown25=%d\tshown50=%d\tflips=%d\n",
-			r.file, r.sub, r.dur, r.state, r.offsets, r.cues, r.stacked, r.inverted, r.within, r.chance, r.median, r.n, r.good, r.soft, r.atChance, r.shown25, r.shown50, r.flips)
+		fmt.Fprintf(out, "%s\t%s\t%.0f\t%s\t%s\tcues=%d\tstacked=%d\tinverted=%d\twithin=%.2f\tchance=%.2f\tmedian=%+.2f\tn=%d\tgood=%d\tsoft=%d\tatchance=%d\tshown25=%d\tshown50=%d\tflips=%d\tmoved=%d\tmovedwas=%d\tmovedhits=%d\n",
+			r.file, r.sub, r.dur, r.state, r.offsets, r.cues, r.stacked, r.inverted, r.within, r.chance, r.median, r.n, r.good, r.soft, r.atChance, r.shown25, r.shown50, r.flips, r.movedN, r.movedWas, r.movedHits)
 		g := "series"
 		if r.dur >= servedFilmSeconds {
 			g = "films"
@@ -347,6 +374,9 @@ func TestSnapshotServed(t *testing.T) {
 			s.shown25 += r.shown25
 			s.shown50 += r.shown50
 			s.flips += r.flips
+			s.movedN += r.movedN
+			s.movedWas += r.movedWas
+			s.movedHits += r.movedHits
 			s.within += r.within
 			s.chance += r.chance
 			s.states[r.state]++
@@ -354,8 +384,8 @@ func TestSnapshotServed(t *testing.T) {
 	}
 	for _, name := range []string{"series", "films", "all"} {
 		if s := groups[name]; s != nil {
-			t.Logf("SUMMARY %s: %d pairs %v; stacked %d (%d pairs), inverted %d; within %.3f chance %.3f; stretches good %d soft %d chance %d; shown moves >=0.25 %d >=0.5 %d, flips %d",
-				name, s.pairs, s.states, s.stacked, s.stackedPairs, s.inverted, s.within/float64(s.pairs), s.chance/float64(s.pairs), s.good, s.soft, s.atChance, s.shown25, s.shown50, s.flips)
+			t.Logf("SUMMARY %s: %d pairs %v; stacked %d (%d pairs), inverted %d; within %.3f chance %.3f; stretches good %d soft %d chance %d; shown moves >=0.25 %d >=0.5 %d, flips %d; lines moved %d on speech %d -> %d",
+				name, s.pairs, s.states, s.stacked, s.stackedPairs, s.inverted, s.within/float64(s.pairs), s.chance/float64(s.pairs), s.good, s.soft, s.atChance, s.shown25, s.shown50, s.flips, s.movedN, s.movedWas, s.movedHits)
 		}
 	}
 }

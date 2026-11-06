@@ -198,7 +198,60 @@ func refineFit(cues []liveCue, f syncFit, windows []refWindow) []liveCue {
 			clock = append(clock, c.start*f.Scale)
 		}
 	}
-	return refineCues(timed, clock, windows)
+	return unstackSteps(refineCues(timed, clock, windows), clock, f)
+}
+
+// cueMinShown is the least a line shows before the next one starts at an offset step (seconds).
+const cueMinShown = 1.0
+
+// unstackSteps keeps a step down of the offsets from stacking lines (the players show every line
+// that is on): 18 % of the timed results on the server against 2 % of the subtitles as they are
+// had lines over a second on top of each other, all at offset steps (The Mentalist: "I love you so
+// much." and "Oh. You hear that?" together for 2.4 s). The line starts stay: moving the step to a
+// pause that holds it, or lines over to the other offset, took lines off the speech (228 lines,
+// 68 on it to 48; 104, 34 to 18; 96, 43 to 16). Lines the step put out of order take each other's
+// start, and a line before the step ends when the next one starts. clock is each cue's start on
+// the subtitle's clock.
+func unstackSteps(cues []liveCue, clock []float64, f syncFit) []liveCue {
+	for s := 1; s < len(f.Segments); s++ {
+		if f.Segments[s].Offset >= f.Segments[s-1].Offset {
+			continue
+		}
+		b := sort.SearchFloat64s(clock, f.Segments[s].From)
+		if b == 0 || b == len(cues) {
+			continue
+		}
+		lo, hi := b, b+1
+		for lo > 0 && cues[lo-1].start > cues[b].start {
+			lo--
+		}
+		for hi < len(cues) && cues[hi].start < cues[b-1].start {
+			hi++
+		}
+		if lo < b || hi > b+1 {
+			starts := make([]float64, 0, hi-lo)
+			for _, c := range cues[lo:hi] {
+				starts = append(starts, c.start)
+			}
+			sort.Float64s(starts)
+			for i := lo; i < hi; i++ {
+				d := starts[i-lo] - cues[i].start
+				cues[i].start += d
+				cues[i].end += d
+			}
+		}
+		for a := lo - 1; a >= 0 && cues[lo].start-cues[a].start <= cueMaxShown; a-- {
+			if end := math.Max(cues[lo].start, cues[a].start+cueMinShown); cues[a].end > end {
+				cues[a].end = end
+			}
+		}
+		for i := lo; i < hi && i+1 < len(cues); i++ {
+			if end := math.Max(cues[i+1].start, cues[i].start+cueMinShown); cues[i].end > end {
+				cues[i].end = end
+			}
+		}
+	}
+	return cues
 }
 
 // refineCues moves the served cues (on the file's timeline) onto the own-track windows of the

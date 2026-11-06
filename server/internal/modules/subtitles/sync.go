@@ -241,7 +241,8 @@ type syncMeta struct {
 // the timing would not reach them. 1: rates compared net of their offset changes and searched
 // again, changes placed over undecided windows (The Mentalist S03E02 kept 24/23.976 for good).
 // 2: own-track windows on the speech's timeline (The Mentalist S03E09 was served 0.5 s early).
-// 3: cues shown too long capped (a timed result kept them on screen over the next lines).
+// 3: cues shown too long capped (a timed result kept them on screen over the next lines), lines
+// not stacked at offset steps.
 const syncVersion = 3
 
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }

@@ -1870,6 +1870,15 @@ that change at splits), simplified:
   line read `00:22:06.125 --> 00:44:12.000`, past the end of the file, so `lengthFits` rejected every fit (+0.3 s,
   score 0.50 over 0.13) as another cut and the episode was served raw; S01E13 had a 60 s line stacked over 14 others.
   Of the 342 subtitles of the 2026-11-06 snapshot 10 hold such a cue, 6 of them 60 s or longer.
+- Offset steps down (`unstackSteps`, sync_refine.go): the players show every line that is on, and a step down
+  pulls the lines after it onto the ones before (18 % of the timed results on the server against 2 % of the subtitles
+  as they are had lines over a second on top of each other, all at steps; "I love you so much." and "Oh. You hear
+  that?" together for 2.4 s). The line starts stay: a line before the step ends when the next one starts (it shows
+  1 s at least) and lines the step put out of order take each other's start. Moving the step to a pause that holds
+  it, or lines over to the other offset, was measured and took lines off the speech (`TestSnapshotServed`, lines moved
+  1 s or more: 228, on the speech 68 to 48; 104, 34 to 18; 96, 43 to 16). Final fits of the 2026-11-06 snapshot (the best
+  fitting subtitle of each file and the best with steps, 96 pairs on series, 4 on films, none of those with steps):
+  lines stacked 42 in 30 pairs to 1, out of order 21 to 0, no line start moved 1 s, share on the speech unchanged.
 - The viewer's manual offset (`subDelay`) still applies on top.
 - Holes (`holes.go`, `holes_fill.go`, see [API.md](API.md#holes)): once timed, a served subtitle is compared on the
   file's timeline with a reference of the file in another language (its own text track or a hash match on disk, else

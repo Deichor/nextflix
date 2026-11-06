@@ -138,3 +138,52 @@ func TestBrokenCueEndKeepsTheFit(t *testing.T) {
 		t.Error("the broken end is still served")
 	}
 }
+
+// The Mentalist (real data, testdata/sync/mentalist_steps.json, a season pack's Turkish subtitle
+// with four offset steps down of 2-4 s): lines over a second on top of each other at three of
+// them, one out of order. The line starts stay where the fit put them.
+func TestNoLinesStackedAtOffsetSteps(t *testing.T) {
+	v := loadFixtureViewing(t, "mentalist_steps.json")
+	m := v.playWindows(v.last)
+	if m == nil || !m.fits() || len(m.Fit.Segments) < 4 {
+		t.Fatalf("not fitted with steps: %s", logState(m))
+	}
+	cues := v.served(m)
+	if n := servedStacks(cues); n > 0 {
+		t.Errorf("%d lines stacked", n)
+	}
+	if n := servedInverted(vttCues(v.base), cues); n > 0 {
+		t.Errorf("%d lines out of order", n)
+	}
+}
+
+func TestUnstackSteps(t *testing.T) {
+	f := syncFit{Scale: 1, Segments: []syncSegment{{Offset: 0}, {From: 100, Offset: -4}}}
+	clock := []float64{90, 97, 99, 103, 110}
+	cues := []liveCue{
+		{90, 92, "a"},
+		{97, 100, "b"}, // ends after the first line of the step
+		{99, 101.5, "c"},
+		{99, 101, "d"}, // starts with c, though it comes after it
+		{106, 108, "e"},
+	}
+	got := unstackSteps(cues, clock, f)
+	if got[1].end != 99 {
+		t.Errorf("the line before the step ends at %.2f", got[1].end)
+	}
+	if got[2].text != "c" || got[2].start != 99 || got[3].start != 99 {
+		t.Errorf("out of order lines: %+v", got[2:4])
+	}
+	if got[2].end != 100 {
+		t.Errorf("a line starting with the next one shows until %.2f, want the least a line shows", got[2].end)
+	}
+	if got[0].end != 92 || got[4].end != 108 {
+		t.Errorf("lines away from the step changed: %+v", got)
+	}
+	// A step up leaves a pause: nothing to do
+	up := syncFit{Scale: 1, Segments: []syncSegment{{Offset: 0}, {From: 100, Offset: 4}}}
+	same := []liveCue{{97, 100, "a"}, {104, 106, "b"}}
+	if out := unstackSteps(same, []float64{97, 100}, up); out[0].end != 100 {
+		t.Errorf("step up: %+v", out)
+	}
+}
