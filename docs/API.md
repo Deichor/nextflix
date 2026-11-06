@@ -604,7 +604,8 @@ The subtitle part (below) did not bump it: an older pick still plays, and `subal
 
 Audio language: resolve reads the profile language from `X-Lang` (web and TV send it on every call). Release names
 with dub-only markers (`MVO`, `Dub`, `Дубляж`, `Rus`, `iTA` without `ENG`, `TRUEFRENCH`, ...) rank slightly lower,
-`MULTi` / `Dual Audio` / `ENG` slightly higher. A checked file whose audio tracks are all tagged with languages that
+`MULTi` / `Dual Audio` / `ENG` / the original language's name slightly higher. A file with one untagged track is judged
+by its name (a Russian voice-over studio such as `ColdFilm` counts as `Rus`). A checked file whose audio tracks are all tagged with languages that
 are neither the title's original language (TMDB) nor the profile's is taken only when no other candidate is left
 (see ARCHITECTURE.md). The language is not part of the cache key.
 

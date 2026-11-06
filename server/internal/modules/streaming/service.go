@@ -42,12 +42,13 @@ type Service struct {
 	imdbTitles   sync.Map // IMDb id -> tsIMDbTitle
 	seasonEps    sync.Map // TMDB tv id -> tsSeasonEpsEntry (episodes per season)
 	bitsearch    *bitsearch
-	debrid       *tsDebrid  // TorBox (debrid.go)
-	instant      *tsInstant // instant-play hints (instant.go)
-	home         *tsHome    // home releases of films in cinemas (homerelease.go)
-	speech       SpeechTap  // subtitle timing listens to the play streams (nil = off)
-	cues         CueTap     // and reads the file's own text track along (nil = off)
-	line         tsLine     // what the home line downloads at least (linerate.go)
+	debrid       *tsDebrid      // TorBox (debrid.go)
+	instant      *tsInstant     // instant-play hints (instant.go)
+	jackettGate  *tsJackettGate // open requests to Jackett (jackettgate.go)
+	home         *tsHome        // home releases of films in cinemas (homerelease.go)
+	speech       SpeechTap      // subtitle timing listens to the play streams (nil = off)
+	cues         CueTap         // and reads the file's own text track along (nil = off)
+	line         tsLine         // what the home line downloads at least (linerate.go)
 	// Indexer listing (tsListingKey) -> info hash a check found behind its link
 	listingHashes sync.Map
 
@@ -131,6 +132,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 	}
 	s.debrid = newDebrid(s, cfg.TorBoxURL)
 	s.instant = newInstant(s)
+	s.jackettGate = newJackettGate()
 	s.home = newHome()
 	if cfg.BitsearchURL != "" {
 		s.bitsearch = newBitsearch(cfg.BitsearchURL, cfg.FlareSolverrURL)

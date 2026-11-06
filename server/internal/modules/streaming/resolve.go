@@ -146,6 +146,8 @@ type tsResolveQuery struct {
 	overCap bool
 	// The viewer asked for a cinema recording of a film still in cinemas (?cinema=1, cinema.go)
 	cinema bool
+	// A check nobody waits for (instant.go): it gets a small share of Jackett (jackettgate.go)
+	background bool
 	// What the home line downloads at least, bytes/s (linerate.go; 0 = unknown)
 	line float64
 	// Warm-up bookkeeping of the title (nil in tests): the torrents this resolve adds and
@@ -1291,10 +1293,24 @@ func (s *Service) knownAvoided(q tsResolveQuery, raw []JackettResult) []JackettR
 	return raw
 }
 
-// findSource searches Jackett, ranks the releases and returns the best one TorrServer can open.
+// tsJackettDownFor: a Jackett that failed this recently makes "nothing found" a failed search.
+const tsJackettDownFor = 2 * time.Minute
+
+// findSource is findSourceOnce, except that "nothing found" while Jackett does not answer is a
+// failed search: most releases were never asked for, so the title may well have sources.
+func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
+	res, seed, err := s.findSourceOnce(ctx, q)
+	if errors.Is(err, errNoSource) && q.upgradeFrom == 0 && s.jackettFailedWithin(tsJackettDownFor) {
+		log.Printf("resolve %q: nothing found while Jackett does not answer", q.title)
+		return res, seed, errSearchFailed
+	}
+	return res, seed, err
+}
+
+// findSourceOnce searches Jackett, ranks the releases and returns the best one TorrServer can open.
 // The seed holds the other candidates (checks of higher resolutions may still be running)
 // and the indexers still searching; the caller passes it to afterPick or cancels it.
-func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
+func (s *Service) findSourceOnce(ctx context.Context, q tsResolveQuery) (*tsResolveResult, *tsUpgradeSeed, error) {
 	started := time.Now()
 	if line, ok := s.lineRate(); ok {
 		q.line = line
@@ -1304,7 +1320,7 @@ func (s *Service) findSource(ctx context.Context, q tsResolveQuery) (*tsResolveR
 	sr, q, named, err := s.searchTitle(ctx, q, started, names)
 	if err != nil {
 		log.Printf("resolve %q: search failed: %v", q.title, err)
-		return nil, nil, &tsResolveError{status: http.StatusBadGateway, msg: "Torrent search failed. Check the Jackett settings."}
+		return nil, nil, errSearchFailed
 	}
 	var from string
 	var rtTook time.Duration

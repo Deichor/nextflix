@@ -90,6 +90,11 @@ func (s *Service) reuseSaved(ctx context.Context, key string, q tsResolveQuery, 
 	if s.debrid.enabled() {
 		res, why := s.reuseDebrid(ctx, q, sv, cached)
 		if res != nil {
+			if wrong := s.sourceWrongAudio(q, res.Hash, res.Index, res.TorrentTitle, res.FileName); wrong != "" {
+				s.debrid.unregister(res.Hash, res.Index)
+				log.Printf("reuse %q: %q has the wrong audio (%s), resolving again", q.title, res.TorrentTitle, wrong)
+				return tsReuseAnswer{Action: "resolve", Reason: wrong}
+			}
 			s.useSource(w, res)
 			s.debridRewarm(w, res) // link and header ahead of the player's probe
 			log.Printf("reuse %q: %s:%d is cached on TorBox, playing it from TorBox (%s)", q.title, tsShortHash(sv.hash), res.Index,
@@ -100,6 +105,10 @@ func (s *Service) reuseSaved(ctx context.Context, key string, q tsResolveQuery, 
 	}
 	ans := s.reuseTorrent(ctx, q, sv, cached, w)
 	if ans.Action == "play" {
+		if wrong := s.sourceWrongAudio(q, ans.Source.Hash, ans.Source.Index, ans.Source.TorrentTitle, ans.Source.FileName); wrong != "" {
+			log.Printf("reuse %q: %q has the wrong audio (%s), resolving again", q.title, ans.Source.TorrentTitle, wrong)
+			return tsReuseAnswer{Action: "resolve", Reason: wrong}
+		}
 		log.Printf("reuse %q: %s:%d plays from its swarm: %s (%s)", q.title, tsShortHash(sv.hash), sv.index, ans.Source.Health,
 			time.Since(started).Round(time.Millisecond))
 	} else {

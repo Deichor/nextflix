@@ -374,6 +374,18 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
    resolution becomes the cached source (next play) and a spare. Without an indexer list (old Jackett) the aggregate
    endpoint is used; if every request fails (and Bitsearch found nothing) the resolve answers 502. Upgrade searches
    wait for all indexers.
+   - Load on Jackett (`jackettgate.go`): Jackett keeps working on a request after its client left, and the indexers
+     behind FlareSolverr answer one at a time (~10 s). Instant-play checks (about 700 titles a day, against some 15
+     viewer resolves) ran into deadlines and left their requests behind: on 2026-11-04 a 1337x answer took 2.8 hours,
+     then Jackett stopped accepting connections while staying "up". So a request now runs until Jackett answers
+     (at most 3 min), whoever still waits for it, and what is open is limited: 12 requests to slow indexers
+     together (2 of them for instant checks), 8 to one fast indexer (4 for instant checks). Over the limit a query
+     is skipped, not queued. Slow is the same bar as above (average above 3.5 s).
+   - A Jackett that does not answer: its indexer list is asked for 4 s at most and again after 30 s, meanwhile the
+     last known list is used, so a resolve loses no time on it. Instant checks wait. "Nothing found" within 2 min of
+     such a failure answers 502 (not 404) and is not remembered as a failure of the title, since most
+     releases were never asked for. The healthcheck kills a Jackett that gave no answer for 3 min and s6 starts a
+     new process (`deploy/docker-compose.yml`; Docker alone never restarts an unhealthy container).
    - Bitsearch (`bitsearch.go`, toggle `bitsearch_enabled` in the indexer settings, on by default): the search page
      of the DHT index bitsearch.to is scraped as one more source of the same gather (same cut-off, same answer-time
      average under `native:bitsearch`; later answers join the late results), finding torrents no Jackett indexer
@@ -523,7 +535,12 @@ file (`resolve.go`, shared per title by prefetch and play in `resolvejob.go`, ca
      for a Turkish profile), e.g. an English film with a lone Russian track. An untagged / `und` track, or one whose
      title says "original" or names the original language, keeps the file; without a known original language
      nothing is judged. Unfit files are never spares or upgrades, but the only playable source still plays
-     (logged as `has the wrong audio (audio only in ru, original en)`).
+     (logged as `has the wrong audio (audio only in ru, original en)`). A file with one untagged track is judged by
+     its names (`tsWrongAudioByName`): a language word or a Russian voice-over studio (`ColdFilm`, `LostFilm`, ...),
+     with no hint of more tracks and outside the title's own words, gives that track's language. A source chosen
+     earlier gets the same check before it plays (`sourceWrongAudio`, in `cachedFor` and `reuse`): it is dropped and
+     the title resolved again, since it may have been picked while better releases were out of reach. A name
+     that names the original language (`TURKISH` for a Turkish show) ranks like `MULTi`.
    - Client caps on the probed file (`caps.go`): names can say nothing about the file (Big Buck Bunny on TorBox,
      `big-buck-bunny-2008-4-k-60-fps-blender-animated-short-x-265`, is a 7 GB 2160p HEVC 10-bit file), so after the
      probe a file taller than the client's `maxq`, or whose video play has to re-encode for it (HEVC without

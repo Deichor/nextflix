@@ -38,6 +38,8 @@ func (e *tsResolveError) Error() string { return e.msg }
 
 var errNoSource = &tsResolveError{status: http.StatusNotFound, msg: "No playable source found"}
 
+var errSearchFailed = &tsResolveError{status: http.StatusBadGateway, msg: "Torrent search failed. Check the Jackett settings."}
+
 type tsFlight struct {
 	done    chan struct{}
 	res     *tsResolveResult
@@ -114,7 +116,8 @@ func (s *Service) startResolve(key string, q tsResolveQuery) (*tsFlight, bool) {
 			if q.warmCtx().Err() == nil {
 				if s.pausedSince(q.warm, started) {
 					s.deferPrefetch(q.warm, q)
-				} else {
+				} else if !errors.Is(err, errSearchFailed) {
+					// A failed search says nothing about the title
 					s.failedAt.Store(key, time.Now())
 				}
 			}
