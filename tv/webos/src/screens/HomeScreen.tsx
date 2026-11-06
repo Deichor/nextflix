@@ -27,7 +27,7 @@ export function pickFeatured(pool: Title[], key: string | null): Title | null {
   return good.find(t => t.key === key) || good[Math.floor(Math.random() * good.length)] || null;
 }
 
-const BECAUSE = /^Because you (?:loved|liked) (.+)$/;
+const BECAUSE = /^Because you (?:loved|liked|watched) (.+)$/;
 const BECAUSE_FAVORITE = /^Because you added (.+) to Favorites$/;
 
 function recommendationTitle({ t }: I18n, row: RecommendationRow): string {
@@ -38,6 +38,7 @@ function recommendationTitle({ t }: I18n, row: RecommendationRow): string {
     case 'because_loved': return name ? t('home.recs.becauseLoved', { title: name }) : row.title;
     case 'because_liked': return name ? t('home.recs.becauseLiked', { title: name }) : row.title;
     case 'because_favorite': return name ? t('home.recs.becauseFavorite', { title: name }) : row.title;
+    case 'because_watched': return name ? t('home.recs.becauseWatched', { title: name }) : row.title;
   }
   return row.id === 'trending' ? t('home.trendingNow') : row.title;
 }

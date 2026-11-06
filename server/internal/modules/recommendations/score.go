@@ -48,6 +48,9 @@ func signalWeight(s Signal) float64 {
 	if s.Favorite {
 		w += weightFavorite
 	}
+	if s.Rating != "dislike" {
+		w = math.Max(w, s.Watched)
+	}
 	return w
 }
 
@@ -65,8 +68,22 @@ type seed struct {
 	weight float64 // |signal weight| x recency
 }
 
+// onlyStarted: an unfinished title may feed the pool, but "Because you watched" would overstate it.
+func (s seed) onlyStarted() bool {
+	return s.Rating == "" && !s.Favorite && s.Watched <= watchedStarted
+}
+
 // pickSeeds returns the strongest recent positive titles and the most recent dislikes.
 func pickSeeds(signals []Signal, now time.Time) (pos, neg []seed) {
+	pos, neg = allSeeds(signals, now)
+	if len(pos) > maxSeeds {
+		pos = pos[:maxSeeds]
+	}
+	return pos, neg
+}
+
+// allSeeds returns every positive title, strongest first, and the most recent dislikes.
+func allSeeds(signals []Signal, now time.Time) (pos, neg []seed) {
 	for _, s := range signals {
 		w := signalWeight(s)
 		switch {
@@ -83,9 +100,6 @@ func pickSeeds(signals []Signal, now time.Time) (pos, neg []seed) {
 		return pos[i].UpdatedAt.After(pos[j].UpdatedAt)
 	})
 	sort.SliceStable(neg, func(i, j int) bool { return neg[i].UpdatedAt.After(neg[j].UpdatedAt) })
-	if len(pos) > maxSeeds {
-		pos = pos[:maxSeeds]
-	}
 	if len(neg) > maxDislikes {
 		neg = neg[:maxDislikes]
 	}
@@ -137,7 +151,11 @@ type candidate struct {
 	score   float64
 	bySeed  map[titleKey]float64
 	extra   float64 // genre affinity + prior, shared by every row
+	mult    float64 // fatigue and rotation (1 without them)
 }
+
+// rowScore is the candidate's score in the row of one seed.
+func (c *candidate) rowScore(sk titleKey) float64 { return scaled(c.bySeed[sk]+c.extra, c.mult) }
 
 func positionWeight(i int) float64 { return 1 / (1 + positionDecay*float64(i)) }
 
@@ -148,7 +166,8 @@ type scoreInput struct {
 	dislikes []seed
 	related  map[titleKey]relatedLists
 	genres   map[titleKey][]int
-	partial  bool // a seed used TMDB's lists instead of the matcher's
+	partial  bool      // a seed used TMDB's lists instead of the matcher's
+	rot      *rotation // nil = a plain ranking
 }
 
 // score builds the ranked candidate pool. Rated titles, adult titles, titles without a poster
@@ -201,7 +220,11 @@ func score(in scoreInput) []*candidate {
 			continue
 		}
 		c.extra = genreWeight*itemAffinity(c.item, affinity) + prior(c.item)
-		c.score = c.base - c.penalty + c.extra
+		c.mult = 1
+		if in.rot != nil {
+			c.mult = in.rot.mult(keyOf(c.item.MediaType, c.item.ID))
+		}
+		c.score = scaled(c.base-c.penalty+c.extra, c.mult)
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -250,7 +273,7 @@ func buildRows(cands []*candidate, seeds []seed) []Row {
 		if len(rows) > becauseRows {
 			break
 		}
-		if sd.Title == "" {
+		if sd.Title == "" || sd.onlyStarted() {
 			continue
 		}
 		sk := keyOf(sd.MediaType, sd.TmdbID)
@@ -261,7 +284,7 @@ func buildRows(cands []*candidate, seeds []seed) []Row {
 			}
 		}
 		sort.SliceStable(mine, func(i, j int) bool {
-			return mine[i].bySeed[sk]+mine[i].extra > mine[j].bySeed[sk]+mine[j].extra
+			return mine[i].rowScore(sk) > mine[j].rowScore(sk)
 		})
 
 		// Prefer titles not shown in earlier rows; reuse shown ones only to reach the minimum size
@@ -306,6 +329,9 @@ func becauseTitle(sd seed) (string, string) {
 		return "Because you loved " + sd.Title, ReasonBecauseLoved
 	case "like":
 		return "Because you liked " + sd.Title, ReasonBecauseLiked
+	}
+	if !sd.Favorite {
+		return "Because you watched " + sd.Title, ReasonBecauseWatched
 	}
 	return "Because you added " + sd.Title + " to Favorites", ReasonBecauseFavored
 }

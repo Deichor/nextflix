@@ -13,7 +13,10 @@ type TitleWatch struct {
 	TmdbID    int
 	Title     string
 	Finished  bool
-	UpdatedAt time.Time
+	// Over every entry of the title
+	FinishedEpisodes int
+	WatchedSeconds   float64
+	UpdatedAt        time.Time
 }
 
 // History returns every title the profile has progress for (finished or not), newest first.
@@ -22,16 +25,21 @@ func (s *Service) History(profileID uint) ([]TitleWatch, error) {
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
+	at := map[string]int{}
 	out := make([]TitleWatch, 0, len(rows))
 	for _, r := range rows {
 		key := fmt.Sprintf("%s:%d", r.MediaType, r.TmdbID)
-		if seen[key] {
-			continue
+		i, ok := at[key]
+		if !ok {
+			i = len(out)
+			at[key] = i
+			out = append(out, TitleWatch{MediaType: r.MediaType, TmdbID: r.TmdbID, Title: r.Title,
+				Finished: r.finished(), UpdatedAt: r.UpdatedAt})
 		}
-		seen[key] = true
-		out = append(out, TitleWatch{MediaType: r.MediaType, TmdbID: r.TmdbID, Title: r.Title,
-			Finished: r.finished(), UpdatedAt: r.UpdatedAt})
+		out[i].WatchedSeconds += r.Position
+		if r.MediaType == "tv" && r.finished() {
+			out[i].FinishedEpisodes++
+		}
 	}
 	return out, nil
 }

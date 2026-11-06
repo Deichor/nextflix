@@ -221,7 +221,10 @@ so one gzipped answer arrives much sooner.
   fetches go on and fill the cache for the next call. The answer is always 200 (`null` sections without a TMDB key
   or before the first Top 10 download) with `Cache-Control: private, max-age=60`, or `no-store` when a section is
   `null`.
-- Each section is byte for byte the body of its old endpoint, so clients map both paths into one `HomeData`. The
+- Popular movies and the genre rows draw 20 cards from the first 3 pages of their list, another draw every UTC day
+  (`homerotate.go`): page one of these lists barely changes, so the rows looked the same for weeks. Fetching pages 2-3
+  may fail: the row then draws from what arrived. These rows are the same for every profile and can hold watched titles.
+- Each section has the shape of the body of its old endpoint, so clients map both paths into one `HomeData`. The
   genre rows come from `tmdb.HomeGenreRows` (`platform/tmdb/home.go`, fixed ids and order); `row.Query()` adds the
   defaults (`sort_by=popularity.desc`, `include_adult=false`) and equals what `discoverParams` makes of the old
   `/api/tmdb/discover/movie` query, so both share one TMDB cache entry. The image warmer reads the same list.
@@ -2124,11 +2127,16 @@ modified or dropped. Migrated rows have no title or artwork; `Backfill` fills em
 
 ## Recommendations
 
-`server/internal/modules/recommendations` builds `GET /api/recommendations` from the profile's ratings and TMDB:
+`server/internal/modules/recommendations` builds `GET /api/recommendations` from the profile's ratings, watch history
+and TMDB:
 
 1. Signal weight per title: `love` +3, `like` +1.5, `dislike` −3, favorite +2 on top of the rating (love + favorite
-   = 5, favorite alone = 2). Recency factor `0.5 + 0.5·e^(−days/120)` (1.0 today, 0.68 after 120 days).
-2. Seeds: the 8 strongest positive titles (weight × recency). Dislikes: the 5 most recent `dislike` titles.
+   = 5, favorite alone = 2). Watching counts too (`watchWeight`, from `progress.Service.History`): a finished movie 1.5,
+   a show 0.5 + 0.25 per finished episode up to 3, an unfinished title with at least 10 minutes played 0.4, less than
+   that nothing. A title takes the larger of its rating and its watching; a dislike stays a dislike. Recency factor
+   `0.5 + 0.5·e^(−days/120)` (1.0 today, 0.68 after 120 days).
+2. Seeds: 8 positive titles (weight × recency), the 4 strongest always and the rest drawn per window, stronger ones
+   more often (see Rotation below). Dislikes: the 5 most recent `dislike` titles.
 3. For every seed and dislike, TMDB `recommendations` and `similar` (page 1 each, through the shared client's 24 h
    cache) are fetched, 6 at a time. Each listed title gets `seed weight × list weight × 1/(1 + 0.08·position)`,
    list weight 1.0 for recommendations and 0.5 for similar. Positive seeds add to its support, dislikes to its
@@ -2141,16 +2149,28 @@ modified or dropped. Migrated rows have no title or artwork; `Backfill` fills em
    scaled to [−1, 1]; a candidate gets `1.5 × mean affinity of its genres`.
 5. Prior: `0.6 × vote_average/10 × min(1, vote_count/200) + 0.1 × log10(1 + popularity)`.
 6. Score = support − penalty + genre term + prior.
-7. Dropped: titles the profile rated or favorited (disliked ones included), adult titles, titles without a poster or
+7. Dropped: titles the profile rated, favorited or played (even for a minute; disliked ones included), adult titles, titles without a poster or
    with fewer than 10 TMDB votes, and titles whose dislike penalty is at least as large as their positive support
    (weakly supported titles that look like something the profile disliked).
-8. Rows: `Top Picks for You` = best 20 by score. Then the seeds in order give up to 3 `Because you loved/liked
-   <Title>` rows (`Because you added <Title> to Favorites` for a favorite without a rating): that seed's
+8. Rows: `Top Picks for You` = best 20 by score, each title from one seed lowering the next one's by 15 % so one loved
+   film cannot fill the row. Then the seeds in the order of the draw give up to 3 `Because you loved/liked
+   <Title>` rows (`Because you added <Title> to Favorites` for a favorite without a rating, `Because you watched
+   <Title>` for a title only watched, none for a title only started): that seed's
    candidates ordered by its own support plus the genre/prior terms, titles not already shown in an earlier row
    first (up to 20); shown ones are reused only to reach the minimum of 8. Seeds with fewer than 8 candidates get
    no row.
 9. No positive signal (or nothing left after filtering): one `Trending Now` row (`/trending/all/week`, rated titles
    removed, reason `popular`).
+
+Rotation (`rotation.go`): the rows stay put within a 6-hour window and change between windows, for every client.
+The first 8 cards of each row a client gets count as shown, once per title and window, in `recommendation_exposures`
+(120 days). This is what the server sent, not proof that someone looked at it. A score is multiplied by
+`1 / (1 + 0.6 × showings beyond the first 2)`, so a title sinks after a few visits and not after one; the count
+halves every 14 days without a showing, so it can come back. Scores also move within ±12.5 % per window (from a hash of
+profile, window and title, so a new computation in a window gives the same rows). The trending fallback has no scores
+and is only reordered this way. Replayed on real profiles and TMDB lists, 14 visits 12 h apart: a profile with 14
+ratings saw 199 different titles among the first cards (before: 32, always the same), the most shown one 6 times;
+one with no ratings and 3 watched shows got its own rows instead of Trending Now.
 
 Results are cached in memory per profile for 30 minutes (empty results are not cached). After that the old rows are
 answered at once for up to 24 h while new ones are computed in the background (one at a time per profile and language).

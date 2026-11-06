@@ -129,6 +129,7 @@ is always an array. `original_language` (ISO 639-1) is sent when TMDB lists it.
 | `because-<media_type>-<tmdb_id>` | `Because you loved <Title>` | `because_loved` |
 | `because-<media_type>-<tmdb_id>` | `Because you liked <Title>` | `because_liked` |
 | `because-<media_type>-<tmdb_id>` | `Because you added <Title> to Favorites` (favorite without a rating) | `because_favorite` |
+| `because-<media_type>-<tmdb_id>` | `Because you watched <Title>` (watched, not rated or favorited) | `because_watched` |
 | `trending` | `Trending Now` (20 items) | `popular` |
 
 With positive signals the response is `top-picks` followed by up to 3 `because-*` rows (8 to 20 items each).

@@ -42,6 +42,7 @@ func (h handler) get(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recommendations"})
 		return
 	}
+	go h.s.NoteShown(id, resp)
 	c.JSON(http.StatusOK, resp)
 }
 

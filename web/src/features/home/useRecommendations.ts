@@ -109,7 +109,7 @@ export function useRecommendations(profileId: number | null): RecommendationRow[
   }, [rows, ratingsVersion]);
 }
 
-const BECAUSE = /^Because you (?:loved|liked) (.+)$/;
+const BECAUSE = /^Because you (?:loved|liked|watched) (.+)$/;
 const BECAUSE_FAVORITE = /^Because you added (.+) to Favorites$/;
 
 /** Row title in the UI language; the title name inside comes from the server. */
@@ -126,6 +126,8 @@ export function recommendationTitle(t: TFunction, row: RecommendationRow): strin
       return name ? t('home.recs.becauseLiked', { title: name }) : row.title;
     case 'because_favorite':
       return name ? t('home.recs.becauseFavorite', { title: name }) : row.title;
+    case 'because_watched':
+      return name ? t('home.recs.becauseWatched', { title: name }) : row.title;
   }
   if (row.id === 'top-picks') return t('home.recs.topPicks');
   if (row.id === 'trending') return t('home.trendingNow');

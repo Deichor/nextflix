@@ -22,6 +22,7 @@ internal interface BrowseStrings {
     fun becauseLoved(title: String): String
     fun becauseLiked(title: String): String
     fun becauseFavorite(title: String): String
+    fun becauseWatched(title: String): String
     val genreActionAdventure: String
     val genreComedies: String
     val genreSciFiFantasy: String
@@ -80,6 +81,7 @@ internal object BrowseEn : BrowseStrings {
     override fun becauseLoved(title: String) = "Because you loved $title"
     override fun becauseLiked(title: String) = "Because you liked $title"
     override fun becauseFavorite(title: String) = "Because you added $title to Favorites"
+    override fun becauseWatched(title: String) = "Because you watched $title"
     override val genreActionAdventure = "Action & Adventure Movies"
     override val genreComedies = "Comedies"
     override val genreSciFiFantasy = "Sci-Fi & Fantasy"
@@ -141,6 +143,7 @@ internal object BrowseTr : BrowseStrings {
     override fun becauseLoved(title: String) = "$title yapımına bayıldığın için"
     override fun becauseLiked(title: String) = "$title yapımını beğendiğin için"
     override fun becauseFavorite(title: String) = "$title yapımını favorilerine eklediğin için"
+    override fun becauseWatched(title: String) = "$title yapımını izlediğin için"
     override val genreActionAdventure = "Aksiyon ve Macera Filmleri"
     override val genreComedies = "Komediler"
     override val genreSciFiFantasy = "Bilim Kurgu ve Fantastik"
