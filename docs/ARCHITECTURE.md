@@ -1879,6 +1879,17 @@ that change at splits), simplified:
   1 s or more: 228, on the speech 68 to 48; 104, 34 to 18; 96, 43 to 16). Final fits of the 2026-11-06 snapshot (the best
   fitting subtitle of each file and the best with steps, 96 pairs on series, 4 on films, none of those with steps):
   lines stacked 42 in 30 pairs to 1, out of order 21 to 0, no line start moved 1 s, share on the speech unchanged.
+- Re-fits and the speech (`offSpeech`, sync.go): a re-fit of an accepted provisional fit that moves a line 0.25 s or
+  more is taken only when a larger share of the lines it moves 0.1 s or more starts on the speech heard (8 of them
+  heard at least, else nothing tells). Scores count own-track windows and the whole file; Westworld S02E04's subtitle,
+  right at +0.06 s, went to +0.44 s for 18 minutes with 8-30 % of its lines on the speech (chance 33 %), now 62-86 %.
+  An offset run that goes back where it came from (within 0.15 s, by under 1 s) is dropped when the speech heard has
+  as many of its lines on it without (`dropZigzags`, sync_align.go): no cut does that. Merging by matched lines
+  instead harmed real stretches (a film's -0.69 s, chance stretches 9 to 17). Replays of the 2026-11-06 snapshot
+  (`TestSnapshotServed`, a re-fit every minute, 3-minute stretches around the viewer, 98 pairs on series, 4 on films):
+  series good / soft / at chance 3011 / 155 / 142 to 3031 / 149 / 128, lines moved after being shown 0.25 s or more 8944
+  to 8605, flips 2626 to 1735; films 163 / 20 / 9 unchanged, those moves 374 to 388, flips 3837 to 4182 (one film's
+  subtitle of wandering small offsets); 5 pairs closer to the speech, none further.
 - The viewer's manual offset (`subDelay`) still applies on top.
 - Holes (`holes.go`, `holes_fill.go`, see [API.md](API.md#holes)): once timed, a served subtitle is compared on the
   file's timeline with a reference of the file in another language (its own text track or a hash match on disk, else

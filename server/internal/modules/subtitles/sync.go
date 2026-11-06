@@ -824,6 +824,12 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			return true
 		}
 	}
+	if y.offSpeech(key, hash, index, base, prev, m, vtt, ref.Probe.Duration, complete) {
+		if _, ok := y.result(key, base); ok {
+			y.keepRates(key, prev, m)
+			return true
+		}
+	}
 	// Timed before the file played (pre-timing): none of its audio was heard. A pre-timed fit stays
 	// so until played audio backs it, also after the file opened: a re-fit then stores the same
 	// offsets again (keepStable), and that showed The Mentalist S03E16's pre-timed fit, 3 s off in
@@ -963,6 +969,46 @@ func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, compl
 	}
 	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
 	return m.Fit.Score*lines-old < syncSplitPenalty
+}
+
+// A re-fit that moves a line by syncSpeechMove or more has to back that with the speech, on all the
+// lines it moves by syncSpeechNear or more.
+const (
+	syncSpeechMove = 0.25
+	syncSpeechNear = 0.1
+)
+
+// offSpeech reports whether a re-fit of an accepted provisional fit moves lines without bringing
+// them closer to the speech heard: of the lines it moves that were heard, a larger share has to
+// start on the speech than as served. Scores weigh own-track windows and a whole file's lines, and
+// Westworld S02E04's subtitle, right at +0.06 s, was moved to +0.44 s for 18 minutes with 8-30 % of
+// its lines on the speech. Too few such lines heard: nothing to tell.
+func (y *syncer) offSpeech(key, hash string, index int, base []byte, prev *syncMeta, m syncMeta, vtt []byte, duration float64, complete bool) bool {
+	if complete || prev == nil || !prev.Live || prev.Pre || !prev.fits() || !m.fits() {
+		return false
+	}
+	before := y.servedCues(key, base, prev)
+	after := vttCues(base)
+	if vtt != nil {
+		after = vttCues(vtt)
+	}
+	if len(before) != len(after) {
+		return false
+	}
+	var was, now []liveCue
+	most := 0.0
+	for i := range before {
+		if d := math.Abs(after[i].start - before[i].start); d >= syncSpeechNear {
+			was, now = append(was, before[i]), append(now, after[i])
+			most = math.Max(most, d)
+		}
+	}
+	if most < syncSpeechMove {
+		return false
+	}
+	speech := y.liveFile(hash, index).speechIn(0, duration)
+	rw, rn := residualOf(was, speech, 0, duration), residualOf(now, speech, 0, duration)
+	return min(rw.n, rn.n) >= diagMinCues && rn.within <= rw.within
 }
 
 const (
@@ -1241,6 +1287,8 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	if !ok || !(fit.good() || !final && heldFits(prev, fit)) || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, r
 	}
+	fit = dropZigzags(fit, cues, y.liveFile(hash, index).speechIn(0, ref.Probe.Duration))
+	m.Fit = fit
 	if p, ok := pinnedFit(prev, fit); ok {
 		fit, m.Fit = p, p
 	}

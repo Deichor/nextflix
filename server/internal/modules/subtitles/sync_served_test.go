@@ -187,3 +187,53 @@ func TestUnstackSteps(t *testing.T) {
 		t.Errorf("step up: %+v", out)
 	}
 }
+
+// Westworld S02E04 (real data, testdata/sync/westworld_s02e04.json, a 4K file with the Turkish
+// OpenSubtitles subtitle): the subtitle fits at +0.06 s, and a re-fit at 44 minutes moved it to
+// +0.44 s, its lines 0.4 s late and 8-30 % of them on the speech for 18 minutes (chance 33 %), until
+// the final fit. Such a move stays out now: nothing that far off is served.
+func TestRefitStaysOnTheSpeech(t *testing.T) {
+	v := loadFixtureViewing(t, "westworld_s02e04.json")
+	for g := 0; g <= v.last; g++ {
+		m := v.playWindows(g)
+		viewer := float64(g+1)*syncWindowLen - fbViewerLag
+		if viewer < 2600 || m == nil || !m.fits() {
+			continue
+		}
+		if off := offsetAt(m.Fit.Segments, viewer); off > 0.3 {
+			t.Fatalf("at %.0f s served %s", viewer, offsetsText(m.Fit))
+		}
+	}
+}
+
+func TestDropZigzags(t *testing.T) {
+	var cues []liveCue
+	for s := 10.0; s < 590; s += 6 {
+		cues = append(cues, liveCue{start: s, end: s + 2})
+	}
+	// The speech: starts of the lines at +0.3 s, except the middle stretch when real
+	speech := func(real bool) []refWindow {
+		w := refWindow{Start: 0, Kind: "live", Speech: make([]byte, 600*syncRate)}
+		for _, c := range cues {
+			at := c.start + 0.3
+			if real && c.start >= 200 && c.start < 400 {
+				at = c.start - 0.3
+			}
+			i := int(at * syncRate)
+			for k := i; k < i+150; k++ {
+				w.Speech[k] = 1
+			}
+		}
+		return []refWindow{w}
+	}
+	f := syncFit{Scale: 1, Segments: []syncSegment{{Offset: 0.3}, {From: 200, Offset: -0.3}, {From: 400, Offset: 0.3}}}
+	if got := dropZigzags(f, cues, speech(false)); len(got.Segments) != 1 || got.Segments[0].Offset != 0.3 {
+		t.Errorf("a zigzag stays: %s", offsetsText(got))
+	}
+	if got := dropZigzags(f, cues, speech(true)); len(got.Segments) != 3 {
+		t.Errorf("speech backs the stretch, but: %s", offsetsText(got))
+	}
+	if got := dropZigzags(f, cues, nil); len(got.Segments) != 3 {
+		t.Errorf("no speech heard, but: %s", offsetsText(got))
+	}
+}

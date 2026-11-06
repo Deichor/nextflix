@@ -138,6 +138,14 @@ func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub
 		m := y.meta(key)
 		served := y.servedCues(key, base, m)
 		if step > 0 {
+			if os.Getenv("NFX_SERVED_TRACE") != "" {
+				r := residualOf(served, speech, math.Max(viewer-diagResidualAround, 0), viewer+diagResidualAround)
+				st, off := "none", ""
+				if m != nil {
+					st, off = m.State, offsetsText(m.Fit)
+				}
+				t.Logf("%s %s at %.0f: %s [%s] median %+.2f within %.0f%% chance %.0f%% n=%d", f.name[:8], s.name, viewer, st, off, r.median, 100*r.within, 100*r.chance, r.n)
+			}
 			if r := residualOf(served, speech, math.Max(viewer-diagResidualAround, 0), viewer+diagResidualAround); r.n >= diagMinCues {
 				switch {
 				case r.within < r.chance+0.10:
