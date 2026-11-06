@@ -133,7 +133,7 @@ is always an array. `original_language` (ISO 639-1) is sent when TMDB lists it.
 | `trending` | `Trending Now` (20 items) | `popular` |
 
 With positive signals the response is `top-picks` followed by up to 3 `because-*` rows (8 to 20 items each).
-A profile without any `like`/`love`/favorite (or when TMDB returns nothing) gets the single `trending` row instead.
+A profile without any `like`/`love`/favorite or watched title (or when TMDB returns nothing) gets the single `trending` row instead.
 `rows` is `[]` only when TMDB is unreachable.
 
 ```json
