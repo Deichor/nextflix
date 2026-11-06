@@ -1,6 +1,8 @@
 package subtitles
 
 import (
+	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +20,7 @@ const turkishVTT = `WEBVTT
 00:00:04.000 --> 00:00:06.000
 <i>İstanbul'da yağmur yağıyor.</i>
 
-00:00:06.500 --> 00:01:09.250
+00:00:06.500 --> 00:00:13.500
 ÇİĞDEM ŞÜKRÜ'YE ÖĞRETMEN DEDİ: "Işık!"
 
 `
@@ -159,7 +161,7 @@ func TestMicroDVD(t *testing.T) {
 		t.Errorf("got:\n%q\nwant:\n%q", got, want)
 	}
 	// Without a frame rate line the default 23.976 is used.
-	if got := convert(t, []byte("{2398}{4795}Bir\n"), "x.sub"); !strings.Contains(got, "00:01:40.016 --> 00:03:19.991") {
+	if got := convert(t, []byte("{2398}{4795}Bir\n"), "x.sub"); !strings.Contains(got, "00:01:40.016 --> ") {
 		t.Errorf("default fps: %q", got)
 	}
 }
@@ -167,5 +169,35 @@ func TestMicroDVD(t *testing.T) {
 func TestUnsupported(t *testing.T) {
 	if _, err := ToWebVTT([]byte("just some text\nwithout cues"), "x.srt"); err != ErrUnsupportedFormat {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Real ends of broken cues: Avatar: Seven Havens S01E12's last line and a 60 s line of S01E13.
+func TestLongCuesAreCapped(t *testing.T) {
+	srt := "1\n00:01:38,375 --> 00:02:38,750\nBüyük Felakete yol Açtı.\n\n" +
+		"2\n00:01:40,600 --> 00:01:42,000\nSonraki satır.\n\n" +
+		"3\n00:02:00,000 --> 00:02:12,000\nOn iki saniye kalır.\n\n" +
+		"4\n00:03:00,000 --> 00:03:30,000\nUzun ama yalnız.\n\n" +
+		"5\n00:22:06,125 --> 00:44:12,000\nAnne.\n"
+	vtt := convert(t, []byte(srt), "a.srt")
+	for _, want := range []string{
+		"00:01:38.375 --> 00:01:40.600", // until the next line
+		"00:02:00.000 --> 00:02:12.000", // long but not broken
+		"00:03:00.000 --> 00:03:07.000", // nothing near: a few seconds
+		"00:22:06.125 --> 00:22:13.125", // the last line
+	} {
+		if !strings.Contains(vtt, want) {
+			t.Errorf("no %q in\n%s", want, vtt)
+		}
+	}
+	// A subtitle stored before the cap reads the same
+	stored := capBrokenCues(renderVTT([]liveCue{{98.375, 158.75, "a"}, {100.6, 102, "b"}, {1326.125, 2652, "c"}}, false))
+	cues := vttCues(stored)
+	if len(cues) != 3 || math.Abs(cues[0].end-100.6) > 1e-3 || math.Abs(cues[2].end-1333.125) > 1e-3 {
+		t.Errorf("stored: %+v", cues)
+	}
+	fine := renderVTT([]liveCue{{1, 2, "a"}, {3, 15, "b"}}, false)
+	if !bytes.Equal(capBrokenCues(fine), fine) {
+		t.Error("a subtitle without broken cues changed")
 	}
 }

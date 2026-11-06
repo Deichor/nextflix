@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"path"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -241,7 +242,9 @@ type syncMeta struct {
 // the timing would not reach them. 1: rates compared net of their offset changes and searched
 // again, changes placed over undecided windows (The Mentalist S03E02 kept 24/23.976 for good).
 // 2: own-track windows on the speech's timeline (The Mentalist S03E09 was served 0.5 s early).
-const syncVersion = 2
+// 3: cues shown too long capped (a timed result kept them on screen over the next lines), lines
+// not stacked at offset steps.
+const syncVersion = 3
 
 func (m syncMeta) fits() bool { return m.State == syncStateSynced || m.State == syncStateUnchanged }
 
@@ -650,7 +653,7 @@ func (y *syncer) startTiming(inner, hash string, index int, base []byte, pre boo
 			ctx = context.WithValue(ctx, preTimingKey{}, p)
 		}
 		start := time.Now()
-		err := y.run(ctx, inner, hash, index, base)
+		err := guardTiming(func() error { return y.run(ctx, inner, hash, index, base) })
 		switch {
 		case p != nil && p.givenUp():
 			log.Printf("subtitles: pre-timing of %s on %s:%d given up after %s: no room beside the playing streams id=%s",
@@ -666,6 +669,18 @@ func (y *syncer) startTiming(inner, hash string, index int, base []byte, pre boo
 		}
 		return nil, err
 	})
+}
+
+// guardTiming keeps a panic in a timing job from ending the server and every stream with it: the
+// job fails like any other and what is served stays.
+func guardTiming(job func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("subtitles: timing job panicked: %v\n%s", r, debug.Stack())
+			err = fmt.Errorf("timing job panicked: %v", r)
+		}
+	}()
+	return job()
 }
 
 // run times one subtitle for the file and stores the result. A reference saved before the
@@ -708,9 +723,11 @@ func (y *syncer) decideRead(ctx context.Context, inner, hash string, index int, 
 	mu := y.decideLock(key)
 	decided := false
 	if y.svc.cfg.LiveTiming && y.watched(key) {
-		mu.Lock()
-		decided = y.decide(ctx, inner, hash, index, base, ref, false)
-		mu.Unlock()
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+			decided = y.decide(ctx, inner, hash, index, base, ref, false)
+		}()
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -822,17 +839,42 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			return true
 		}
 	}
+	if y.offSpeech(key, hash, index, base, prev, m, vtt, ref.Probe.Duration, complete) {
+		if _, ok := y.result(key, base); ok {
+			y.keepRates(key, prev, m)
+			return true
+		}
+	}
 	// Timed before the file played (pre-timing): none of its audio was heard. A pre-timed fit stays
 	// so until played audio backs it, also after the file opened: a re-fit then stores the same
 	// offsets again (keepStable), and that showed The Mentalist S03E16's pre-timed fit, 3 s off in
 	// the teaser, from 3 s on
 	pre := provisional && len(live) == 0 && (!y.livePlaying(syncFileKey(hash, index)) || prev != nil && prev.Pre)
-	if !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced)) {
+	// A viewer keeps a replacement while one fits: the subtitle's fit does not swap the lines back
+	keepsAlt := prev != nil && prev.State == syncStateReplaced && m.fits() && y.watched(key)
+	wantsAlt := !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced))
+	if wantsAlt && (prev == nil || prev.State != syncStateReplaced) && y.watched(key) && !y.servedOffSpeech(key, hash, index, base, prev, ref.Probe.Duration) {
+		// What the viewer sees is on the speech: no other subtitle's lines for it
+		if prev != nil && prev.fits() {
+			kept := *prev
+			kept.Live, kept.LiveWindows, kept.LiveSeconds = provisional, len(live), liveSecs
+			y.storeWatched(key, inner, hash, index, base, prev, kept, nil)
+			logKept(inner, hash, index, m, len(live), liveSecs)
+			return true
+		}
+		wantsAlt = false
+	}
+	if wantsAlt || keepsAlt {
 		// Did not fit: the best fitting other subtitle of the language, when one fits. While
 		// provisional, a lined up subtitle stays served as it is (a few minutes cannot tell
 		// whether another release's offset holds for the whole file).
 		alts := y.alternatives(hash, index, inner)
-		if len(alts) > 0 && (prev == nil || !prev.fits()) && !y.altsDue(key, read) {
+		if prev != nil && prev.State == syncStateReplaced {
+			// The one served first: no change of lines while it still fits
+			alts = slices.DeleteFunc(alts, func(a string) bool { return a == prev.ReplacedBy })
+			alts = append([]string{prev.ReplacedBy}, alts...)
+		}
+		if len(alts) > 0 && (prev == nil || !prev.fits() || keepsAlt) && !y.altsDue(key, read) {
 			return true // what is served stays until the alternatives are fitted again
 		}
 		for _, alt := range alts {
@@ -961,6 +1003,84 @@ func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, compl
 	}
 	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
 	return m.Fit.Score*lines-old < syncSplitPenalty
+}
+
+// servedOffSpeech reports whether what a viewer is served sits near chance on the speech heard around
+// it (the last diagResidualBack seconds and what is heard ahead, else all of it), the bar a
+// replacement with another subtitle's lines has to meet: Westworld S02E04's right subtitle gave way
+// to another at 231 s and came back at 336 s. Nothing heard yet: it may (no line seen). Too little
+// speech to tell: only the final answer may.
+func (y *syncer) servedOffSpeech(key, hash string, index int, base []byte, prev *syncMeta, duration float64) bool {
+	f := y.liveFile(hash, index)
+	cues := y.servedCues(key, base, prev)
+	speech := f.speechIn(0, duration)
+	if len(speech) == 0 {
+		return true
+	}
+	at, _ := y.viewerAt(key)
+	r := residualOf(cues, speech, math.Max(at-diagResidualBack, 0), at+diagResidualAround)
+	if r.n < syncChanceCues {
+		r = residualOf(cues, speech, 0, math.Inf(1))
+	}
+	if r.n < syncFewCues {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.complete
+	}
+	if r.n < syncChanceCues {
+		return r.within < r.chance+syncFewAboveChance
+	}
+	return r.within < r.chance+syncNearChance
+}
+
+// A share on the speech under chance plus syncNearChance is not on it (residual lines: right ones
+// sit 25 points or more above chance, another release's at most about 10). Fewer than syncChanceCues
+// lines say less (a raw subtitle 9 s off reached 71 % of 17), so they need syncFewAboveChance.
+const (
+	syncNearChance     = 0.10
+	syncFewAboveChance = 0.25
+	syncChanceCues     = 20
+	syncFewCues        = 5
+)
+
+// A re-fit that moves a line by syncSpeechMove or more has to back that with the speech, on all the
+// lines it moves by syncSpeechNear or more.
+const (
+	syncSpeechMove = 0.25
+	syncSpeechNear = 0.1
+)
+
+// offSpeech reports whether a re-fit of an accepted provisional fit moves lines without bringing
+// them closer to the speech heard: of the lines it moves that were heard, a larger share has to
+// start on the speech than as served. Scores weigh own-track windows and a whole file's lines, and
+// Westworld S02E04's subtitle, right at +0.06 s, was moved to +0.44 s for 18 minutes with 8-30 % of
+// its lines on the speech. Too few such lines heard: nothing to tell.
+func (y *syncer) offSpeech(key, hash string, index int, base []byte, prev *syncMeta, m syncMeta, vtt []byte, duration float64, complete bool) bool {
+	if complete || prev == nil || !prev.Live || prev.Pre || !prev.fits() || !m.fits() {
+		return false
+	}
+	before := y.servedCues(key, base, prev)
+	after := vttCues(base)
+	if vtt != nil {
+		after = vttCues(vtt)
+	}
+	if len(before) != len(after) {
+		return false
+	}
+	var was, now []liveCue
+	most := 0.0
+	for i := range before {
+		if d := math.Abs(after[i].start - before[i].start); d >= syncSpeechNear {
+			was, now = append(was, before[i]), append(now, after[i])
+			most = math.Max(most, d)
+		}
+	}
+	if most < syncSpeechMove {
+		return false
+	}
+	speech := y.liveFile(hash, index).speechIn(0, duration)
+	rw, rn := residualOf(was, speech, 0, duration), residualOf(now, speech, 0, duration)
+	return min(rw.n, rn.n) >= diagMinCues && rn.within <= rw.within
 }
 
 const (
@@ -1239,6 +1359,8 @@ func (y *syncer) fitOne(ctx context.Context, inner, hash string, index int, r fi
 	if !ok || !(fit.good() || !final && heldFits(prev, fit)) || !lengthFits(spans, fit, ref.Probe.Duration) {
 		return m, nil, r
 	}
+	fit = dropZigzags(fit, cues, y.liveFile(hash, index).speechIn(0, ref.Probe.Duration))
+	m.Fit = fit
 	if p, ok := pinnedFit(prev, fit); ok {
 		fit, m.Fit = p, p
 	}
@@ -2044,7 +2166,7 @@ func (y *syncer) fullReference(ctx context.Context, hash string, index int) []sp
 			}
 			vtt, err = y.svc.File(ctx, s.ID)
 		} else if b, ok := y.svc.files.read(source, source+"|"+ref, ".vtt", 0); ok {
-			vtt = b
+			vtt = capBrokenCues(b)
 		}
 		if err != nil || vtt == nil {
 			continue

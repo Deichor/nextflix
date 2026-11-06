@@ -540,7 +540,7 @@ func (s *Service) fileAt(ctx context.Context, id string, t float64) ([]byte, boo
 	key := source + "|" + ref
 	if source == SourceEmbedded {
 		if b, ok := s.files.read(source, key, ".vtt", 0); ok {
-			return b, false, nil
+			return capBrokenCues(b), false, nil
 		}
 		hash, index, stream, err := embeddedRef(ref)
 		if err != nil {
@@ -625,7 +625,7 @@ func (s *Service) File(ctx context.Context, id string) ([]byte, error) {
 	}
 	key := source + "|" + ref
 	if b, ok := s.files.read(source, key, ".vtt", 0); ok {
-		return b, nil
+		return capBrokenCues(b), nil
 	}
 	if why, ok := s.missing(source, ref); ok {
 		return nil, noSubtitle(why)

@@ -585,6 +585,62 @@ func mergeUnsupported(path []int, curves [][]float64, lo int, minGain float64) {
 	}
 }
 
+// A run of one offset going back where it came from (within syncZigzagBack, by less than
+// syncZigzagMove): no cut does that, only the detector or a reference at odds with the speech
+// (Avatar: Seven Havens S01E02: +0.64 s, +0.24 s at 86 s, +0.64 s at 415 s, +0.24 s at 502 s, ...).
+const (
+	syncZigzagMove = 1.0
+	syncZigzagBack = 0.15
+)
+
+// dropZigzags gives such a run and the runs around it one offset where the speech heard (not own
+// track windows) has as many of their lines on it so: the line count alone cannot tell, a film's
+// real -0.69 s between -0.29 s and -0.16 s matches as few lines more as a zigzag.
+func dropZigzags(f syncFit, cues []liveCue, speech []refWindow) syncFit {
+	for i := 1; i+1 < len(f.Segments); i++ {
+		l, r, n := f.Segments[i-1], f.Segments[i], f.Segments[i+1]
+		if math.Abs(r.Offset-l.Offset) >= syncZigzagMove || math.Abs(n.Offset-l.Offset) > syncZigzagBack {
+			continue
+		}
+		end := math.Inf(1)
+		if i+2 < len(f.Segments) {
+			end = f.Segments[i+2].From
+		}
+		share := func(segs []syncSegment) (float64, int) {
+			var out []liveCue
+			for _, c := range cues {
+				if u := c.start * f.Scale; (i == 1 || u >= l.From) && u < end {
+					out = append(out, liveCue{start: u + offsetAt(segs, u), end: u + offsetAt(segs, u) + 1})
+				}
+			}
+			res := residualOf(out, speech, 0, math.MaxFloat64)
+			return res.within, res.n
+		}
+		now, heard := share(f.Segments)
+		if heard < diagMinCues {
+			continue
+		}
+		var best []syncSegment
+		bestShare := now
+		for _, off := range []float64{l.Offset, r.Offset} {
+			cand := append(append([]syncSegment(nil), f.Segments[:i-1]...), syncSegment{From: l.From, Offset: off})
+			for _, seg := range f.Segments[i+2:] {
+				if seg.Offset != off || len(cand) > i {
+					cand = append(cand, seg)
+				}
+			}
+			if s, _ := share(cand); s >= bestShare {
+				best, bestShare = cand, s
+			}
+		}
+		if best != nil {
+			f.Segments = best
+			i = 0
+		}
+	}
+	return f
+}
+
 // windowCurve scores every offset for one window: c[q] is offset (q-d)/syncRate seconds.
 func windowCurve(w prepared, starts []float64, d int) []float64 {
 	n := len(w.kernel)

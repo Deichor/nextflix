@@ -1666,7 +1666,7 @@ that change at splits), simplified:
   they put it on; a timing ready within 2.5 s is answered directly) and
   times it in the background (5 min at most, 2 files read at a time). The result is cached per (subtitle, file) on
   disk (`/app/data/subtitles/synced`); later requests and the players' next poll get the timed cues. Every result
-  carries the version of the timing that made it (`syncVersion`, 2 since own-track windows go onto the speech): an
+  carries the version of the timing that made it (`syncVersion`, 3 since cues shown too long are capped): an
   older one is served as it is (partial) while it
   is timed again from the stored windows, else final results would keep a fixed bug for good; for the ranking and
   the AI translation's source it counts as unknown (one it found poor is not ranked down, so it gets served and timed
@@ -1885,6 +1885,41 @@ that change at splits), simplified:
   was 3 s late after the title sequence, while subf2m's "S02.WEBRip.Amazon" pack is named for that release. It is
   still timed like every provider subtitle (only hash matches are served as they are), and needed it: +1.24 s, then
   +3.26 s after the title sequence.
+- Broken cue ends: a cue shown over 15 s is capped when a subtitle is converted and when a stored one is read
+  (`cappedEnd`, convert.go): it ends at the next cue, at most 7 s after its start. Avatar: Seven Havens S01E12's last
+  line read `00:22:06.125 --> 00:44:12.000`, past the end of the file, so `lengthFits` rejected every fit (+0.3 s,
+  score 0.50 over 0.13) as another cut and the episode was served raw; S01E13 had a 60 s line stacked over 14 others.
+  Of the 342 subtitles of the 2026-11-06 snapshot 10 hold such a cue, 6 of them 60 s or longer.
+- Offset steps down (`unstackSteps`, sync_refine.go): the players show every line that is on, and a step down
+  pulls the lines after it onto the ones before (18 % of the timed results on the server against 2 % of the subtitles
+  as they are had lines over a second on top of each other, all at steps; "I love you so much." and "Oh. You hear
+  that?" together for 2.4 s). The line starts stay: a line before the step ends when the next one starts (it shows
+  1 s at least) and lines the step put out of order take each other's start. Moving the step to a pause that holds
+  it, or lines over to the other offset, was measured and took lines off the speech (`TestSnapshotServed`, lines moved
+  1 s or more: 228, on the speech 68 to 48; 104, 34 to 18; 96, 43 to 16). Final fits of the 2026-11-06 snapshot (the best
+  fitting subtitle of each file and the best with steps, 96 pairs on series, 4 on films, none of those with steps):
+  lines stacked 42 in 30 pairs to 1, out of order 21 to 0, no line start moved 1 s, share on the speech unchanged.
+- Re-fits and the speech (`offSpeech`, sync.go): a re-fit of an accepted provisional fit that moves a line 0.25 s or
+  more is taken only when a larger share of the lines it moves 0.1 s or more starts on the speech heard (8 of them
+  heard at least, else nothing tells). Scores count own-track windows and the whole file; Westworld S02E04's subtitle,
+  right at +0.06 s, went to +0.44 s for 18 minutes with 8-30 % of its lines on the speech (chance 33 %), now 62-86 %.
+  An offset run that goes back where it came from (within 0.15 s, by under 1 s) is dropped when the speech heard has
+  as many of its lines on it without (`dropZigzags`, sync_align.go): no cut does that. Merging by matched lines
+  instead harmed real stretches (a film's -0.69 s, chance stretches 9 to 17). Replays of the 2026-11-06 snapshot
+  (`TestSnapshotServed`, a re-fit every minute, 3-minute stretches around the viewer, 98 pairs on series, 4 on films):
+  series good / soft / at chance 3011 / 155 / 142 to 3031 / 149 / 128, lines moved after being shown 0.25 s or more 8944
+  to 8605, flips 2626 to 1735; films 163 / 20 / 9 unchanged, those moves 374 to 388, flips 3837 to 4182 (one film's
+  subtitle of wandering small offsets); 5 pairs closer to the speech, none further.
+- Replacing in a viewing (`servedOffSpeech`, `decide`): while a viewer watches, another subtitle's lines come only
+  when nothing was heard yet or what is served sits near chance on the speech heard (under chance + 10 points, + 25
+  below 20 lines; below 5 lines only a final answer may replace it). Otherwise a fit that was accepted stays, also as the final one, and a subtitle not
+  accepted stays as it is. A replacement stays for the viewing while it fits, the subtitle's own fit does not swap
+  the lines back. Westworld S02E04's right subtitle gave way at 231 s and came back at 336 s. Replays with the other
+  listed subtitles as alternatives (`TestSnapshotServed`, `NFX_SERVED_ALTS`; 98 pairs on series, 4 on films, none of
+  the films with a change): changes of subtitle 6 to 2, back 3 to 0; series good / soft / at chance 3037 / 147 / 125
+  to 3051 / 136 / 121; no pair further from the speech. A swap can be right: in a replay of The Mentalist S04E05 with the other listed subtitles, the replacement has
+  79-93 % of its lines on the speech where the season pack's had 50-69 %, and it comes once (3 changes before, 2 of
+  them back; stretches good / soft / at chance 21 / 9 / 5 to 35 / 0 / 0).
 - The viewer's manual offset (`subDelay`) still applies on top.
 - Holes (`holes.go`, `holes_fill.go`, see [API.md](API.md#holes)): once timed, a served subtitle is compared on the
   file's timeline with a reference of the file in another language (its own text track or a hash match on disk, else
