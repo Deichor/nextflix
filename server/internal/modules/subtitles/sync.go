@@ -835,12 +835,31 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 	// offsets again (keepStable), and that showed The Mentalist S03E16's pre-timed fit, 3 s off in
 	// the teaser, from 3 s on
 	pre := provisional && len(live) == 0 && (!y.livePlaying(syncFileKey(hash, index)) || prev != nil && prev.Pre)
-	if !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced)) {
+	// A viewer keeps a replacement while one fits: the subtitle's fit does not swap the lines back
+	keepsAlt := prev != nil && prev.State == syncStateReplaced && m.fits() && y.watched(key)
+	wantsAlt := !m.fits() && !(provisional && m.Fit.linedUp() && (prev == nil || prev.State != syncStateReplaced))
+	if wantsAlt && (prev == nil || prev.State != syncStateReplaced) && y.watched(key) && !y.servedOffSpeech(key, hash, index, base, prev, ref.Probe.Duration) {
+		// What the viewer sees is on the speech: no other subtitle's lines for it
+		if prev != nil && prev.fits() {
+			kept := *prev
+			kept.Live, kept.LiveWindows, kept.LiveSeconds = provisional, len(live), liveSecs
+			y.storeWatched(key, inner, hash, index, base, prev, kept, nil)
+			logKept(inner, hash, index, m, len(live), liveSecs)
+			return true
+		}
+		wantsAlt = false
+	}
+	if wantsAlt || keepsAlt {
 		// Did not fit: the best fitting other subtitle of the language, when one fits. While
 		// provisional, a lined up subtitle stays served as it is (a few minutes cannot tell
 		// whether another release's offset holds for the whole file).
 		alts := y.alternatives(hash, index, inner)
-		if len(alts) > 0 && (prev == nil || !prev.fits()) && !y.altsDue(key, read) {
+		if prev != nil && prev.State == syncStateReplaced {
+			// The one served first: no change of lines while it still fits
+			alts = slices.DeleteFunc(alts, func(a string) bool { return a == prev.ReplacedBy })
+			alts = append([]string{prev.ReplacedBy}, alts...)
+		}
+		if len(alts) > 0 && (prev == nil || !prev.fits() || keepsAlt) && !y.altsDue(key, read) {
 			return true // what is served stays until the alternatives are fitted again
 		}
 		for _, alt := range alts {
@@ -970,6 +989,44 @@ func keepStable(prev *syncMeta, m syncMeta, base []byte, duration float64, compl
 	old, lines := rescore(baseSpans(base, duration), m.Fit.windows, prev.Fit)
 	return m.Fit.Score*lines-old < syncSplitPenalty
 }
+
+// servedOffSpeech reports whether what a viewer is served sits near chance on the speech heard around
+// it (the last diagResidualBack seconds and what is heard ahead, else all of it), the bar a
+// replacement with another subtitle's lines has to meet: Westworld S02E04's right subtitle gave way
+// to another at 231 s and came back at 336 s. Nothing heard yet: it may (no line seen). Too little
+// speech to tell: only the final answer may.
+func (y *syncer) servedOffSpeech(key, hash string, index int, base []byte, prev *syncMeta, duration float64) bool {
+	f := y.liveFile(hash, index)
+	cues := y.servedCues(key, base, prev)
+	speech := f.speechIn(0, duration)
+	if len(speech) == 0 {
+		return true
+	}
+	at, _ := y.viewerAt(key)
+	r := residualOf(cues, speech, math.Max(at-diagResidualBack, 0), at+diagResidualAround)
+	if r.n < syncChanceCues {
+		r = residualOf(cues, speech, 0, math.Inf(1))
+	}
+	if r.n < syncFewCues {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.complete
+	}
+	if r.n < syncChanceCues {
+		return r.within < r.chance+syncFewAboveChance
+	}
+	return r.within < r.chance+syncNearChance
+}
+
+// A share on the speech under chance plus syncNearChance is not on it (residual lines: right ones
+// sit 25 points or more above chance, another release's at most about 10). Fewer than syncChanceCues
+// lines say less (a raw subtitle 9 s off reached 71 % of 17), so they need syncFewAboveChance.
+const (
+	syncNearChance     = 0.10
+	syncFewAboveChance = 0.25
+	syncChanceCues     = 20
+	syncFewCues        = 5
+)
 
 // A re-fit that moves a line by syncSpeechMove or more has to back that with the speech, on all the
 // lines it moves by syncSpeechNear or more.

@@ -1890,6 +1890,16 @@ that change at splits), simplified:
   series good / soft / at chance 3011 / 155 / 142 to 3031 / 149 / 128, lines moved after being shown 0.25 s or more 8944
   to 8605, flips 2626 to 1735; films 163 / 20 / 9 unchanged, those moves 374 to 388, flips 3837 to 4182 (one film's
   subtitle of wandering small offsets); 5 pairs closer to the speech, none further.
+- Replacing in a viewing (`servedOffSpeech`, `decide`): while a viewer watches, another subtitle's lines come only
+  when nothing was heard yet or what is served sits near chance on the speech heard (under chance + 10 points, + 25
+  below 20 lines; below 5 lines only a final answer may replace it). Otherwise a fit that was accepted stays, also as the final one, and a subtitle not
+  accepted stays as it is. A replacement stays for the viewing while it fits, the subtitle's own fit does not swap
+  the lines back. Westworld S02E04's right subtitle gave way at 231 s and came back at 336 s. Replays with the other
+  listed subtitles as alternatives (`TestSnapshotServed`, `NFX_SERVED_ALTS`; 98 pairs on series, 4 on films, none of
+  the films with a change): changes of subtitle 6 to 2, back 3 to 0; series good / soft / at chance 3037 / 147 / 125
+  to 3051 / 136 / 121; no pair further from the speech. A swap can be right: in a replay of The Mentalist S04E05 with the other listed subtitles, the replacement has
+  79-93 % of its lines on the speech where the season pack's had 50-69 %, and it comes once (3 changes before, 2 of
+  them back; stretches good / soft / at chance 21 / 9 / 5 to 35 / 0 / 0).
 - The viewer's manual offset (`subDelay`) still applies on top.
 - Holes (`holes.go`, `holes_fill.go`, see [API.md](API.md#holes)): once timed, a served subtitle is compared on the
   file's timeline with a reference of the file in another language (its own text track or a hash match on disk, else

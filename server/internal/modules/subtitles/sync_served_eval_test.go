@@ -24,7 +24,8 @@ import (
 // NFX_SERVED_ONLY: file names starting so. NFX_SERVED_PAIRS: such a file: its pairs instead of
 // looking for the best fitting ones (minutes). NFX_SERVED_DUMP: a directory for the final answers;
 // NFX_SERVED_CMP: such a directory of an earlier run: the lines moved a second or more since then
-// are measured there and here.
+// are measured there and here. NFX_SERVED_ALTS: the other subtitles listed for a file are its
+// alternatives (replacements counted).
 const servedFilmSeconds = 4800
 
 type servedRow struct {
@@ -37,6 +38,7 @@ type servedRow struct {
 	shown25, shown50, flips   int
 	movedN, movedHits         int // lines moved since NFX_SERVED_CMP: with an onset near, within 0.3 s
 	movedWas                  int // the same before
+	swaps, backs              int // changes of the subtitle served, back to one served before
 }
 
 func servedStacks(cues []liveCue) int {
@@ -73,7 +75,7 @@ func servedInverted(raw, cues []liveCue) int {
 	return n
 }
 
-func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub, step int) servedRow {
+func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub, alts []*snapSub, step int) servedRow {
 	dur := f.ref.Probe.Duration
 	if err := os.MkdirAll(filepath.Join(tmp, "synclive"), 0o755); err != nil {
 		t.Fatal(err)
@@ -89,6 +91,15 @@ func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub
 		t.Fatal(err)
 	}
 	inner := encodeID(SourceTurkceAltyazi, "tr", ref)
+	list := []Sub{{ID: inner, Source: SourceTurkceAltyazi, Language: "tr"}}
+	for _, a := range alts {
+		altRef := "served|" + f.name[:8] + "|" + a.name
+		if err := svc.files.write(SourceTurkceAltyazi, SourceTurkceAltyazi+"|"+altRef, ".vtt", renderVTT(a.cues, false)); err != nil {
+			t.Fatal(err)
+		}
+		list = append(list, Sub{ID: encodeID(SourceTurkceAltyazi, "tr", altRef), Source: SourceTurkceAltyazi, Language: "tr"})
+	}
+	y.listed(list, nil, syncHash, 1)
 	key, _ := syncKey(inner, syncHash, 1)
 	base, err := svc.File(context.Background(), inner)
 	if err != nil {
@@ -112,6 +123,8 @@ func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub
 	row := servedRow{file: f.name[:8], sub: s.name, dur: dur, state: "none"}
 	var prev []liveCue
 	history := map[int][]float64{}
+	prevBy := inner
+	seenBy := map[string]bool{inner: true}
 	for g := 0; g <= last; g++ {
 		if g != last && (step == 0 || g%step != 0) {
 			continue
@@ -137,6 +150,16 @@ func replayAnswers(t *testing.T, tmp string, raw []byte, f *snapFile, s *snapSub
 		y.decide(context.Background(), inner, syncHash, 1, base, f.ref, false)
 		m := y.meta(key)
 		served := y.servedCues(key, base, m)
+		if by := servedBy(inner, m); by != prevBy {
+			row.swaps++
+			if seenBy[by] {
+				row.backs++
+			}
+			seenBy[by] = true
+			prevBy = by
+			prev = nil
+			history = map[int][]float64{}
+		}
 		if step > 0 {
 			if os.Getenv("NFX_SERVED_TRACE") != "" {
 				r := residualOf(served, speech, math.Max(viewer-diagResidualAround, 0), viewer+diagResidualAround)
@@ -237,9 +260,10 @@ func TestSnapshotServed(t *testing.T) {
 	log.SetOutput(io.Discard)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	type job struct {
-		f   *snapFile
-		s   *snapSub
-		raw []byte
+		f    *snapFile
+		s    *snapSub
+		alts []*snapSub
+		raw  []byte
 	}
 	var jobs []job
 	var listed map[string][]string
@@ -268,12 +292,24 @@ func TestSnapshotServed(t *testing.T) {
 			continue
 		}
 		if listed != nil {
+			var here []*snapSub
 			for _, name := range listed[f.name[:8]] {
 				for _, s := range subs {
 					if s.name == name {
-						jobs = append(jobs, job{f, s, raw})
+						here = append(here, s)
 					}
 				}
+			}
+			for _, s := range here {
+				j := job{f: f, s: s, raw: raw}
+				if os.Getenv("NFX_SERVED_ALTS") != "" {
+					for _, a := range here {
+						if a != s {
+							j.alts = append(j.alts, a)
+						}
+					}
+				}
+				jobs = append(jobs, j)
 			}
 			continue
 		}
@@ -312,7 +348,7 @@ func TestSnapshotServed(t *testing.T) {
 		n, stepped := 0, false
 		for _, c := range cands {
 			if n < perFile || c.steps && !stepped {
-				jobs = append(jobs, job{f, c.s, raw})
+				jobs = append(jobs, job{f: f, s: c.s, raw: raw})
 				n++
 				stepped = stepped || c.steps
 			}
@@ -337,7 +373,7 @@ func TestSnapshotServed(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			rows[i] = replayAnswers(t, t.TempDir(), j.raw, j.f, j.s, step)
+			rows[i] = replayAnswers(t, t.TempDir(), j.raw, j.f, j.s, j.alts, step)
 		}()
 	}
 	wg.Wait()
@@ -352,14 +388,14 @@ func TestSnapshotServed(t *testing.T) {
 	}
 	type sum struct {
 		pairs, stacked, stackedPairs, inverted, good, soft, atChance, shown25, shown50, flips int
-		movedN, movedWas, movedHits                                                           int
+		movedN, movedWas, movedHits, swaps, backs                                             int
 		within, chance                                                                        float64
 		states                                                                                map[string]int
 	}
 	groups := map[string]*sum{}
 	for _, r := range rows {
-		fmt.Fprintf(out, "%s\t%s\t%.0f\t%s\t%s\tcues=%d\tstacked=%d\tinverted=%d\twithin=%.2f\tchance=%.2f\tmedian=%+.2f\tn=%d\tgood=%d\tsoft=%d\tatchance=%d\tshown25=%d\tshown50=%d\tflips=%d\tmoved=%d\tmovedwas=%d\tmovedhits=%d\n",
-			r.file, r.sub, r.dur, r.state, r.offsets, r.cues, r.stacked, r.inverted, r.within, r.chance, r.median, r.n, r.good, r.soft, r.atChance, r.shown25, r.shown50, r.flips, r.movedN, r.movedWas, r.movedHits)
+		fmt.Fprintf(out, "%s\t%s\t%.0f\t%s\t%s\tcues=%d\tstacked=%d\tinverted=%d\twithin=%.2f\tchance=%.2f\tmedian=%+.2f\tn=%d\tgood=%d\tsoft=%d\tatchance=%d\tshown25=%d\tshown50=%d\tflips=%d\tmoved=%d\tmovedwas=%d\tmovedhits=%d\tswaps=%d\tbacks=%d\n",
+			r.file, r.sub, r.dur, r.state, r.offsets, r.cues, r.stacked, r.inverted, r.within, r.chance, r.median, r.n, r.good, r.soft, r.atChance, r.shown25, r.shown50, r.flips, r.movedN, r.movedWas, r.movedHits, r.swaps, r.backs)
 		g := "series"
 		if r.dur >= servedFilmSeconds {
 			g = "films"
@@ -385,6 +421,8 @@ func TestSnapshotServed(t *testing.T) {
 			s.movedN += r.movedN
 			s.movedWas += r.movedWas
 			s.movedHits += r.movedHits
+			s.swaps += r.swaps
+			s.backs += r.backs
 			s.within += r.within
 			s.chance += r.chance
 			s.states[r.state]++
@@ -392,18 +430,18 @@ func TestSnapshotServed(t *testing.T) {
 	}
 	for _, name := range []string{"series", "films", "all"} {
 		if s := groups[name]; s != nil {
-			t.Logf("SUMMARY %s: %d pairs %v; stacked %d (%d pairs), inverted %d; within %.3f chance %.3f; stretches good %d soft %d chance %d; shown moves >=0.25 %d >=0.5 %d, flips %d; lines moved %d on speech %d -> %d",
-				name, s.pairs, s.states, s.stacked, s.stackedPairs, s.inverted, s.within/float64(s.pairs), s.chance/float64(s.pairs), s.good, s.soft, s.atChance, s.shown25, s.shown50, s.flips, s.movedN, s.movedWas, s.movedHits)
+			t.Logf("SUMMARY %s: %d pairs %v; stacked %d (%d pairs), inverted %d; within %.3f chance %.3f; stretches good %d soft %d chance %d; shown moves >=0.25 %d >=0.5 %d, flips %d; lines moved %d on speech %d -> %d; swaps %d, back %d",
+				name, s.pairs, s.states, s.stacked, s.stackedPairs, s.inverted, s.within/float64(s.pairs), s.chance/float64(s.pairs), s.good, s.soft, s.atChance, s.shown25, s.shown50, s.flips, s.movedN, s.movedWas, s.movedHits, s.swaps, s.backs)
 		}
 	}
 }
 
 // TestSnapshotWriteServedFixture writes testdata/sync/<name>.json of one pair: NFX_FIXTURE_OUT, and
-// NFX_FIXTURE_PAIR "<name> <file8> <subtitle>" (a subtitle as loadSnapshot names it).
+// NFX_FIXTURE_PAIR "<name> <file8> <subtitle> [<alternative>]" (subtitles as loadSnapshot names them).
 func TestSnapshotWriteServedFixture(t *testing.T) {
 	out := os.Getenv("NFX_FIXTURE_OUT")
 	p := strings.Fields(os.Getenv("NFX_FIXTURE_PAIR"))
-	if out == "" || len(p) != 3 {
+	if out == "" || len(p) < 3 {
 		t.Skip("NFX_FIXTURE_OUT or NFX_FIXTURE_PAIR not set")
 	}
 	dir := snapshotDir(t)
@@ -443,6 +481,15 @@ func TestSnapshotWriteServedFixture(t *testing.T) {
 	}
 	for _, c := range s.spans {
 		fx.Sub = append(fx.Sub, [2]float64{math.Round(c.start*1000) / 1000, math.Round(c.end*1000) / 1000})
+	}
+	if len(p) > 3 {
+		a := findSub(subs, p[3])
+		if a == nil {
+			t.Fatal("alternative not in the snapshot")
+		}
+		for _, c := range a.spans {
+			fx.Alt = append(fx.Alt, [2]float64{math.Round(c.start*1000) / 1000, math.Round(c.end*1000) / 1000})
+		}
 	}
 	b, err := json.Marshal(fx)
 	if err != nil {

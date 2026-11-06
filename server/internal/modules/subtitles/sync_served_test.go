@@ -18,6 +18,7 @@ type fixtureViewing struct {
 	svc     *Service
 	ref     syncRef
 	inner   string
+	alt     string
 	key     string
 	base    []byte
 	done    map[int]liveWin
@@ -45,6 +46,7 @@ func loadFixtureViewing(t *testing.T, name string) *fixtureViewing {
 	}
 	for _, w := range fx.Speech {
 		ref.Speech = append(ref.Speech, w.window())
+		ref.Paired = true
 	}
 	svc := replayService(t.TempDir(), ref)
 	var sub []span
@@ -54,6 +56,15 @@ func loadFixtureViewing(t *testing.T, name string) *fixtureViewing {
 	v := &fixtureViewing{svc: svc, ref: ref, done: map[int]liveWin{}, ownDone: map[int]liveWin{}}
 	v.inner = cacheProviderSub(t, svc, "1|fixture|1|1|1", sub)
 	v.key, _ = syncKey(v.inner, syncHash, 1)
+	if len(fx.Alt) > 0 {
+		var alt []span
+		for _, c := range fx.Alt {
+			alt = append(alt, span{c[0], c[1]})
+		}
+		v.alt = cacheProviderSub(t, svc, "2|alt|1|1|1", alt)
+		svc.sync.listed([]Sub{{ID: v.inner, Source: SourceTurkceAltyazi, Language: "tr"}, {ID: v.alt, Source: SourceTurkceAltyazi, Language: "tr"}},
+			nil, syncHash, 1)
+	}
 	if v.base, err = svc.File(context.Background(), v.inner); err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +214,93 @@ func TestRefitStaysOnTheSpeech(t *testing.T) {
 		if off := offsetAt(m.Fit.Segments, viewer); off > 0.3 {
 			t.Fatalf("at %.0f s served %s", viewer, offsetsText(m.Fit))
 		}
+	}
+}
+
+// servedChanges plays the fixture's windows one by one and counts the changes of the subtitle
+// served, and those back to one served before.
+func (v *fixtureViewing) servedChanges() (swaps, backs int, last *syncMeta) {
+	by := v.inner
+	seen := map[string]bool{by: true}
+	for g := 0; g <= v.last; g++ {
+		last = v.playWindows(g)
+		if now := servedBy(v.inner, last); now != by {
+			swaps++
+			if seen[now] {
+				backs++
+			}
+			seen[now], by = true, now
+		}
+	}
+	return swaps, backs, last
+}
+
+// Westworld S02E04 (the fixture above, with the Turkish subtitle listed beside it): the subtitle was
+// not accepted in the first minutes though it sits on the speech as it is, and its lines gave way
+// to the other's at 231 s and came back at 336 s. They stay.
+func TestRightSubtitleIsNotReplacedInAViewing(t *testing.T) {
+	v := loadFixtureViewing(t, "westworld_s02e04.json")
+	if v.alt == "" {
+		t.Fatal("no alternative in the fixture")
+	}
+	if swaps, _, last := v.servedChanges(); swaps != 0 || !last.fits() {
+		t.Errorf("%d changes, final %s", swaps, logState(last))
+	}
+}
+
+// A viewer keeps a replacement while it fits, although the subtitle's own fit fits by now (real
+// speech and lines of Avatar: Seven Havens S01E12, the replacement the same lines); when it stops
+// fitting, the subtitle comes back.
+func TestReplacementStaysInAViewing(t *testing.T) {
+	v := loadFixtureViewing(t, "avatar_s01e12.json")
+	y := v.svc.sync
+	var sub []span
+	for _, c := range vttCues(v.base) {
+		sub = append(sub, span{c.start, c.end})
+	}
+	replaced := func(alt string) {
+		altBase, err := v.svc.File(context.Background(), alt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y.store(v.key, syncMeta{State: syncStateReplaced, ReplacedBy: alt, Live: true}, altBase)
+		y.listed([]Sub{{ID: v.inner, Source: SourceTurkceAltyazi, Language: "tr"}, {ID: alt, Source: SourceTurkceAltyazi, Language: "tr"}},
+			nil, syncHash, 1)
+	}
+	alt := cacheProviderSub(t, v.svc, "3|same|1|1|1", sub)
+	replaced(alt)
+	if m := v.playWindows(v.last); m.State != syncStateReplaced || m.ReplacedBy != alt {
+		t.Errorf("a fitting replacement gave way: %s", logState(m))
+	}
+	// Lines of no fit at all: another length, no pattern of the speech
+	var none []span
+	for i := range 40 {
+		none = append(none, span{float64(i) * 3, float64(i)*3 + 1})
+	}
+	gone := cacheProviderSub(t, v.svc, "4|none|1|1|1", none)
+	replaced(gone)
+	if m := v.playWindows(v.last); !m.fits() {
+		t.Errorf("a replacement that does not fit stayed: %s", logState(m))
+	}
+}
+
+// Another subtitle's lines come only when what is served is near chance on the speech heard.
+func TestServedOffSpeech(t *testing.T) {
+	v := loadFixtureViewing(t, "avatar_s01e12.json")
+	y := v.svc.sync
+	if !y.servedOffSpeech(v.key, syncHash, 1, v.base, nil, v.ref.Probe.Duration) {
+		t.Error("nothing heard yet: it may be replaced")
+	}
+	v.playWindows(v.last)
+	if y.servedOffSpeech(v.key, syncHash, 1, v.base, y.meta(v.key), v.ref.Probe.Duration) {
+		t.Error("the timed lines are on the speech")
+	}
+	var off []liveCue
+	for _, c := range vttCues(v.base) {
+		off = append(off, liveCue{start: c.start + 3, end: c.end + 3, text: c.text})
+	}
+	if !y.servedOffSpeech(v.key, syncHash, 1, renderVTT(off, false), nil, v.ref.Probe.Duration) {
+		t.Error("lines 3 s off are not on the speech")
 	}
 }
 
