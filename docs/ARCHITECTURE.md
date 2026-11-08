@@ -1389,7 +1389,9 @@ that change at splits), simplified:
   language, English first; `-copyts`, since after `-ss` subtitle times count from the keyframe before it): a text
   track, else a PGS picture track that is not forced and holds 2 lines a minute by its Matroska `NUMBER_OF_FRAMES`
   (any case; older mkvmerge versions write `NUMBER_OF_FRAMES-eng`) (SDH only when it is the only kind), whose packets
-  are copied into `framecrc` (times and sizes, read like the cue tap below), together with the speech of the same
+  are copied as `sup` (display sets with their segments: a set with an object segment is a new picture, one whose
+  composition shows no object a clear, any other a palette or position change; otherwise read like the cue tap below,
+  which sees sizes only), together with the speech of the same
   stretch (a second read right after, from the proxy's or TorrServer's cache; kept as `speech` in the reference, and
   counted against the byte budget below: past it the own track is read alone) for the own-track check below; else
   speech from the dialogue channel (`pan=mono|c0=FC` for 5.1, else a downmix) at 8 kHz by a simple energy detector
@@ -1438,7 +1440,16 @@ that change at splits), simplified:
   what its offset changes cost: a near rate (24 ↔ 23.976 fps, 2.6 s over an episode) turns the steps of ad breaks into
   drift and matches a few more lines with more, smaller changes (S03E02's Turkish subtitle, made for the file's rate,
   was served at 24/23.976 from 6 read and 4 played windows, where the file's rate had peaked at a chance offset: a
-  sawtooth of −0.2 to +0.5 s and two stretches 2 s late). Up to 2 rounds
+  sawtooth of −0.2 to +0.5 s and two stretches 2 s late). The 0.05 is waived when the file's rate follows a drift
+  towards the other one (two or more steps under 0.75 s that way, none back) and the other rate's fit has no such step
+  back: a subtitle really at 24/23.976 fitted at the file's rate steps +0.4 s every few hundred seconds between the ad
+  breaks (lines up to 0.35 s off) and the right rate won by only 0.025-0.04 (S03E02's subtitles divided by the rate,
+  `TestMentalistS03E02AtAnotherRate`). An offset change in the first 6 minutes, over windows that lie there, at a
+  subtitle pause of 10 s or more (a cold open before its title sequence) costs 2 matched lines instead of 4: S03E02's
+  English subf2m subtitle has 8 teaser lines at +1.39 s against +3.30 s after the titles; they gained 4.2 matched
+  lines, under the 4.95 the change cost, and the teaser was served 1.9 s late (`TestMentalistS03E02EnglishColdOpen`).
+  Its windows still have to beat the next offset by 4 on their own. Windows far apart (read ones, minutes between
+  them) do not count as the opening: the change could lie anywhere between them. Up to 2 rounds
   add windows between neighbours with different offsets more than 150 s apart (12 windows at most; a start the
   reference already has a window at is not read again, and a stretch counts once: two timings of S03E09 read the
   window at 312.5 s twice and every fit counted its lines twice). Those reads take about 10 s a window, under the
@@ -1473,8 +1484,9 @@ that change at splits), simplified:
   or less: PCS + WDS + END) or brings a new picture (1500 bytes or more); smaller ones while a line shows only
   change its palette or position (fades, up to ~1350 bytes). A line the next set ends within 0.25 s is none (fade
   steps, a small one read as a clear and the next as a picture; real lines show 0.9 s and more on S03E01 / S03E02).
-  A short line drawn with a small palette that replaces a shown one directly still reads as a change of it: sizes
-  cannot tell it from a palette update, and a timing rule would read palette animations as lines. Progress waits at
+  A short line drawn with a small palette that replaces a shown one directly still reads as a change of it here:
+  sizes cannot tell it from a palette update, and a timing rule would read palette animations as lines (framecrc
+  carries no packet data; the window reads above take the segments and tell them apart). Progress waits at
   the start of a line still showing (15 s at most). Measured on The Mentalist S03E02 (d3g WEBRip, English PGS made
   by DVDFab: 970 lines) and Night of the Living Dead 1968 (YTS 2160p, Blu-ray English SDH): every line one picture
   set (1724-65013 bytes) and one clear (30 bytes), nothing between; the tap from 1200, 1202.5 and 1205 s and window

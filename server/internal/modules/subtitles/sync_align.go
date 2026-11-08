@@ -35,6 +35,21 @@ const (
 	syncZoneLines    = 2.0  // matched lines a window next to an offset change has to prefer its side by to place it
 )
 
+// An offset change in the first syncOpenEnd seconds at a subtitle pause of syncOpenPause or more
+// (a cold open before its title sequence) costs syncOpenPenalty instead of syncSplitPenalty: a
+// short teaser has few lines to pay for its own offset (The Mentalist S03E02, English subf2m: 8
+// lines at +1.39 s gained 4.2 matched lines against +3.30 s after the titles, the change cost
+// 4.95). Its windows still have to beat the next offset by syncSplitPenalty (mergeUnsupported).
+const (
+	syncOpenEnd     = 360.0
+	syncOpenPause   = 10.0
+	syncOpenPenalty = 2.0
+)
+
+// syncDriftStep: offset changes below this are the steps a fit takes to follow a drift (a
+// subtitle at another frame rate fitted at this one moves 1 s per 1000 s, in 0.4 s steps).
+const syncDriftStep = 0.75
+
 // syncScales are subtitle time multipliers: same rate, then 25 <-> 23.976 / 24 conversions.
 var syncScales = []float64{1, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24, 25.0 / 24, 24.0 / 25}
 
@@ -126,6 +141,7 @@ type syncFit struct {
 	windows       []refWindow
 	minPeak       float64 // a higher peak bar for a small reference (alignLive)
 	note          string  // a fit of another shape that was not taken, and why (logs)
+	changeCost    float64 // matched lines its offset changes cost (netScore)
 }
 
 // Thresholds of a fitting subtitle, from The Mentalist S02E07 against its Netflix track: three
@@ -301,16 +317,22 @@ func alignWith(cues []span, ws []prepared, scales []float64, penalty float64, ma
 	sort.Slice(ws, func(i, j int) bool { return ws[i].Start < ws[j].Start })
 	sorted := append([]span(nil), cues...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].start < sorted[j].start })
-	var best syncFit
-	found := false
+	var best, same syncFit
+	found, haveSame := false, false
 	lines := refLines(ws)
 	for _, k := range scales {
 		f := alignScale(sorted, ws, k, penalty, maxChanges)
+		if k == 1 {
+			same, haveSame = f, true
+		}
 		// Another rate has to fit clearly better than the same one, net of its offset changes: a
 		// near rate turns the steps of ad breaks into drift and matches a few more lines with more,
-		// smaller changes (The Mentalist S03E02: 24/23.976 instead of the file's rate)
+		// smaller changes (The Mentalist S03E02: 24/23.976 instead of the file's rate). Unless
+		// the same rate follows a drift towards it while it does not drift back: a subtitle at
+		// 24/23.976 fitted at the file's rate steps +0.4 s every few hundred seconds between the
+		// ad breaks (a sawtooth of lines up to 0.35 s off), and won by 0.025-0.04 only.
 		bonus := 0.0
-		if k != 1 {
+		if k != 1 && !(haveSame && driftsTo(same, k) && !driftsBack(f)) {
 			bonus = 0.05
 		}
 		if !found || netScore(f, lines)-bonus > netScore(best, lines) {
@@ -322,11 +344,57 @@ func alignWith(cues []span, ws []prepared, scales []float64, penalty float64, ma
 
 // netScore is a fit's score less what its offset changes cost (matched lines per reference line).
 func netScore(f syncFit, lines float64) float64 {
-	n := f.Score
+	return f.Score - f.changeCost/lines
+}
+
+// driftSteps counts the fit's small offset changes (below syncDriftStep) that move the way a
+// subtitle at rate k drifts at the fit's rate, and those that move the other way.
+func driftSteps(f syncFit, k float64) (with, against int) {
 	for i := 1; i < len(f.Segments); i++ {
-		n -= (syncSplitPenalty + syncChangeCost*math.Abs(f.Segments[i].Offset-f.Segments[i-1].Offset)) / lines
+		d := f.Segments[i].Offset - f.Segments[i-1].Offset
+		if math.Abs(d) >= syncDriftStep || k == f.Scale {
+			continue
+		}
+		if (d > 0) == (k > f.Scale) {
+			with++
+		} else {
+			against++
+		}
 	}
-	return n
+	return with, against
+}
+
+// driftsTo reports a fit that follows a drift towards rate k: two small steps that way, none back.
+func driftsTo(f syncFit, k float64) bool {
+	with, against := driftSteps(f, k)
+	return with >= 2 && against == 0
+}
+
+// driftsBack reports a fit at another rate that steps back towards the file's rate.
+func driftsBack(f syncFit) bool {
+	with, _ := driftSteps(f, 1)
+	return with > 0
+}
+
+// openChange reports whether an offset change somewhere in [lo, hi] (subtitle time after scale k)
+// is an opening one: the stretch lies before syncOpenEnd (windows far apart could put it anywhere)
+// and has a subtitle pause of syncOpenPause or more (cues sorted).
+func openChange(cues []span, k, lo, hi float64) bool {
+	if hi > syncOpenEnd {
+		return false
+	}
+	end := math.Inf(-1)
+	for i, c := range cues {
+		s := c.start * k
+		if i > 0 && s-end >= syncOpenPause && end <= hi && s >= lo {
+			return true
+		}
+		if s > hi {
+			return false
+		}
+		end = math.Max(end, c.end*k)
+	}
+	return false
 }
 
 func alignScale(cues []span, ws []prepared, k float64, penalty float64, maxChanges int) syncFit {
@@ -409,6 +477,14 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 	lo, hi := max(qg-syncNearOffset*syncRate, 0), min(qg+syncNearOffset*syncRate, 2*d)
 	states := hi - lo + 1
 	lam := syncChangeCost / syncRate
+	// what a change into window m costs: less at an opening pause (by the global offset)
+	pens := make([]float64, len(ws))
+	for m := range ws {
+		pens[m] = penalty
+		if m > 0 && !math.IsInf(penalty, 1) && openChange(cues, k, ws[m-1].Start-offset(qg), ws[m].end()-offset(qg)) {
+			pens[m] = math.Min(penalty, syncOpenPenalty)
+		}
+	}
 	// With maxChanges >= 0, layer l holds paths with l changes so far; otherwise one layer
 	// changes into itself
 	layers := 1
@@ -461,12 +537,12 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 				}
 				if change {
 					if j := s - syncMinChange; j >= 0 {
-						if x := preV[j] - lam*float64(s) - penalty; x > stay {
+						if x := preV[j] - lam*float64(s) - pens[m]; x > stay {
 							stay, back[m][l][s] = x, base+preI[j]
 						}
 					}
 					if j := s + syncMinChange; j < states {
-						if x := sufV[j] + lam*float64(s) - penalty; x > stay {
+						if x := sufV[j] + lam*float64(s) - pens[m]; x > stay {
 							stay, back[m][l][s] = x, base+sufI[j]
 						}
 					}
@@ -490,6 +566,7 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 	mergeUnsupported(path, curves, lo, penalty)
 
 	fit.Segments = []syncSegment{{Offset: offset(lo + path[0])}}
+	segPens := []float64{0} // what the change into each segment cost
 	fit.windowOffsets = make([]float64, len(ws))
 	for m := range ws {
 		fit.windowOffsets[m] = offset(lo + path[m])
@@ -514,6 +591,10 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 			continue
 		}
 		fit.Segments = append(fit.Segments, syncSegment{From: from, Offset: cur})
+		segPens = append(segPens, math.Min(pens[m], syncSplitPenalty))
+	}
+	for i := 1; i < len(fit.Segments); i++ {
+		fit.changeCost += segPens[i] + syncChangeCost*math.Abs(fit.Segments[i].Offset-fit.Segments[i-1].Offset)
 	}
 	raw := piecewiseScore(ws, cues, k, fit.Segments)
 	fit.Score = raw / sumLines

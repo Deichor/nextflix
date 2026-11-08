@@ -151,14 +151,14 @@ func TestPictureWindow(t *testing.T) {
 	}
 	// Fades: palette updates change the line showing; a picture replaces it; a display set kept
 	// as a packet per segment counts as one
-	ps := []framePacket{{10, 9000}, {10.04, 120}, {10.08, 1300}, {12, 12000}, {13, 30}, {13.5, 39}, {14, 800}, {15, 30},
-		{16, 22}, {16, 13}, {16, 85}, {16, 4000}, {16, 3}, {17, 14}, {17, 13}, {17, 3}}
+	ps := []framePacket{{at: 10, size: 9000}, {at: 10.04, size: 120}, {at: 10.08, size: 1300}, {at: 12, size: 12000}, {at: 13, size: 30}, {at: 13.5, size: 39}, {at: 14, size: 800}, {at: 15, size: 30},
+		{at: 16, size: 22}, {at: 16, size: 13}, {at: 16, size: 85}, {at: 16, size: 4000}, {at: 16, size: 3}, {at: 17, size: 14}, {at: 17, size: 13}, {at: 17, size: 3}}
 	if got := pictureCues(ps, 60); fmt.Sprint(got) != fmt.Sprint([]span{{10, 12}, {12, 13}, {14, 15}, {16, 17}}) {
 		t.Fatalf("updates: %v", got)
 	}
 	// A fade-out whose small step reads as a clear and the next one as a picture: no line of
 	// 0.1 s (the line ends at the step)
-	ps = []framePacket{{20, 9000}, {21.9, 300}, {21.94, 50}, {21.98, 120}, {22.08, 30}, {23, 5000}, {25, 30}}
+	ps = []framePacket{{at: 20, size: 9000}, {at: 21.9, size: 300}, {at: 21.94, size: 50}, {at: 21.98, size: 120}, {at: 22.08, size: 30}, {at: 23, size: 5000}, {at: 25, size: 30}}
 	if got := pictureCues(ps, 60); fmt.Sprint(got) != fmt.Sprint([]span{{20, 21.94}, {23, 25}}) {
 		t.Fatalf("fade: %v", got)
 	}

@@ -105,3 +105,53 @@ func TestMentalistS03E02ChangeAtTheBreak(t *testing.T) {
 		t.Fatalf("%s", describeFit(fit))
 	}
 }
+
+// The same subtitle as if it ran at 24/23.976 (and 23.976/24) on the file: its cue times divided by
+// the rate. At the file's rate the fit followed the drift with +0.4 s steps between the ad breaks
+// (a sawtooth, lines up to 0.35 s off) and won over the right rate by its 0.05 bonus: the right rate
+// netted 0.356 against 0.331 (0.340 at 23.976/24). The rate's fit has the steps of the breaks only.
+func TestMentalistS03E02AtAnotherRate(t *testing.T) {
+	f, sub := loadFixture(t, "mentalist_s03e02.json")
+	for _, k := range []float64{24 / 23.976, 23.976 / 24} {
+		scaled := make([]span, len(sub))
+		for i, c := range sub {
+			scaled[i] = span{c.start / k, c.end / k}
+		}
+		steps := replayLive(t, f, scaled, true, nil)
+		last := steps[len(steps)-1].served
+		if math.Abs(last.Scale-k) > 1e-9 {
+			t.Fatalf("rate %.4f: %s", k, describeFit(last))
+		}
+		for _, p := range mentalistS03E02Truth {
+			for u := p.from; u <= p.to; u += 10 {
+				if e := last.mapTime(u/k) - (u + p.offset); math.Abs(e) > 0.15 {
+					t.Fatalf("rate %.4f: at %.0f s %+.2f s off: %s", k, u, e, describeFit(last))
+				}
+			}
+		}
+	}
+}
+
+func TestDriftSteps(t *testing.T) {
+	seg := func(offs ...float64) syncFit {
+		f := syncFit{Scale: 1}
+		for i, o := range offs {
+			f.Segments = append(f.Segments, syncSegment{From: float64(i) * 300, Offset: o})
+		}
+		return f
+	}
+	k := 24 / 23.976
+	// following a drift towards k: small steps up between the breaks
+	if f := seg(1.17, 3.21, 3.61, 4.01, 6.25, 8.57, 8.97); !driftsTo(f, k) || driftsTo(f, 1/k) {
+		t.Fatal("small steps up are a drift towards a faster rate only")
+	}
+	// the breaks alone, or a step back among the small ones
+	if driftsTo(seg(1.10, 3.11, 5.19, 7.18, 9.12), k) || driftsTo(seg(3.0, 3.4, 3.8, 3.4), k) {
+		t.Fatal("no drift")
+	}
+	g := seg(1.04, 2.83, 2.43, 4.11)
+	g.Scale = k
+	if !driftsBack(g) {
+		t.Fatal("a fit at 24/23.976 stepping down follows the file's rate")
+	}
+}
