@@ -1448,7 +1448,9 @@ that change at splits), simplified:
   subtitle pause of 10 s or more (a cold open before its title sequence) costs 2 matched lines instead of 4: S03E02's
   English subf2m subtitle has 8 teaser lines at +1.39 s against +3.30 s after the titles; they gained 4.2 matched
   lines, under the 4.95 the change cost, and the teaser was served 1.9 s late (`TestMentalistS03E02EnglishColdOpen`).
-  Its windows still have to beat the next offset by 4 on their own. Windows far apart (read ones, minutes between
+  Its windows still have to beat the next offset by 4 on their own, and two of them by a matched line each (else
+  the change has to pay its full cost): on the snapshot's speech re-fits one window alone gave teasers of 52 and
+  152 s an offset 1.3-2.4 s off the whole file's fit (`TestSnapshotHeldSweep`). Windows far apart (read ones, minutes between
   them) do not count as the opening: the change could lie anywhere between them. Up to 2 rounds
   add windows between neighbours with different offsets more than 150 s apart (12 windows at most; a start the
   reference already has a window at is not read again, and a stretch counts once: two timings of S03E09 read the

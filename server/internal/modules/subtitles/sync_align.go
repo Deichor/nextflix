@@ -39,11 +39,15 @@ const (
 // (a cold open before its title sequence) costs syncOpenPenalty instead of syncSplitPenalty: a
 // short teaser has few lines to pay for its own offset (The Mentalist S03E02, English subf2m: 8
 // lines at +1.39 s gained 4.2 matched lines against +3.30 s after the titles, the change cost
-// 4.95). Its windows still have to beat the next offset by syncSplitPenalty (mergeUnsupported).
+// 4.95). Its windows still have to beat the next offset by syncSplitPenalty (mergeUnsupported),
+// and syncOpenWindows of them by syncOpenLead each (dropThinOpenings): on the snapshot's speech
+// re-fits one window alone gave teasers of 52 and 152 s an offset the whole file's fit did not.
 const (
 	syncOpenEnd     = 360.0
 	syncOpenPause   = 10.0
 	syncOpenPenalty = 2.0
+	syncOpenWindows = 2
+	syncOpenLead    = 1.0
 )
 
 // syncDriftStep: offset changes below this are the steps a fit takes to follow a drift (a
@@ -564,6 +568,7 @@ func alignLag(cues []span, orig []prepared, k float64, unshifted [][]float64, d,
 		cur = int(back[m][cur/states][cur%states])
 	}
 	mergeUnsupported(path, curves, lo, penalty)
+	dropThinOpenings(path, curves, lo, pens, penalty, lam)
 
 	fit.Segments = []syncSegment{{Offset: offset(lo + path[0])}}
 	segPens := []float64{0} // what the change into each segment cost
@@ -662,6 +667,35 @@ func mergeUnsupported(path []int, curves [][]float64, lo int, minGain float64) {
 		}
 		for m := runs[weak].a; m < runs[weak].b; m++ {
 			path[m] = to
+		}
+	}
+}
+
+// dropThinOpenings gives the run before an opening change (one that cost less than penalty) the
+// offset after it when fewer than syncOpenWindows of its windows prefer its own by syncOpenLead
+// matched lines, unless it gains a full change's cost (penalty plus lam per frame moved).
+func dropThinOpenings(path []int, curves [][]float64, lo int, pens []float64, penalty, lam float64) {
+	for m := 1; m < len(path); m++ {
+		s1, s2 := path[m-1], path[m]
+		if s1 == s2 || pens[m] >= penalty {
+			continue
+		}
+		a := m - 1
+		for a > 0 && path[a-1] == s1 {
+			a--
+		}
+		support, gain := 0, 0.0
+		for w := a; w < m; w++ {
+			d := curves[w][lo+s1] - curves[w][lo+s2]
+			gain += d
+			if d >= syncOpenLead {
+				support++
+			}
+		}
+		if support < syncOpenWindows && gain < penalty+lam*math.Abs(float64(s1-s2)) {
+			for w := a; w < m; w++ {
+				path[w] = s2
+			}
 		}
 	}
 }
