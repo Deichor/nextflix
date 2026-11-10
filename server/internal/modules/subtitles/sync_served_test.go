@@ -87,6 +87,13 @@ func loadFixtureViewing(t *testing.T, name string) *fixtureViewing {
 	}
 	lf := svc.sync.liveFile(syncHash, 1)
 	lf.setDuration(fx.Duration)
+	if fx.Check != nil {
+		if c, n, ok := fx.Check.check(); ok {
+			lf.mu.Lock()
+			lf.check, lf.checkN = c, n
+			lf.mu.Unlock()
+		}
+	}
 	saved := log.Writer()
 	log.SetOutput(&bytes.Buffer{})
 	t.Cleanup(func() { log.SetOutput(saved) })
@@ -301,6 +308,26 @@ func TestServedOffSpeech(t *testing.T) {
 	}
 	if !y.servedOffSpeech(v.key, syncHash, 1, renderVTT(off, false), nil, v.ref.Probe.Duration) {
 		t.Error("lines 3 s off are not on the speech")
+	}
+}
+
+// The Mentalist S04E16 (real data, testdata/sync/mentalist_s04e16.json, the Turkish OpenSubtitles
+// subtitle, made for a cut with other ad breaks): the first fit puts its last step, 2.8 s, at
+// 1878 s, and the speech has it at 1961 s. Re-fits found it from 31 minutes on and were held, their
+// line refinement weighed more than the step, and the lines up to 1961 s came 2.8 s early until the
+// final fit at 37 minutes. Now the step is in place before the viewer gets there.
+func TestRefitMovesAStepBeforeTheViewer(t *testing.T) {
+	v := loadFixtureViewing(t, "mentalist_s04e16.json")
+	for g := 0; g <= v.last; g++ {
+		m := v.playWindows(g)
+		viewer := float64(g+1)*syncWindowLen - fbViewerLag
+		if viewer < 1840 || viewer > 1960 || m == nil || !m.fits() {
+			continue
+		}
+		// subtitle times of the lines before the step, as the viewer gets there
+		if off := offsetAt(m.Fit.Segments, 1940); off < -12 {
+			t.Fatalf("at %.0f s served %s", viewer, offsetsText(m.Fit))
+		}
 	}
 }
 

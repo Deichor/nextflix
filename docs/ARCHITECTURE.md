@@ -1910,6 +1910,19 @@ that change at splits), simplified:
   series good / soft / at chance 3011 / 155 / 142 to 3031 / 149 / 128, lines moved after being shown 0.25 s or more 8944
   to 8605, flips 2626 to 1735; films 163 / 20 / 9 unchanged, those moves 374 to 388, flips 3837 to 4182 (one film's
   subtitle of wandering small offsets); 5 pairs closer to the speech, none further.
+  When the re-fit's offsets move a line 0.25 s or more, those moves are judged alone, both fits without the line
+  refinement; otherwise (or fewer than 8 of those lines heard) the served lines and the re-fit's, refinement and
+  all. Judged only with the refinement, its moves of single lines (a re-fit refines more lines as own-track windows
+  come in, not always onto the speech) outweighed a step moved to its place: The Mentalist S04E16's Turkish
+  subtitle, made for a cut with other ad breaks, had its last 2.8 s step pre-timed at 1878 s (the speech has it at
+  1961 s, between two read windows 180 s apart); re-fits found it from 31 minutes on and were held, and its lines came
+  2.8 s early until the final fit at 37 minutes. Now the step is in place at 30.5 minutes, before the viewer gets
+  there (3-minute stretches there 47-48 % of the lines on the speech to 65-72 %). A re-fit of the same offsets
+  refined anew is still held when it puts fewer lines on the speech. Replays of the 2026-11-10 snapshot (92 pairs on
+  series, 5 on films): series good / soft / at chance 2884 / 134 / 114 to 2892 / 131 / 109, lines moved after being
+  shown 0.5 s or more 5128 to 4912, flips 1595 to 1607; films unchanged. A held re-fit that would change what is
+  served is logged once per offsets (`held a re-fit (<why>): served <offsets>, re-fit <offsets>`, `logHeld`), and the
+  viewer's playback log shows it with the file's timing lines.
 - Replacing in a viewing (`servedOffSpeech`, `decide`): while a viewer watches, another subtitle's lines come only
   when nothing was heard yet or what is served sits near chance on the speech heard (under chance + 10 points, + 25
   below 20 lines; below 5 lines only a final answer may replace it). Otherwise a fit that was accepted stays, also as the final one, and a subtitle not
