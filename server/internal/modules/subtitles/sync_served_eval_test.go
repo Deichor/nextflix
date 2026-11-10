@@ -458,7 +458,7 @@ func TestSnapshotWriteServedFixture(t *testing.T) {
 	if err := json.Unmarshal(raw, &live); err != nil {
 		t.Fatal(err)
 	}
-	fx := syncFixture{Duration: f.ref.Probe.Duration, Codec: f.ref.Probe.SubCodec}
+	fx := syncFixture{Duration: f.ref.Probe.Duration, Codec: f.ref.Probe.SubCodec, Check: live.Check}
 	for _, w := range f.ref.Windows {
 		fx.Subs = append(fx.Subs, fixtureWindowOf(w))
 	}

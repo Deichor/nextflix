@@ -326,7 +326,9 @@ type syncer struct {
 	onGrow  func(f *liveFile)     // more live audio: re-fit soon (tests replace it)
 	// result key -> *sync.Mutex: one decide per result at a time (first timing and live re-fits)
 	deciding sync.Map
-	diags    map[string]*viewDiag // result key -> its viewing's diagnostics (sync_diag.go)
+	// result key -> offsets of the last re-fit logged as held (logHeld)
+	heldLogged sync.Map
+	diags      map[string]*viewDiag // result key -> its viewing's diagnostics (sync_diag.go)
 
 	refitDelay, refitGap, pendingGap time.Duration
 	lineWait                         time.Duration // the LineGate wait of one job (syncLineWait; tests shorten it)
@@ -834,13 +836,15 @@ func (y *syncer) decide(ctx context.Context, inner, hash string, index int, base
 			if prev.Pre && len(live) > 0 {
 				showPre()
 			} else {
+				y.logHeld(key, inner, hash, index, prev, m, "not an offset change's worth of lines better", len(live), liveSecs)
 				y.keepRates(key, prev, m)
 			}
 			return true
 		}
 	}
-	if y.offSpeech(key, hash, index, base, prev, m, vtt, ref.Probe.Duration, complete) {
+	if off, note := y.offSpeech(key, hash, index, base, prev, m, vtt, ref.Probe.Duration, complete); off {
 		if _, ok := y.result(key, base); ok {
+			y.logHeld(key, inner, hash, index, prev, m, note, len(live), liveSecs)
 			y.keepRates(key, prev, m)
 			return true
 		}
@@ -1051,36 +1055,80 @@ const (
 )
 
 // offSpeech reports whether a re-fit of an accepted provisional fit moves lines without bringing
-// them closer to the speech heard: of the lines it moves that were heard, a larger share has to
-// start on the speech than as served. Scores weigh own-track windows and a whole file's lines, and
-// Westworld S02E04's subtitle, right at +0.06 s, was moved to +0.44 s for 18 minutes with 8-30 % of
-// its lines on the speech. Too few such lines heard: nothing to tell.
-func (y *syncer) offSpeech(key, hash string, index int, base []byte, prev *syncMeta, m syncMeta, vtt []byte, duration float64, complete bool) bool {
+// them closer to the speech heard. Scores weigh own-track windows and a whole file's lines, and
+// Westworld S02E04's subtitle, right at +0.06 s, was moved to +0.44 s for 18 minutes with 8-30 %
+// of its lines on the speech. When its offsets move a line by syncSpeechMove or more, those moves
+// are judged alone: of the lines they move that were heard, a larger share has to start on the
+// speech than at the served offsets. Judged with the line refinement as well, its moves of single
+// lines outweighed a step moved 83 s to its place (The Mentalist S04E16: 2.8 s early until the
+// final fit). Otherwise (or too few such lines heard) the lines served and the re-fit's are
+// compared so, refinement and all: a re-fit of the same offsets refined anew can put fewer lines
+// on the speech. Too few lines heard either way: nothing to tell.
+func (y *syncer) offSpeech(key, hash string, index int, base []byte, prev *syncMeta, m syncMeta, vtt []byte, duration float64, complete bool) (bool, string) {
 	if complete || prev == nil || !prev.Live || prev.Pre || !prev.fits() || !m.fits() {
-		return false
+		return false, ""
 	}
-	before := y.servedCues(key, base, prev)
-	after := vttCues(base)
+	speech := y.liveFile(hash, index).speechIn(0, duration)
+	judge := func(before, after []liveCue, what string) (held, told bool, note string) {
+		var was, now []liveCue
+		most := 0.0
+		for i := range before {
+			if d := math.Abs(after[i].start - before[i].start); d >= syncSpeechNear {
+				was, now = append(was, before[i]), append(now, after[i])
+				most = math.Max(most, d)
+			}
+		}
+		if most < syncSpeechMove {
+			return false, false, ""
+		}
+		rw, rn := residualOf(was, speech, 0, duration), residualOf(now, speech, 0, duration)
+		if min(rw.n, rn.n) < diagMinCues {
+			return false, false, ""
+		}
+		return rn.within <= rw.within, true, fmt.Sprintf("%s moves of up to %.1f s put no more heard lines on the speech: %.0f %% -> %.0f %% of %d",
+			what, most, 100*rw.within, 100*rn.within, rw.n)
+	}
+	var before, after []liveCue
+	for _, c := range vttCues(base) {
+		b, a := applyFit([]liveCue{c}, prev.Fit), applyFit([]liveCue{c}, m.Fit)
+		if len(b) == 1 && len(a) == 1 {
+			before, after = append(before, b[0]), append(after, a[0])
+		}
+	}
+	if held, told, note := judge(before, after, "its offsets'"); told {
+		return held, note
+	}
+	before = y.servedCues(key, base, prev)
+	after = vttCues(base)
 	if vtt != nil {
 		after = vttCues(vtt)
 	}
 	if len(before) != len(after) {
-		return false
+		return false, ""
 	}
-	var was, now []liveCue
-	most := 0.0
-	for i := range before {
-		if d := math.Abs(after[i].start - before[i].start); d >= syncSpeechNear {
-			was, now = append(was, before[i]), append(now, after[i])
-			most = math.Max(most, d)
-		}
+	held, _, note := judge(before, after, "its lines'")
+	return held, note
+}
+
+// logHeld logs a re-fit held back while a viewer is served the accepted one, once per offsets
+// proposed: a re-fit that would have moved the lines is otherwise invisible in the logs (The
+// Mentalist S04E16: right from 31 min on, served 3 s early until 37 min).
+func (y *syncer) logHeld(key, inner, hash string, index int, prev *syncMeta, m syncMeta, why string, liveWindows int, liveSecs float64) {
+	same := m
+	same.Live, same.Pre = prev.Live, prev.Pre
+	if !fitChanged(prev, same) {
+		return
 	}
-	if most < syncSpeechMove {
-		return false
+	if !y.watched(key) {
+		return
 	}
-	speech := y.liveFile(hash, index).speechIn(0, duration)
-	rw, rn := residualOf(was, speech, 0, duration), residualOf(now, speech, 0, duration)
-	return min(rw.n, rn.n) >= diagMinCues && rn.within <= rw.within
+	offs := offsetsText(m.Fit)
+	if last, ok := y.heldLogged.Load(key); ok && last.(string) == offs {
+		return
+	}
+	y.heldLogged.Store(key, offs)
+	log.Printf("subtitles: timing of %s on %s:%d: held a re-fit (%s): served %s, re-fit %s (%d windows, %d live, %.0f s played) id=%s",
+		shortSubID(inner), hash[:8], index, why, offsetsText(prev.Fit), offs, m.Windows, liveWindows, liveSecs, syncLogID(inner, hash, index))
 }
 
 const (

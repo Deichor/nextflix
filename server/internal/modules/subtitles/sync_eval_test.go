@@ -1149,6 +1149,8 @@ type syncFixture struct {
 	// Own: the cue tap's own-track windows (grid starts) of the Live stretches; Codec: the track's
 	Own   []fixtureWindow `json:"own,omitempty"`
 	Codec string          `json:"codec,omitempty"`
+	// Check: the own-track check as the file's live windows kept it (it turns the line refinement on)
+	Check *ownSaved `json:"check,omitempty"`
 }
 
 // fixtureWindow is a read window as runs of frames [from, to) where a cue shows; the third
