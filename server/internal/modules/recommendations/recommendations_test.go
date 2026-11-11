@@ -456,3 +456,22 @@ func TestInvalidateIsNotServedStale(t *testing.T) {
 		t.Fatalf("invalidated rows served: %v", ids(r.Rows[0].Items))
 	}
 }
+
+func TestNewRowsWarmTheirCardArt(t *testing.T) {
+	f := &fakeCatalog{trending: movies(700, 25)}
+	s := newTestService(f, nil)
+	var warmed []string
+	s.SetArtWarmer(func(paths []string) { warmed = append(warmed, paths...) })
+
+	resp, err := s.For(1, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warmed) != warmCardsPerRow || warmed[0] != resp.Rows[0].Items[0].PosterPath {
+		t.Fatalf("warmed %v", warmed)
+	}
+	s.For(1, "en")
+	if len(warmed) != warmCardsPerRow {
+		t.Fatalf("cached rows warmed again: %d paths", len(warmed))
+	}
+}

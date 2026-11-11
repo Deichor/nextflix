@@ -18,6 +18,8 @@ interface TitleCardProps {
   variant?: CardVariant;
   /** false for titles that are not released yet (Coming Soon) */
   playable?: boolean;
+  /** Loads the image right away instead of waiting for the row's viewport checks */
+  eager?: boolean;
 }
 
 export const CARD_WIDTH: Record<CardVariant, string> = {
@@ -31,7 +33,7 @@ export const CARD_SIZES: Record<CardVariant, string> = {
   poster: '(min-width: 1280px) 11.2vw, (min-width: 1024px) 13vw, (min-width: 768px) 17vw, (min-width: 640px) 22vw, 30vw',
 };
 
-function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardProps) {
+function TitleCard({ item, variant = 'backdrop', playable = true, eager = false }: TitleCardProps) {
   const t = useT();
   const f = useFormat();
   const { play, openInfo } = useTitleActions();
@@ -69,6 +71,7 @@ function TitleCard({ item, variant = 'backdrop', playable = true }: TitleCardPro
               kind={isPoster ? 'poster' : 'backdrop'}
               sizes={CARD_SIZES[variant]}
               alt={item.title}
+              priority={eager ? 'eager' : 'lazy'}
               placeholder="none"
               onError={() => setImgFailed(true)}
             />

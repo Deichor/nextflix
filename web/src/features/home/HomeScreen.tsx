@@ -40,6 +40,8 @@ const PLAYER_PRELOAD_MS = 3000;
 // The server fills sections it could not answer within its deadline in the background
 const HOME_RETRY_MS = 10000;
 const HOME_RETRIES = 2;
+// Rows under the billboard that are on screen at launch skip the lazy image checks
+const EAGER_ROWS = 2;
 
 const titleKey = (t: TitleItem) => `${t.media_type}-${t.id}`;
 
@@ -158,13 +160,20 @@ export default function Home() {
             {recommendations === null && !!profile ? (
               <Row title="" items={[]} loading />
             ) : (
-              (recommendations || []).map(r => (
-                <Row key={r.id} title={recommendationTitle(t, r)} items={r.items} />
+              (recommendations || []).map((r, i) => (
+                <Row key={r.id} title={recommendationTitle(t, r)} items={r.items} eager={i < EAGER_ROWS} />
               ))
             )}
           </ErrorBoundary>
 
-          {!serverTrending && <Row title={t('home.trendingNow')} items={trending} loading={loading} />}
+          {!serverTrending && (
+            <Row
+              title={t('home.trendingNow')}
+              items={trending}
+              loading={loading}
+              eager={(recommendations?.length ?? 0) < EAGER_ROWS}
+            />
+          )}
           <NearRow title={t('home.top10TrMovies')} items={data?.top10Movies ?? NO_TITLES} loading={loading} ranked />
           <NearRow title={t('home.popularMovies')} items={data?.popular ?? NO_TITLES} loading={loading} />
           <NearRow title={t('home.top10TrTv')} items={data?.top10Tv ?? NO_TITLES} loading={loading} ranked />
