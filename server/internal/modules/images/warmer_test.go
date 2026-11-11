@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"nextflix/internal/platform/tmdb"
 )
@@ -48,5 +49,29 @@ func TestHomeKeysCoverTop10AndComingSoon(t *testing.T) {
 		if keys[order[i-1]] >= keys[order[i]] {
 			t.Errorf("%s should come before %s", order[i-1], order[i])
 		}
+	}
+}
+
+func TestWarmCardsFetchesCardSizes(t *testing.T) {
+	up := &fakeTMDB{}
+	s, _ := newTestService(t, up, 1<<20)
+
+	s.WarmCards([]string{"/ok1.jpg", "/ok1.jpg", "", "https://image.tmdb.org/t/p/w300/ok2.jpg"})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for _, size := range []string{"w300", "w500", "w780"} {
+		k := key{size: size, file: "ok1.jpg"}
+		for {
+			if _, ok := s.store.stat(k); ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s not warmed", k)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if n := up.hits.Load(); n != 3 {
+		t.Errorf("upstream hits = %d, want 3 (one per size, duplicates and bad paths skipped)", n)
 	}
 }

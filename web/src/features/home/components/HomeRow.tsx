@@ -16,10 +16,15 @@ export interface RowProps {
   ranked?: boolean;
   /** Shows placeholder cards instead of items */
   loading?: boolean;
+  /** A row on screen at launch: its first cards load their images at once */
+  eager?: boolean;
 }
 
+// About one screen of cards on a wide display
+const EAGER_CARDS = 8;
+
 // Netflix-style horizontal row with chevron paging on hover
-export default function Row({ title, items, variant = 'backdrop', playable = true, loading = false, ranked = false }: RowProps) {
+export default function Row({ title, items, variant = 'backdrop', playable = true, loading = false, ranked = false, eager = false }: RowProps) {
   const t = useT();
   const cardVariant: CardVariant = ranked ? 'poster' : variant;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -93,10 +98,10 @@ export default function Row({ title, items, variant = 'backdrop', playable = tru
                       >
                         {item.rank ?? i + 1}
                       </span>
-                      <TitleCard item={item} variant="poster" playable={playable} />
+                      <TitleCard item={item} variant="poster" playable={playable} eager={eager && i < EAGER_CARDS} />
                     </div>
                   ) : (
-                    <TitleCard key={`${item.media_type}-${item.id}`} item={item} variant={variant} playable={playable} />
+                    <TitleCard key={`${item.media_type}-${item.id}`} item={item} variant={variant} playable={playable} eager={eager && i < EAGER_CARDS} />
                   )
                 )}
           </ImageRowGate>

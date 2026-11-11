@@ -38,6 +38,9 @@ type Service struct {
 
 	exposures ExposureStore // nil = plain ranking, see EnableRotation
 	noted     map[uint]notedRows
+
+	warmArt func(paths []string) // nil = no image warm-up, see SetArtWarmer
+	saveReq chan struct{}        // nil = the cache is not saved, see Persist
 }
 
 // notedRows is the answer last counted as shown for a profile.
@@ -83,6 +86,31 @@ func (s *Service) SetSimilar(src SimilarSource) { s.similar = src }
 // SetProfiles makes For and Surprise refuse ids of profiles that do not exist. Called once at startup.
 func (s *Service) SetProfiles(check ProfileChecker) { s.profiles = check }
 
+// SetArtWarmer gets the card images ("/abc.jpg") of each new set of rows, so the image cache can
+// fetch them before they are shown. warm must not block. Called once at startup.
+func (s *Service) SetArtWarmer(warm func(paths []string)) { s.warmArt = warm }
+
+// Cards per row whose images are warmed (about one screen and the next page)
+const warmCardsPerRow = 12
+
+func cardArt(resp *Response) []string {
+	var paths []string
+	for _, row := range resp.Rows {
+		for i, it := range row.Items {
+			if i == warmCardsPerRow {
+				break
+			}
+			// Same pick as the home card: backdrop, else poster
+			if p := it.BackdropPath; p != "" {
+				paths = append(paths, p)
+			} else if it.PosterPath != "" {
+				paths = append(paths, it.PosterPath)
+			}
+		}
+	}
+	return paths
+}
+
 // ErrUnknownProfile is returned for a profile id that does not exist.
 var ErrUnknownProfile = errors.New("unknown profile")
 
@@ -110,6 +138,7 @@ func (s *Service) Invalidate(profileID uint) {
 	}
 	s.gen[profileID]++
 	s.mu.Unlock()
+	s.requestSave()
 	s.invalidateSurprise(profileID)
 }
 
@@ -180,6 +209,7 @@ func (s *Service) complete(key cacheKey, cl *call, background bool) {
 				ttl = partialTTL
 			}
 			s.cache[key] = cached{resp: cl.resp, expires: s.now().Add(ttl)}
+			s.requestSave()
 		}
 		s.mu.Unlock()
 		close(cl.done)
@@ -192,6 +222,9 @@ func (s *Service) complete(key cacheKey, cl *call, background bool) {
 		}
 	}
 	cl.resp, cl.partial, cl.err = s.compute(key.profile, key.lang)
+	if cl.err == nil && s.warmArt != nil {
+		s.warmArt(cardArt(cl.resp))
+	}
 	if background && cl.err != nil {
 		log.Printf("recommendations: background compute for profile %d: %v", key.profile, cl.err)
 	}

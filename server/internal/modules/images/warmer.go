@@ -114,6 +114,42 @@ send:
 		fetched, failed, len(keys)-len(missing), len(keys), time.Since(start).Round(time.Second))
 }
 
+// WarmCards fetches the backdrop card sizes of paths ("/abc.jpg") in the background, for rows the
+// warmer does not know (personal recommendations). It returns at once.
+func (s *Service) WarmCards(paths []string) {
+	if s.store == nil {
+		return
+	}
+	var keys []key
+	seen := map[key]bool{}
+	// Size by size: the common 1x size is ready first
+	for _, size := range backdropCardSizes[1:] {
+		for _, p := range paths {
+			if k, ok := keyFromTMDBPath(size, p); ok && !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	ctx := s.baseCtx
+	go func() {
+		for _, k := range keys {
+			if _, ok := s.store.stat(k); ok || s.negative(k) != nil {
+				continue
+			}
+			select {
+			case s.cardWarm <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			go func(k key) {
+				defer func() { <-s.cardWarm }()
+				_, _, _ = s.ensure(ctx, k)
+			}(k)
+		}
+	}()
+}
+
 // homeKeys lists the images of the home page in tm's language in roughly the order they appear on
 // screen: billboard, trending, Top 10, cards, coming soon, genre rows.
 func (s *Service) homeKeys(tm *tmdb.Client) []key {

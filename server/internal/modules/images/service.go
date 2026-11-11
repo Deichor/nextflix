@@ -78,6 +78,9 @@ type Service struct {
 	client *upstream.Client
 	slots  chan struct{}
 
+	// Downloads of WarmCards at once, across calls
+	cardWarm chan struct{}
+
 	flightMu sync.Mutex
 	flight   map[key]*call
 
@@ -118,14 +121,15 @@ func NewService(cfg Config, tm *tmdb.Client) *Service {
 	}
 
 	return &Service{
-		cfg:     cfg,
-		store:   st,
-		tm:      tm,
-		client:  newUpstream(),
-		slots:   make(chan struct{}, maxDownloads),
-		flight:  map[key]*call{},
-		neg:     map[key]negative{},
-		baseCtx: context.Background(),
+		cfg:      cfg,
+		store:    st,
+		tm:       tm,
+		client:   newUpstream(),
+		slots:    make(chan struct{}, maxDownloads),
+		cardWarm: make(chan struct{}, warmParallel),
+		flight:   map[key]*call{},
+		neg:      map[key]negative{},
+		baseCtx:  context.Background(),
 	}
 }
 

@@ -104,6 +104,7 @@ func run() error {
 	ratingsSvc.OnChange(recommendationsSvc.Invalidate)
 	recommendationsSvc.SetHistory(watchHistory(progressSvc))
 	recommendationsSvc.EnableRotation(recommendations.NewExposureStore(db))
+	recommendationsSvc.Persist(ctx, envOr("RECOMMENDATIONS_CACHE_DIR", "/app/data"))
 
 	top10Svc := top10.NewService(db, top10.NewTMDBSearcher(tm), top10.Config{Localizer: top10.NewTMDBLocalizer(tm)})
 	top10Svc.Start(ctx)
@@ -132,6 +133,7 @@ func run() error {
 		Top10:     top10Art(top10Svc),
 	}, tm)
 	imagesSvc.Start(ctx)
+	recommendationsSvc.SetArtWarmer(imagesSvc.WarmCards)
 
 	providersSvc := providers.NewService(tm)
 
