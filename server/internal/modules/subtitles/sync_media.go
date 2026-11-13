@@ -265,7 +265,7 @@ func ffmpegSubsWindow(ctx context.Context, url string, p mediaProbe, start, leng
 }
 
 // readSubsWindow reads the cues of the own subtitle track in the window; ok when there are
-// enough. A picture track is copied into framecrc (packet times and sizes, see pictureCues).
+// enough. A picture track is copied as sup (its display sets and their segments, see supSets).
 func readSubsWindow(ctx context.Context, url string, p mediaProbe, start, length float64) (refWindow, bool, error) {
 	if p.OwnSub < 0 {
 		return refWindow{}, false, nil
@@ -276,7 +276,7 @@ func readSubsWindow(ctx context.Context, url string, p mediaProbe, start, length
 		"-ss", strconv.FormatFloat(start, 'f', 3, 64), "-copyts", "-start_at_zero"}, url)
 	to := strconv.FormatFloat(start+length, 'f', 3, 64)
 	if p.picture() {
-		args = append(args, "-map", fmt.Sprintf("0:%d", p.OwnSub), "-c", "copy", "-to", to, "-f", "framecrc", "pipe:1")
+		args = append(args, "-map", fmt.Sprintf("0:%d", p.OwnSub), "-c", "copy", "-to", to, "-f", "sup", "pipe:1")
 	} else {
 		args = append(args, "-map", fmt.Sprintf("0:%d", p.OwnSub), "-c:s", "webvtt", "-to", to, "-f", "webvtt", "pipe:1")
 	}
@@ -286,28 +286,73 @@ func readSubsWindow(ctx context.Context, url string, p mediaProbe, start, length
 	}
 	// also when the cap ended the read: the window's lines are in
 	if p.picture() {
-		w, ok := spanWindow(pictureCues(framePackets(out), start+length), start, int(length*syncRate))
+		w, ok := spanWindow(pictureCues(supSets(out), start+length), start, int(length*syncRate))
 		return w, ok, nil
 	}
 	w, ok := cueWindow(out, start, int(length*syncRate))
 	return w, ok, nil
 }
 
-// PGS display sets (one packet each in Matroska): up to pgsClear bytes one clears the screen;
-// while a cue shows, one below pgsUpdate bytes only changes it (palette or position). A cue the
-// next set ends within pgsMinLine is no line: steps of a fade, one read as a clear and the next
-// as a picture (real lines show 0.9 s and more: The Mentalist S03E01 / S03E02, 1842 lines). The
-// play streams' cue tap (streaming/cuetap.go) reads them by the same rule.
+// PGS display sets (one packet each in Matroska): one whose composition shows no object clears
+// the screen; while a cue shows, one that carries a picture (an object segment) replaces it and
+// one without only changes it (palette or position). Known by size alone (framecrc, the play
+// streams' cue tap in streaming/cuetap.go), up to pgsClear bytes clear and below pgsUpdate bytes
+// change: a short line with a small palette that directly replaces the one showing is missed
+// there, and a small palette's fade step reads as a clear. A cue the next set ends within
+// pgsMinLine is no line: steps of a fade, one read as a clear and the next as a picture (real
+// lines show 0.9 s and more: The Mentalist S03E01 / S03E02, 1842 lines).
 const (
 	pgsClear   = 64
 	pgsUpdate  = 1500
 	pgsMinLine = 0.25
 )
 
-// framePacket is a packet of stream 0 of a framecrc output (seconds, bytes).
+// framePacket is a display set of a picture track or a packet of one (seconds, bytes). read:
+// its segments were read: object says whether it carries a picture, empty whether its
+// composition shows nothing (it clears the screen).
 type framePacket struct {
-	at   float64
-	size int
+	at            float64
+	size          int
+	read          bool
+	object, empty bool
+}
+
+// PGS segment types
+const (
+	pgsODS = 0x15 // object (the picture)
+	pgsPCS = 0x16 // composition, starts a display set
+	pgsEND = 0x80
+)
+
+// supSets reads ffmpeg's sup output (per segment "PG", pts and dts at 90 kHz, type, length) into
+// display sets, from a composition to its end, sized like a Matroska packet (segments without
+// the 10 byte headers). A set the output cap cut off is left out.
+func supSets(out []byte) []framePacket {
+	var ps []framePacket
+	var cur *framePacket
+	for i := 0; i+13 <= len(out) && out[i] == 'P' && out[i+1] == 'G'; {
+		typ, n := out[i+10], int(binary.BigEndian.Uint16(out[i+11:]))
+		if i+13+n > len(out) {
+			break
+		}
+		if cur == nil || typ == pgsPCS {
+			if cur != nil {
+				ps = append(ps, *cur) // a set without its end
+			}
+			cur = &framePacket{at: float64(binary.BigEndian.Uint32(out[i+2:])) / 90000, read: true}
+		}
+		cur.size += 3 + n
+		cur.object = cur.object || typ == pgsODS
+		if typ == pgsPCS && n > 10 {
+			cur.empty = out[i+13+10] == 0 // its composition objects
+		}
+		if typ == pgsEND {
+			ps = append(ps, *cur)
+			cur = nil
+		}
+		i += 13 + n
+	}
+	return ps
 }
 
 // framePackets reads the stream 0 packets of a framecrc output ("#tb 0: 1/1000" sets the time
@@ -334,7 +379,7 @@ func framePackets(out []byte) []framePacket {
 		pts, err1 := strconv.ParseInt(strings.TrimSpace(f[2]), 10, 64)
 		size, err2 := strconv.Atoi(strings.TrimSpace(f[4]))
 		if err1 == nil && err2 == nil && pts != math.MinInt64 {
-			ps = append(ps, framePacket{float64(pts) * tb, size})
+			ps = append(ps, framePacket{at: float64(pts) * tb, size: size})
 		}
 	}
 	return ps
@@ -348,17 +393,22 @@ func pictureCues(ps []framePacket, end float64) []span {
 	var out []span
 	open := math.NaN()
 	for i := 0; i < len(ps); {
-		at, size := ps[i].at, 0
+		at, size, read, object, empty := ps[i].at, 0, false, false, true
 		for ; i < len(ps) && ps[i].at == at; i++ {
 			size += ps[i].size
+			read, object, empty = read || ps[i].read, object || ps[i].object, empty && ps[i].empty
 		}
-		if !math.IsNaN(open) && (size <= pgsClear || size >= pgsUpdate) {
+		clears, replaces := size <= pgsClear, size >= pgsUpdate
+		if read {
+			clears, replaces = empty, object && !empty
+		}
+		if !math.IsNaN(open) && (clears || replaces) {
 			if at-open >= pgsMinLine {
 				out = append(out, span{open, at})
 			}
 			open = math.NaN()
 		}
-		if size > pgsClear && math.IsNaN(open) {
+		if !clears && math.IsNaN(open) {
 			open = at
 		}
 	}

@@ -79,6 +79,8 @@ type tsCueRule struct {
 // larger (The Mentalist S03E02 d3g and Night of the Living Dead 1968 BluRay: clears 30 bytes,
 // pictures 1724-65013). A "line" shown under 0.25 s is steps of a fade, one read as a clear and
 // the next as a picture (real lines show 0.9 s and more: The Mentalist S03E01 / S03E02).
+// framecrc gives sizes only: a short line with a small palette that directly replaces the one
+// showing reads as a change here (the timing's window reads take the segments, sup).
 var tsPGSRule = tsCueRule{empty: 64, picture: true, update: 1500, min: 0.25}
 
 // cueTracks lists the subtitle tracks of a probed file whose packets give cue times (text and
