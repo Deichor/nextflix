@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"nextflix/internal/platform/dnsguard"
 )
 
 // Options configure a Client; zero values take the defaults.
@@ -153,17 +155,17 @@ func newTransport(o Options, keepAlive bool) *http.Transport {
 
 // dialer dials IPv4 only when the host has no IPv6 route (Docker bridges usually have
 // none), so no time goes to AAAA addresses that cannot work.
-func dialer(timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+func dialer(timeout time.Duration) dnsguard.DialFunc {
 	d := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
 	if IPv6Routable() {
-		return d.DialContext
+		return dnsguard.Wrap(d.DialContext)
 	}
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return dnsguard.Wrap(func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if network == "tcp" {
 			network = "tcp4"
 		}
 		return d.DialContext(ctx, network, addr)
-	}
+	})
 }
 
 var ipv6Once = sync.OnceValue(func() bool {
