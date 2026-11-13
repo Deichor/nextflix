@@ -29,6 +29,7 @@ import (
 	"nextflix/internal/platform/config"
 	"nextflix/internal/platform/database"
 	"nextflix/internal/platform/daylog"
+	"nextflix/internal/platform/dnsguard"
 	"nextflix/internal/platform/httpserver"
 	"nextflix/internal/platform/netcheck"
 	"nextflix/internal/platform/tmdb"
@@ -50,6 +51,8 @@ func run() error {
 	keepTimingLog(playbackLogs)
 
 	cfg := config.Load()
+	// A DNS server that blocks a public name (127.0.0.1 answers) is bypassed over DoH
+	dnsguard.InstallDefault()
 
 	db, err := database.Open(cfg.DatabaseURL)
 	if err != nil {

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nextflix/internal/platform/dnsguard"
 )
 
 const (
@@ -97,7 +99,7 @@ func NewHTTPClient() *http.Client {
 	dialer := &lastGoodDialer{d: &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}, last: map[string]string{}}
 	return &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
+		DialContext:           dnsguard.Wrap(dialer.DialContext),
 		TLSHandshakeTimeout:   6 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{}, // no HTTP/2

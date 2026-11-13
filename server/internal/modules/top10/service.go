@@ -15,6 +15,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"nextflix/internal/platform/dnsguard"
 )
 
 const (
@@ -75,7 +77,7 @@ func NewService(db *gorm.DB, search Searcher, cfg Config) *Service {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+			DialContext:           dnsguard.Wrap((&net.Dialer{Timeout: 15 * time.Second}).DialContext),
 			TLSHandshakeTimeout:   15 * time.Second,
 			ResponseHeaderTimeout: 90 * time.Second,
 		}}
